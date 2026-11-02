@@ -13,11 +13,11 @@ remains an advanced option.
 
 ## Install on a Mac
 
-Install GitHub CLI, then clone the public source:
+Install Git, then clone the public source:
 
 ```sh
-gh repo clone microsoft/amplifier-constellation-instance
-cd agent-instance
+git clone https://github.com/microsoft/amplifier-constellation-instance.git
+cd amplifier-constellation-instance
 ./install-macos.sh --name "My agent"
 ```
 
@@ -41,8 +41,8 @@ the owning Mac account's short username and password. macOS uses its existing
 Use native PowerShell under the account that will own the agent:
 
 ```powershell
-gh repo clone microsoft/amplifier-constellation-instance
-cd agent-instance
+git clone https://github.com/microsoft/amplifier-constellation-instance.git
+cd amplifier-constellation-instance
 .\install-windows.ps1 -Name 'My agent'
 ```
 
@@ -183,30 +183,16 @@ web mode is claimed by this implementation.
 
 ## Native validation
 
-The 0.11.0 Windows x64 disposable installation used the real native installer,
-Constellation 0.7.0, trusted HTTPS and standard ACP attach. Native startup-job
-update/rollback preserved the individual's data. Checkpoint tests with real
-Rust binaries passed on Linux ARM64, Apple Silicon macOS and Windows x64;
-the Mac checks also cover system directory aliases and atomic publication.
-See [validation.md](validation.md) for exact versions, checks and limitations.
+The repository's CI checks native executable and process boundaries on Linux,
+macOS, and Windows. [Validation](validation.md) gives reproducible commands and
+links to results for the published source. Real account sign-in, startup jobs,
+and provider access also need an installation check on the target machine.
 
-The current Constellation 0.7.0 runtime lock contains Linux x64/ARM64, Mac ARM64
-and Windows x64 assets. Other architectures need an explicitly supplied native
-build. Packaging configuration is not native execution evidence: Intel Mac and
-Windows ARM64 are not claimed as verified targets. These local validation runs
-do not establish that every private release asset is currently downloadable.
-
-A subsequent 0.7.2 check migrated an existing individual from Linux to an Apple
-Silicon Mac using an optimized native build and the regular native installer.
-Its identity, original trust authority, profiles, work files, and three saved
-provider conversations were retained. All three conversations replayed through
-ACP on the Mac. A real model turn ran a local Python tool, wrote an independently
-verified Darwin ARM64 result in its Mac workspace, and recalled a check value
-after reconnecting. Its Slack adapter remained on Linux and reconnected through
-ordinary ACP; fleet management and strict HTTPS checks passed. The service runs
-under launchd in the owner's GUI session. Successful owner-password sign-in is
-still unverified, and this locally built binary is not signed or notarized for
-distribution. These results do not extend the Windows model-execution claim.
+The pinned Constellation 0.7.0 runtime supports Linux x64/ARM64, Mac ARM64,
+and Windows x64 release assets. Other architectures need an explicitly supplied
+native build. Intel Mac and Windows ARM64 runtime assets are not supplied.
+Mac binaries are not signed or notarized for distribution. CI fixture success
+does not establish live provider access or every machine's account policy.
 
 Platform references: [Apple LaunchAgents](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html),
 [Windows account logon](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-logonuserw),

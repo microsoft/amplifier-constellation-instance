@@ -17,6 +17,48 @@ ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("provision", ROOT / "scripts/provision-backend.py")
 provision = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(provision)
+native_spec = importlib.util.spec_from_file_location("native_provision", ROOT / "scripts/provision-native.py")
+native = importlib.util.module_from_spec(native_spec)
+native_spec.loader.exec_module(native)
+
+
+class NativeDownloadTests(unittest.TestCase):
+    def fixture(self):
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            entry = tarfile.TarInfo("agent-runtime")
+            entry.size = len(b"fixture")
+            tar.addfile(entry, io.BytesIO(b"fixture"))
+        data = archive.getvalue()
+        lock = {"repository": "example/runtime", "version": "0.7.0", "assets": [{
+            "platform": "linux-aarch64", "asset": "runtime.tar.gz",
+            "asset_sha256": hashlib.sha256(data).hexdigest(),
+            "binary_sha256": hashlib.sha256(b"fixture").hexdigest(),
+        }]}
+        return data, lock
+
+    def test_public_release_does_not_require_github_cli_authentication(self):
+        data, lock = self.fixture()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(native, "platform_key", return_value="linux-aarch64"), \
+                mock.patch.object(native.shutil, "which", return_value="gh"), \
+                mock.patch.object(native.subprocess, "run") as command, \
+                mock.patch.object(native.urllib.request, "urlopen", return_value=io.BytesIO(data)):
+            binary = native.obtain(lock, Path(directory), "agent-runtime")
+            self.assertEqual(binary.read_bytes(), b"fixture")
+            command.assert_not_called()
+
+    def test_authenticated_fallback_still_requires_the_pinned_checksum(self):
+        _, lock = self.fixture()
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(native, "platform_key", return_value="linux-aarch64"), \
+                mock.patch.object(native.shutil, "which", return_value="gh"), \
+                mock.patch.object(native.urllib.request, "urlopen", side_effect=native.urllib.error.HTTPError(
+                    "https://github.com/example/runtime", 404, "Not found", {}, None)), \
+                mock.patch.object(native.subprocess, "run", side_effect=lambda *a, **kw:
+                    (Path(directory) / "runtime.tar.gz").write_bytes(b"corrupt")):
+            with self.assertRaisesRegex(ValueError, "archive checksum mismatch"):
+                native.obtain(lock, Path(directory), "agent-runtime")
 
 
 class ProvisioningTests(unittest.TestCase):

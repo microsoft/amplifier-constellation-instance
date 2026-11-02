@@ -8,20 +8,19 @@ Native setup does not copy the owner's existing provider account. Configure a pr
 
 This installer targets Debian/Ubuntu Linux with systemd and PAM. The web interface can be used from any reachable browser. Native Windows/macOS service installation, account authentication and update/rollback have their own [platform installers](native-platforms.md).
 
-## Private GitHub installation
+## Install from public source
 
-The source is public at `microsoft/amplifier-constellation-instance`. The bootstrap below uses GitHub CLI; cloning the same URL with Git also works.
+The source and pinned runtime downloads are public. The default installation needs Git and network access; it does not require a GitHub account.
 
 On Debian/Ubuntu, run this as the OS user who will own the agent, **without putting sudo around the whole block**:
 
 ```bash
-if ! command -v gh >/dev/null || ! command -v git >/dev/null; then
+if ! command -v git >/dev/null; then
   sudo apt-get update
-  sudo apt-get install -y gh git
+  sudo apt-get install -y git
 fi
-gh auth status --hostname github.com || gh auth login --hostname github.com
 AGENT_INSTALL_SOURCE="$(mktemp -d)"
-gh repo clone microsoft/amplifier-constellation-instance "$AGENT_INSTALL_SOURCE/source" -- --depth 1
+git clone https://github.com/microsoft/amplifier-constellation-instance.git "$AGENT_INSTALL_SOURCE/source"
 bash "$AGENT_INSTALL_SOURCE/source/install.sh" --from "$AGENT_INSTALL_SOURCE/source" --name "My agent"
 ```
 
@@ -35,7 +34,7 @@ Account readiness indicates configured credential metadata. It does not claim th
 
 ## Default runtime and account recovery
 
-Agent Instance **0.11.0** pins Constellation **0.7.0**. Its platform archives and binary hashes are recorded in `scripts/native-runtime-lock.json` and embedded in the instance executable. Provisioning verifies both the downloaded archive and selected binary before use. Private GitHub releases require authenticated GitHub access. Use `--runtime-binary /path/to/agent-runtime` for a verified local build. Every installation owns its runtime files, provider state and history; updating one agent does not update another.
+Agent Instance **0.11.0** pins Constellation **0.7.0**. Its platform archives and binary hashes are recorded in `scripts/native-runtime-lock.json` and embedded in the instance executable. Provisioning verifies both the downloaded archive and selected binary before use. The default runtime is downloaded directly without GitHub sign-in. Authenticated GitHub CLI remains a fallback for explicitly configured private releases. Use `--runtime-binary /path/to/agent-runtime` for a verified local build. Every installation owns its runtime files, provider state and history; updating one agent does not update another.
 
 For an initialized instance that lacks the default backend:
 

@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -78,23 +79,25 @@ def obtain(lock, directory, name):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) or '/' in asset or '\\' in asset:
         raise ValueError('Invalid compiled release lock')
     archive = directory / asset
-    if shutil.which('gh'):
-        # gh supplies private-repository authentication without exposing a token.
+    url = f'https://github.com/{repository}/releases/download/{tag}/{asset}'
+    try:
+        # Public installation must also work when gh exists but is not signed in.
+        with urllib.request.urlopen(url, timeout=60) as response, archive.open('xb') as out:
+            total = 0
+            while chunk := response.read(1024 * 1024):
+                total += len(chunk)
+                if total > 256 * 1024 * 1024:
+                    raise ValueError('Runtime download exceeds its size limit')
+                out.write(chunk)
+    except urllib.error.HTTPError as error:
+        if error.code not in (401, 403, 404) or not shutil.which('gh'):
+            raise ValueError('Could not download the pinned runtime. Retry, or supply --runtime-binary.') from error
+        # Retain authenticated access for an explicitly configured private release.
         subprocess.run(['gh', 'release', 'download', tag, '--repo', repository,
                         '--pattern', asset, '--output', str(archive)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=240)
-    else:
-        url = f'https://github.com/{repository}/releases/download/{tag}/{asset}'
-        try:
-            with urllib.request.urlopen(url, timeout=60) as response, archive.open('xb') as out:
-                total = 0
-                while chunk := response.read(1024 * 1024):
-                    total += len(chunk)
-                    if total > 256 * 1024 * 1024:
-                        raise ValueError('Runtime download exceeds its size limit')
-                    out.write(chunk)
-        except Exception as error:
-            raise ValueError('Could not download the pinned runtime. For private repos, sign in with GitHub CLI, or supply --runtime-binary.') from error
+    if archive.stat().st_size > 256 * 1024 * 1024:
+        raise ValueError('Runtime download exceeds its size limit')
     if digest(archive) != release['asset_sha256']:
         raise ValueError('Runtime archive checksum mismatch')
     binary = directory / name
