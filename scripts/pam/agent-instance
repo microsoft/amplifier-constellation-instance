@@ -1,0 +1,4 @@
+# PAM policy for agent-instance. Keep host password/account policy in force.
+# The service authenticates only its installing OS user.
+@include common-auth
+@include common-account

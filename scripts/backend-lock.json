@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "bundle": "codex-0.165.0-acp-2.5.0-node-22.23.2",
+  "codex_version": "0.165.0",
+  "acp_version": "2.5.0",
+  "node_version": "22.23.2",
+  "acp": {
+    "url": "https://registry.npmjs.org/@agentclientprotocol/codex-acp/-/codex-acp-2.5.0.tgz",
+    "integrity": "sha512-7e/4OhJwpvSTqsjiokoVYRV7O1XGem1CAsQgO1opmGYbRD5LvmydwDlJrldzQYO5TcPWueGzQ2Jdvyvp6l3qDw=="
+  },
+  "platforms": {
+    "linux-arm64": {
+      "target": "aarch64-unknown-linux-musl",
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.gz",
+        "integrity": "sha256-013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30"
+      },
+      "codex": {
+        "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.165.0-linux-arm64.tgz",
+        "integrity": "sha512-qdrYdcabxn3biX2qTtb/GuuMk20ZAQYxcmY7lHcp6CkAzyqsXbL0vIJFwWJr83/pNM+CUZH4YaTPns2kN7ZIfA=="
+      }
+    },
+    "linux-x64": {
+      "target": "x86_64-unknown-linux-musl",
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.gz",
+        "integrity": "sha256-b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a"
+      },
+      "codex": {
+        "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.165.0-linux-x64.tgz",
+        "integrity": "sha512-FotDc7bVHwaommtsdDP8PPrH0a5IwC/t8H/LhdEcH4EBqgeYFRCtptiHcuwgvNRCLbTbOyFE/Ur6GzYCljgaSQ=="
+      }
+    },
+    "darwin-arm64": {
+      "target": "aarch64-apple-darwin",
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-arm64.tar.gz",
+        "integrity": "sha256-61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6"
+      },
+      "codex": {
+        "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.165.0-darwin-arm64.tgz",
+        "integrity": "sha512-MQ/Z0Xw9v08DHunnzodi9NwA844MI3+RO72IM8o0Lr/UemnlEoBMCxpojstxX6mf5ZQwUrIg0yekDd9cFZ29hg=="
+      }
+    },
+    "darwin-x64": {
+      "target": "x86_64-apple-darwin",
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-x64.tar.gz",
+        "integrity": "sha256-58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee8729fb026"
+      },
+      "codex": {
+        "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.165.0-darwin-x64.tgz",
+        "integrity": "sha512-mxMtlntnUq0Xb8rjvHph3Ws045Q82BLbeKRRdkN70Es9mho/D/Blh1ShZvzQOnsoeVw8lbV9fOLjW1vncoufKQ=="
+      }
+    },
+    "win32-x64": {
+      "target": "x86_64-pc-windows-msvc",
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip",
+        "integrity": "sha256-1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97"
+      },
+      "codex": {
+        "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.165.0-win32-x64.tgz",
+        "integrity": "sha512-f5LMyugPSnAovnTnR1N+SNHSTfWZ+ym5A4H3zZHz/zhuMGMGZD8IxUdlSUlEbiENYyPXrJ8G3Jh+CLyzTfQB6Q=="
+      }
+    },
+    "win32-arm64": {
+      "target": "aarch64-pc-windows-msvc",
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-arm64.zip",
+        "integrity": "sha256-fec025a6da31757e3b6af84c5a1628e9d38442ca99a2161091d78f2fcfa35ef3"
+      },
+      "codex": {
+        "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.165.0-win32-arm64.tgz",
+        "integrity": "sha512-6HLE44VQECPITRZN85NCV/w268Fw/083VKe+5ReOKO9wlL6Kyq1j1mLP2vZ3rmr0goG/HOykrJpZZT0aUD1ntg=="
+      }
+    }
+  }
+}

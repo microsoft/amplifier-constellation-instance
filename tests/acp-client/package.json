@@ -1,0 +1,7 @@
+{
+  "name": "agent-instance-acp-interoperability",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node official-client.mjs" },
+  "dependencies": { "@agentclientprotocol/sdk": "2.2.0", "zod": "4.4.3" }
+}

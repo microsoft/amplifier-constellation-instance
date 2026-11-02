@@ -1,0 +1,30 @@
+{
+  "version": "0.7.0",
+  "assets": [
+    {
+      "platform": "linux-aarch64",
+      "binary_sha256": "3071304274a4d5cbb3c0d0c7893b3226e79b82db307f363cf32fceb476119890",
+      "asset": "agent-runtime-0.7.0-linux-aarch64.tar.gz",
+      "asset_sha256": "77a3c3e9d2376df6e60d3d55befa26d34429cc5a3697c77bcb928832f9d5cfba"
+    },
+    {
+      "platform": "linux-x86_64",
+      "binary_sha256": "2757dcbdff83b0cebdf821c2404a0c50f356e530cbfe6ec5f1493b50531b6c0a",
+      "asset": "agent-runtime-0.7.0-linux-x86_64.tar.gz",
+      "asset_sha256": "2876794e7dc9d538f5d8f096ba388a791f4edc3f6f1a3bedd8463a55802d0caf"
+    },
+    {
+      "platform": "macos-aarch64",
+      "binary_sha256": "2eb891b63818811f1882b5e4025455a8ee4b1530cc74709c3388d1d815c927bb",
+      "asset": "agent-runtime-0.7.0-macos-aarch64.tar.gz",
+      "asset_sha256": "051af2a60ab4525c1236930b41a6116058161f46f95022cf3f1cd2f2cfd6c3d3"
+    },
+    {
+      "platform": "windows-x86_64",
+      "binary_sha256": "ce3ed26b3cc854edef0fb4ca8d77e452750df893340b7d9228dec1ef2913e9c0",
+      "asset": "agent-runtime-0.7.0-windows-x86_64.zip",
+      "asset_sha256": "7106efb294a5c9d05fd2a20cb3de910a27784e045b226db814beb383b7a0c487"
+    }
+  ],
+  "repository": "microsoft/amplifier-constellation-runtime"
+}

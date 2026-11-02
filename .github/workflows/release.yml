@@ -1,0 +1,99 @@
+name: Package native releases
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to package (for example v0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Validate release tag
+        run: '[[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Confirm selected ref is the existing tag
+        run: test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+      - name: Install build prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Include Windows OpenSSL for certificate tests
+        if: runner.os == 'Windows'
+        run: echo 'C:/Program Files/Git/usr/bin' >> "$GITHUB_PATH"
+      - name: Install Rust
+        run: rustup toolchain install 1.93.0 --profile minimal
+      - name: Test and build
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then python scripts/test-installation.py; fi
+          python scripts/test-native-installation.py
+          python scripts/test-provisioning.py
+          cargo +1.93.0 test --locked
+          cargo +1.93.0 build --release --locked
+          suffix=""; if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          test "$(target/release/agent-instance${suffix} --version)" = "agent-instance ${RELEASE_TAG#v}"
+          if [[ "$RUNNER_OS" == Linux ]]; then python tests/pam_live.py --binary target/release/agent-instance; fi
+      - name: Package only the executable and build metadata
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          suffix=""; if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          python scripts/package-release.py --binary "target/release/agent-instance${suffix}" --output dist --target "$BUILD_TARGET" --commit "$(git rev-parse HEAD)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Create private draft release if needed
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Agent Instance $RELEASE_TAG" --notes "Standalone Linux, macOS, and Windows binaries. See docs/native-platforms.md for host installation and authentication."
+          fi
+      - name: Upload release archives without replacing existing assets
+        run: gh release upload "$RELEASE_TAG" dist/*

@@ -1,0 +1,67 @@
+name: Check agent instance
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
+      - name: Install Rust without changing the runner default
+        run: rustup toolchain install 1.93.0 --profile minimal --component clippy --component rustfmt
+      - name: Check installation contracts
+        run: python3 scripts/test-installation.py
+      - name: Check runtime provisioning boundaries
+        run: python3 scripts/test-provisioning.py
+      - name: Check formatting
+        run: cargo +1.93.0 fmt --all -- --check
+      - name: Test
+        run: cargo +1.93.0 test --locked
+      - name: Lint
+        run: cargo +1.93.0 clippy --locked --all-targets -- -D warnings
+      - name: Build release executable
+        run: cargo +1.93.0 build --release --locked
+      - name: Check real PAM with a disposable account
+        run: python3 tests/pam_live.py --binary target/release/agent-instance
+
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15-intel, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install Rust
+        run: rustup toolchain install 1.93.0 --profile minimal --component clippy
+      - name: Include the Windows OpenSSL test tool
+        if: runner.os == 'Windows'
+        run: echo 'C:/Program Files/Git/usr/bin' >> "$GITHUB_PATH"
+      - name: Check native installer and runtime boundaries
+        run: |
+          python scripts/test-native-installation.py
+          python scripts/test-provisioning.py
+      - name: Test native executable and process boundaries
+        run: cargo +1.93.0 test --locked
+      - name: Lint native code
+        run: cargo +1.93.0 clippy --locked --all-targets -- -D warnings
+      - name: Build native release
+        run: cargo +1.93.0 build --release --locked

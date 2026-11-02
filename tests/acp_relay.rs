@@ -1,0 +1,796 @@
+use agent_instance::{
+    acp::relay,
+    config::{BackendConfig, ConfigDocument, InstanceConfig, private_dir, write_private},
+    state::AppState,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use tempfile::TempDir;
+use tokio::{sync::mpsc, task::JoinHandle};
+
+struct Installation {
+    _dir: TempDir,
+    state: Arc<AppState>,
+    work: PathBuf,
+}
+impl Installation {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["work", "profiles", "secrets", "fixture-state"] {
+            private_dir(&dir.path().join(name)).unwrap();
+        }
+        write_private(
+            &dir.path().join("secrets/provider-test"),
+            b"fixture-secret-canary",
+        )
+        .unwrap();
+        write_private(
+            &dir.path().join("profiles/working-style.md"),
+            b"Verify the result before declaring it complete.",
+        )
+        .unwrap();
+        let mut config = InstanceConfig::blank("Fixture individual".into(), "test-owner".into());
+        config.purpose = "Test interoperability".into();
+        config.instructions = "Be precise".into();
+        config.setup_complete = true;
+        config.enabled = true;
+        config.backend = Some(BackendConfig {
+            command: agent_instance::platform::python().into(),
+            args: vec![
+                format!(
+                    "{}/tests/fixtures/acp_backend.py",
+                    env!("CARGO_MANIFEST_DIR")
+                ),
+                "${AGENT_HOME}/fixture-state".into(),
+            ],
+            env: BTreeMap::new(),
+            secret_env: BTreeMap::from([("FIXTURE_SECRET".into(), "provider-test".into())]),
+            working_directory: "${AGENT_HOME}/work".into(),
+            allowed_working_roots: vec!["${AGENT_HOME}/work".into()],
+        });
+        write_private(
+            &dir.path().join("config.json"),
+            &serde_json::to_vec(&ConfigDocument {
+                revision: 1,
+                config,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let state = Arc::new(AppState::open(dir.path().to_owned()).unwrap());
+        let work = dir.path().join("work");
+        Self {
+            _dir: dir,
+            state,
+            work,
+        }
+    }
+    fn connect(&self) -> Client {
+        let (tx, incoming) = mpsc::channel(32);
+        let (outgoing, rx) = mpsc::channel(32);
+        let state = self.state.clone();
+        let task =
+            tokio::spawn(
+                async move { relay(state, "test-principal".into(), incoming, outgoing).await },
+            );
+        Client { tx, rx, task }
+    }
+}
+
+struct Client {
+    tx: mpsc::Sender<Value>,
+    rx: mpsc::Receiver<Value>,
+    task: JoinHandle<anyhow::Result<()>>,
+}
+
+#[tokio::test]
+async fn early_launch_failures_have_actionable_secret_free_observations() {
+    for (failure, expected_stage) in [
+        ("directory", "working_directory"),
+        ("secret", "backend_secrets"),
+        ("command", "backend_process"),
+    ] {
+        let install = Installation::new();
+        {
+            let mut document = install.state.config.write().unwrap();
+            let backend = document.config.backend.as_mut().unwrap();
+            match failure {
+                "directory" => backend.working_directory = "/absent-private-canary/work".into(),
+                "secret" => {
+                    backend
+                        .secret_env
+                        .insert("TEST_SECRET".into(), "absent-private-canary".into());
+                }
+                "command" => {
+                    backend.command = "/absent-private-canary/program".into();
+                    backend.args = vec!["argument-private-canary".into()];
+                }
+                _ => unreachable!(),
+            }
+        }
+        let client = install.connect();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(4), client.task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let data: String = install
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT data FROM events WHERE kind='acp.launch_failed' ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let event: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(event["stage"], expected_stage);
+        assert!(event["action"].as_str().unwrap().len() > 20);
+        let all_events: String = install
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT group_concat(data) FROM events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!all_events.contains("private-canary"));
+        assert!(!all_events.contains("fixture-secret-canary"));
+        assert!(install.state.connections.lock().unwrap().is_empty());
+    }
+}
+impl Client {
+    async fn send(&self, id: u32, method: &str, params: Value) {
+        self.tx
+            .send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
+            .await
+            .unwrap();
+    }
+    async fn recv(&mut self) -> Value {
+        tokio::time::timeout(Duration::from_secs(8), self.rx.recv())
+            .await
+            .expect("ACP frame timeout")
+            .expect("ACP closed early")
+    }
+    async fn response(&mut self, id: u32) -> (Value, Vec<Value>) {
+        let mut notifications = vec![];
+        loop {
+            let msg = self.recv().await;
+            if msg.get("method").is_none() && msg["id"] == id {
+                return (msg, notifications);
+            }
+            notifications.push(msg);
+        }
+    }
+    async fn initialize(&mut self) -> Value {
+        self.send(100, "initialize", json!({"protocolVersion":1,"clientInfo":{"name":"independent-test-client","version":"1"},"clientCapabilities":{"fs":{"readTextFile":true}}})).await;
+        self.response(100).await.0
+    }
+    async fn new_session(&mut self, work: &std::path::Path) -> String {
+        self.send(101, "session/new", json!({"cwd":work,"mcpServers":[{"name":"example-tools","command":"/fixture/mcp","args":[],"env":[{"name":"SECRET","value":"mcp-secret-canary"}]}]})).await;
+        self.response(101).await.0["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    async fn disconnect(self) {
+        drop(self.tx);
+        let result = tokio::time::timeout(Duration::from_secs(4), self.task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_ok(), "{result:?}");
+    }
+}
+
+fn detail(updates: &[Value]) -> Value {
+    let text = updates
+        .iter()
+        .rev()
+        .find_map(|v| v["params"]["update"]["content"]["text"].as_str())
+        .unwrap();
+    serde_json::from_str(text).unwrap()
+}
+
+#[tokio::test]
+async fn initialization_discovers_optional_management_without_changing_acp_capabilities() {
+    for (public_url, addresses, expected_descriptor) in [
+        (
+            Some("https://agents.example/instance/"),
+            json!({"urls":["https://192.168.1.20:4567"],"base_url":"https://127.0.0.1:4567"}),
+            Some("https://agents.example/instance/api/v1/descriptor"),
+        ),
+        (
+            None,
+            json!({"urls":["https://localhost:4567","https://127.0.0.1:4567","https://[::1]:4567","https://192.168.1.20:4567"],"base_url":"https://127.0.0.1:4567"}),
+            Some("https://192.168.1.20:4567/api/v1/descriptor"),
+        ),
+        (
+            None,
+            json!({"urls":["https://127.0.0.1:4567"],"base_url":"https://127.0.0.1:4567"}),
+            Some("https://127.0.0.1:4567/api/v1/descriptor"),
+        ),
+        (None, json!({}), None),
+    ] {
+        let install = Installation::new();
+        install
+            .state
+            .config
+            .write()
+            .unwrap()
+            .config
+            .server
+            .public_url = public_url.map(str::to_owned);
+        *install.state.addresses.write().unwrap() = addresses;
+        let mut client = install.connect();
+        let response = client.initialize().await;
+        let management =
+            &response["result"]["_meta"]["io.github.bkrabach.agent-instance"]["management"];
+        if let Some(descriptor) = expected_descriptor {
+            assert_eq!(
+                management,
+                &json!({
+                    "profile":"agent-instance.management/1",
+                    "descriptorUrl":descriptor,
+                    "authentication":{"required":true,"separateFromAcp":true}
+                })
+            );
+        } else {
+            assert!(management.is_null());
+        }
+        assert_eq!(
+            response["result"]["agentCapabilities"],
+            json!({
+                "loadSession":true,"sessionCapabilities":{"list":{},"resume":{},"close":{}}
+            })
+        );
+        assert_eq!(response["result"]["_meta"]["fixture-preserved"], true);
+        client.disconnect().await;
+    }
+}
+
+#[tokio::test]
+async fn work_observations_follow_prompt_results_cancellation_and_disconnect_without_content() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    client
+        .send(
+            170,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"private-work-canary"}]}),
+        )
+        .await;
+    assert_eq!(
+        client.response(170).await.0["result"]["stopReason"],
+        "end_turn"
+    );
+    client.send(171, "session/prompt", json!({"sessionId":"unbound-session","prompt":[{"type":"text","text":"private-error-canary"}]})).await;
+    assert!(client.response(171).await.0["error"].is_object());
+    client.send(172, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"WAIT_FOR_CANCEL private-cancel-canary"}]})).await;
+    assert_eq!(client.recv().await["method"], "session/update");
+    client
+        .tx
+        .send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
+        .await
+        .unwrap();
+    assert_eq!(
+        client.response(172).await.0["result"]["stopReason"],
+        "cancelled"
+    );
+    client.send(173, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"WAIT_FOR_CANCEL private-disconnect-canary"}]})).await;
+    assert_eq!(client.recv().await["method"], "session/update");
+    client.disconnect().await;
+
+    let db = install.state.db.lock().unwrap();
+    let rows = db
+        .prepare("SELECT kind,data FROM events WHERE kind LIKE 'acp.prompt.%' ORDER BY seq")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        8,
+        "Four starts, each with exactly one terminal outcome"
+    );
+    let mut active = std::collections::BTreeSet::new();
+    for (kind, encoded) in &rows {
+        let data: Value = serde_json::from_str(encoded).unwrap();
+        let work_id = data["work_id"].as_str().unwrap().to_owned();
+        assert!(!encoded.contains("canary"));
+        assert!(!encoded.contains("Configured agent instance context"));
+        if kind == "acp.prompt.started" {
+            assert!(active.insert(work_id));
+        } else {
+            assert!(active.remove(&work_id));
+            assert!(data["duration_ms"].as_i64().unwrap() >= 0);
+        }
+    }
+    assert!(active.is_empty());
+    assert_eq!(
+        rows.iter()
+            .filter(|(kind, _)| kind == "acp.prompt.finished")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|(kind, _)| kind == "acp.prompt.cancelled")
+            .count(),
+        1
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|(kind, _)| kind == "acp.prompt.failed")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn observations_distinguish_fixed_backend_revision_from_current_profile_context() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    client
+        .send(
+            160,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"First profile"}]}),
+        )
+        .await;
+    client.response(160).await;
+    let before = install.state.get_record("sessions", &sid).unwrap().unwrap();
+    assert_eq!(before["last_prompt_config_revision"], 1);
+    assert_eq!(
+        before["last_profile_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(install.state.profile_text().unwrap().as_bytes())
+        )
+    );
+
+    {
+        let mut document = install.state.config.write().unwrap();
+        document.revision = 2;
+        document.config.purpose = "Updated purpose for the next prompt".into();
+        let backend = document.config.backend.as_mut().unwrap();
+        backend.secret_env.clear();
+        backend
+            .env
+            .insert("FIXTURE_SECRET".into(), "new-backend-setting".into());
+    }
+    agent_instance::profiles::write(
+        &install.state,
+        "working-style",
+        "A newly edited working style.",
+    )
+    .unwrap();
+    client
+        .send(
+            161,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"Updated profile"}]}),
+        )
+        .await;
+    let (_, updates) = client.response(161).await;
+    let response = detail(&updates);
+    assert!(
+        response["echo"]
+            .as_str()
+            .unwrap()
+            .contains("Updated purpose for the next prompt")
+    );
+    assert!(
+        response["echo"]
+            .as_str()
+            .unwrap()
+            .contains("A newly edited working style.")
+    );
+    assert_eq!(
+        response["secret_present"], true,
+        "Existing backend retains the original environment"
+    );
+
+    let connection = install
+        .state
+        .connections
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    assert_eq!(connection["config_revision"], 1);
+    let after = install.state.get_record("sessions", &sid).unwrap().unwrap();
+    assert_eq!(after["last_prompt_config_revision"], 2);
+    assert_eq!(before["last_profile_package"]["revision"], 0);
+    assert_eq!(after["last_profile_package"]["revision"], 1);
+    assert_eq!(
+        after["last_profile_package"]["id"],
+        agent_instance::profiles::status(&install.state).unwrap()["active"]["id"]
+    );
+    assert_eq!(
+        after["last_profile_sha256"],
+        format!(
+            "{:x}",
+            Sha256::digest(install.state.profile_text().unwrap().as_bytes())
+        )
+    );
+    assert_ne!(after["last_profile_sha256"], before["last_profile_sha256"]);
+    assert!(
+        after["last_profile_supplied_at"].as_i64().unwrap()
+            >= before["last_profile_supplied_at"].as_i64().unwrap()
+    );
+    let delivery =
+        agent_instance::profile_use::inspect(&install.state, &Default::default()).unwrap();
+    assert_eq!(delivery["status"], "supplied_current");
+    assert_eq!(delivery["relevant_turn"]["session_id"], sid);
+    assert_eq!(
+        delivery["relevant_turn"]["profile_sha256"],
+        after["last_profile_sha256"]
+    );
+    assert_eq!(
+        delivery["relevant_turn"]["profile_package"],
+        after["last_profile_package"]
+    );
+    assert_eq!(delivery["behavior_quality"], "not_evaluated");
+
+    client.disconnect().await;
+}
+
+#[tokio::test]
+async fn preserves_acp_capabilities_content_mcp_auth_and_configuration() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    let initialize = client.initialize().await;
+    assert_eq!(
+        initialize["result"]["agentInfo"]["title"],
+        "Fixture individual"
+    );
+    assert_eq!(
+        initialize["result"]["agentCapabilities"]["loadSession"],
+        true
+    );
+    assert!(initialize["result"]["agentCapabilities"]["promptCapabilities"].is_null());
+    assert_eq!(initialize["result"]["_meta"]["fixture-preserved"], true);
+    assert_eq!(
+        initialize["result"]["_meta"]["io.github.bkrabach.agent-instance"]["backendAgentInfo"]["name"],
+        "independent-python-fixture"
+    );
+    client
+        .send(102, "authenticate", json!({"methodId":"fixture-login"}))
+        .await;
+    assert_eq!(client.response(102).await.0["result"], json!({}));
+    let sid = client.new_session(&install.work).await;
+    client.send(103,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"Hello"},{"type":"resource_link","uri":"file:///fixture/context","name":"Context"}]})).await;
+    let (response, updates) = client.response(103).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn");
+    let detail = detail(&updates);
+    assert_eq!(detail["types"], json!(["text", "text", "resource_link"]));
+    assert_eq!(detail["configured_context"], true);
+    assert!(
+        detail["echo"]
+            .as_str()
+            .unwrap()
+            .contains("Verify the result")
+    );
+    assert_eq!(detail["mcp_servers"], json!(["example-tools"]));
+    assert_eq!(detail["secret_present"], true);
+    assert_eq!(detail["slack_env_present"], false);
+    assert_eq!(
+        detail["backend_home"],
+        install
+            .state
+            .home
+            .join("backend")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(
+        detail["xdg_config_home"],
+        install
+            .state
+            .home
+            .join("backend")
+            .join("config")
+            .to_string_lossy()
+            .as_ref()
+    );
+    client
+        .send(
+            104,
+            "session/set_config_option",
+            json!({"sessionId":sid,"configId":"model","value":"fixture"}),
+        )
+        .await;
+    assert_eq!(
+        client.response(104).await.0["result"]["configOptions"][0]["currentValue"],
+        "fixture"
+    );
+    client.send(105, "_unknown/extension", json!({})).await;
+    assert_eq!(client.response(105).await.0["error"]["code"], -32601);
+    client.disconnect().await;
+    assert!(install.state.connections.lock().unwrap().is_empty());
+    assert_eq!(install.state.list_records("sessions").unwrap().len(), 1);
+    let events: String = install
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT group_concat(data) FROM events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(
+        !events.contains("fixture-secret-canary")
+            && !events.contains("mcp-secret-canary")
+            && !events.contains("Verify the result")
+    );
+}
+
+#[tokio::test]
+async fn forwards_bidirectional_permission_and_filesystem_callbacks() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    // Same ID in both directions is legal and must not collide.
+    client.send(1,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION REQUEST_FILE"}]})).await;
+    let permission = client.recv().await;
+    assert_eq!(permission["method"], "session/request_permission");
+    assert_eq!(permission["id"], 1);
+    client.tx.send(json!({"jsonrpc":"2.0","id":1,"result":{"outcome":{"outcome":"selected","optionId":"permit"}}})).await.unwrap();
+    let file = client.recv().await;
+    assert_eq!(file["method"], "fs/read_text_file");
+    client.tx.send(json!({"jsonrpc":"2.0","id":"file-callback","result":{"content":"callback-secret-canary"}})).await.unwrap();
+    let (_, updates) = client.response(1).await;
+    let detail = detail(&updates);
+    assert_eq!(detail["permission"]["outcome"]["optionId"], "permit");
+    assert_eq!(detail["file_result"]["content"], "callback-secret-canary");
+    client.disconnect().await;
+    let events: String = install
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT group_concat(data) FROM events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(!events.contains("callback-secret-canary"));
+}
+
+#[tokio::test]
+async fn persisted_backend_sessions_replay_on_a_new_connection() {
+    let install = Installation::new();
+    let mut first = install.connect();
+    first.initialize().await;
+    let sid = first.new_session(&install.work).await;
+    first.send(110,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"Remember this marker: violet-cabin"}]})).await;
+    first.response(110).await;
+    first.disconnect().await;
+    let mut second = install.connect();
+    second.initialize().await;
+    second
+        .send(
+            111,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"Not loaded yet"}]}),
+        )
+        .await;
+    assert_eq!(second.response(111).await.0["error"]["code"], -32002);
+    second.send(112, "session/list", json!({})).await;
+    assert_eq!(
+        second.response(112).await.0["result"]["sessions"][0]["sessionId"],
+        sid
+    );
+    second
+        .send(
+            113,
+            "session/load",
+            json!({"sessionId":sid,"cwd":install.work,"mcpServers":[]}),
+        )
+        .await;
+    let (response, replay) = second.response(113).await;
+    assert_eq!(response["result"], json!({}));
+    assert_eq!(replay.len(), 2);
+    assert_eq!(
+        replay[0]["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .trim(),
+        "Remember this marker: violet-cabin"
+    );
+    second.disconnect().await;
+}
+
+#[tokio::test]
+async fn cancellation_and_concurrent_connections_stay_separate() {
+    let install = Installation::new();
+    let mut first = install.connect();
+    let mut second = install.connect();
+    first.initialize().await;
+    second.initialize().await;
+    let a = first.new_session(&install.work).await;
+    let b = second.new_session(&install.work).await;
+    first
+        .send(
+            120,
+            "session/prompt",
+            json!({"sessionId":a,"prompt":[{"type":"text","text":"WAIT_FOR_CANCEL"}]}),
+        )
+        .await;
+    assert_eq!(first.recv().await["method"], "session/update");
+    second
+        .send(
+            120,
+            "session/prompt",
+            json!({"sessionId":b,"prompt":[{"type":"text","text":"Second independent context"}]}),
+        )
+        .await;
+    assert_eq!(
+        second.response(120).await.0["result"]["stopReason"],
+        "end_turn"
+    );
+    first
+        .tx
+        .send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":a}}))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.response(120).await.0["result"]["stopReason"],
+        "cancelled"
+    );
+    first.disconnect().await;
+    assert_eq!(install.state.connections.lock().unwrap().len(), 1);
+    second.disconnect().await;
+}
+
+#[tokio::test]
+async fn refuses_cwd_outside_roots_and_symlink_escape_without_substitution() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client
+        .send(
+            129,
+            "session/new",
+            json!({"cwd":"relative","mcpServers":[]}),
+        )
+        .await;
+    assert_eq!(client.response(129).await.0["error"]["code"], -32600);
+    client.initialize().await;
+    for cwd in [
+        "relative".to_owned(),
+        install.state.home.to_string_lossy().into_owned(),
+    ] {
+        client
+            .send(130, "session/new", json!({"cwd":cwd,"mcpServers":[]}))
+            .await;
+        assert_eq!(client.response(130).await.0["error"]["code"], -32602);
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&install.state.home, install.work.join("escape")).unwrap();
+        client
+            .send(
+                130,
+                "session/new",
+                json!({"cwd":install.work.join("escape"),"mcpServers":[]}),
+            )
+            .await;
+        assert_eq!(client.response(130).await.0["error"]["code"], -32602);
+    }
+    let sid = client.new_session(&install.work).await;
+    assert_eq!(
+        install.state.get_record("sessions", &sid).unwrap().unwrap()["cwd"],
+        install.work.to_string_lossy().as_ref()
+    );
+    client.disconnect().await;
+}
+
+#[tokio::test]
+async fn oversized_backend_output_closes_connection_without_unbounded_buffering() {
+    let install = Installation::new();
+    install
+        .state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .limits
+        .max_frame_bytes = 1024;
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    client
+        .send(
+            150,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"OVERSIZE_BACKEND_FRAME"}]}),
+        )
+        .await;
+    assert_eq!(client.response(150).await.0["error"]["code"], -32603);
+    assert!(client.task.await.unwrap().is_err());
+    assert!(install.state.connections.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_stop_kills_backend_and_its_descendant() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    client
+        .send(
+            140,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"SPAWN_CHILD"}]}),
+        )
+        .await;
+    assert_eq!(client.recv().await["method"], "session/update");
+    let descendant: u32 =
+        std::fs::read_to_string(install.state.home.join("fixture-state/descendant.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+    install.state.runtime_stop.send(()).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(4), client.task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_err());
+    let category: String = install.state.db.lock().unwrap().query_row(
+        "SELECT activity_category FROM events WHERE kind='acp.closed_with_error' ORDER BY seq DESC LIMIT 1",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(
+        category, "runtime",
+        "An intentional runtime stop is not an unexpected connection failure"
+    );
+    for _ in 0..20 {
+        #[cfg(unix)]
+        let stopped = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &descendant.to_string()])
+            .output()
+            .map(|o| {
+                !o.status.success() || String::from_utf8_lossy(&o.stdout).trim().starts_with('Z')
+            })
+            .unwrap_or(false);
+        #[cfg(windows)]
+        let stopped = unsafe {
+            use windows_sys::Win32::{
+                Foundation::CloseHandle,
+                System::Threading::{
+                    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                },
+            };
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, descendant);
+            if handle.is_null() {
+                true
+            } else {
+                let mut code = 259;
+                let ok = GetExitCodeProcess(handle, &mut code);
+                CloseHandle(handle);
+                ok != 0 && code != 259
+            }
+        };
+        if stopped {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("Backend descendant survived runtime stop");
+}

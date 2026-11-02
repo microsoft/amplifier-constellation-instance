@@ -1,0 +1,52 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import assert from 'node:assert/strict';
+import {spawn,spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+const {chromium,request}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
+const root=fileURLToPath(new URL('../../',import.meta.url)),binary=process.env.AGENT_INSTANCE_BINARY||path.join(root,'target/debug/agent-instance');
+const home=await fs.mkdtemp(path.join(os.tmpdir(),'native-account-ui-'));
+let service,browser,context,api,page;const checks=[],errors=[];
+function cli(...args){const r=spawnSync(binary,['--home',home,...args],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);}
+const pass=s=>{checks.push(s);console.log('PASS '+s);};
+try{
+ cli('init','--name','Native account fixture','--bind','127.0.0.1');
+ const doc=JSON.parse(await fs.readFile(home+'/config.json','utf8'));doc.config.setup_complete=true;
+ await fs.mkdir(home+'/engine');await fs.copyFile(path.join(root,'tests/fixtures/native_account.py'),home+'/engine/agent-runtime');await fs.chmod(home+'/engine/agent-runtime',0o700);
+ await fs.writeFile(home+'/engine/runtime.json',JSON.stringify({provider:{kind:'openai',model:'previous-model',endpoint:'https://api.openai.com/v1/responses',api_key_env:'OPENAI_API_KEY',auth:'auto',native:{}},mode:'ask',decisions:[]}));
+ doc.config.backend={command:'${AGENT_HOME}/engine/agent-runtime',args:['--home','${AGENT_HOME}/engine','acp'],env:{},secret_env:{},working_directory:'${AGENT_HOME}/workspace',allowed_working_roots:['${AGENT_HOME}/workspace']};await fs.writeFile(home+'/config.json',JSON.stringify(doc),{mode:0o600});
+ service=spawn(binary,['--home',home,'serve'],{stdio:'ignore'});let origin;
+ for(let i=0;i<100;i++){try{origin=JSON.parse(await fs.readFile(home+'/endpoints.json','utf8')).base_url;break;}catch{}await new Promise(r=>setTimeout(r,100));}assert(origin);
+ api=await request.newContext({ignoreHTTPSErrors:true,baseURL:origin,extraHTTPHeaders:{Authorization:'Bearer '+(await fs.readFile(home+'/secrets/control-token','utf8')).trim()}});
+ async function call(method,p,data){const r=await api.fetch('/api/v1/'+p,{method,...(data===undefined?{}:{data})});assert(r.ok(),await r.text());return r.json();}
+ async function wait(phase){for(let i=0;i<100;i++){const j=await call('GET','native-account/login');if(j.state===phase)return j;await new Promise(r=>setTimeout(r,100));}throw Error('Did not reach '+phase);}
+ let config=await call('GET','config');config.config.server.public_url=origin;await call('PUT','config',{expected_revision:config.revision,config:config.config});
+ const seed=spawnSync('python3',['-c',"import sqlite3,hashlib,time,sys; db=sqlite3.connect(sys.argv[1]); db.execute('INSERT INTO browser_sessions VALUES(?,?,?,?)',(hashlib.sha256(b'native-oauth-fixture').hexdigest(),sys.argv[2],'fixture-csrf',int(time.time()*1000)+3600000)); db.commit()",home+'/state.sqlite3',doc.config.owner],{encoding:'utf8'});assert.equal(seed.status,0,seed.stderr);
+ browser=await chromium.launch({headless:true,args:['--no-sandbox']});context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1400,height:1000}});
+ await context.route('https://auth.openai.com/**',route=>route.fulfill({status:200,contentType:'text/html',body:'<h1>Fake consent page</h1>'}));
+ await context.addCookies([{name:'ai_'+doc.config.instance_id.replaceAll('-',''),value:'native-oauth-fixture',url:origin,secure:true,httpOnly:true,sameSite:'Strict'}]);
+ page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(origin);await page.locator('[data-control="nav.configuration"]').click();
+ await page.locator('[data-draft="account.location"]').selectOption('remote');await page.locator('[data-action="native.account.connect"]').click();const pending=await wait('pending');
+ await page.locator('[data-action="native.account.tunnel.ready"]').waitFor();assert.equal(await page.locator('[data-action="native.account.open"]').count(),0);assert(pending.tunnel_command.includes('127.0.0.1:'));
+ let view=await page.evaluate(()=>window.agentInstanceControl.getState());assert.equal(view.state.draft.account.location,'remote');assert(!JSON.stringify(view).includes('ephemeral-fixture-state'));
+ await page.reload();await page.locator('[data-action="native.account.tunnel.ready"]').waitFor();
+ await page.evaluate(()=>window.agentInstanceControl.perform('native.account.tunnel.ready'));await page.locator('[data-action="native.account.open"]').waitFor();
+ const popupPromise=page.waitForEvent('popup');await page.locator('[data-action="native.account.open"]').click();const popup=await popupPromise;await popup.getByRole('heading',{name:'Fake consent page'}).waitFor();await popup.close();
+ pass('Remote sign-in waits for a visible loopback-forwarding step and restores it after reload');
+ await fetch(pending.callback);await wait('connected');await page.locator('[data-action="native.account.use"]').waitFor();
+ assert.equal((await call('GET','native-config')).config.provider.auth,'auto');
+ await page.evaluate(()=>window.agentInstanceControl.perform('native.account.use'));await page.locator('[data-draft="native.model"]').waitFor();assert.equal(await page.locator('[data-draft="native.model"]').inputValue(),'fixture-account-model');
+ await page.locator('[data-action="native.save"]').click();await page.locator('.banner').filter({hasText:'Engine settings saved'}).waitFor();const engine=await call('GET','native-config');assert.equal(engine.config.provider.auth,'chatgpt');assert.equal(engine.config.provider.model,'fixture-account-model');assert.equal(engine.config.provider.chatgpt_credentials_file,home+'/engine/accounts/chatgpt/credentials.json');
+ assert.equal((await call('GET','backend')).auth_mode,'chatgpt');assert.equal((await call('GET','backend')).auth_ready,true);
+ pass('Consent leaves provider unchanged until account model selection and an explicit settings save');
+ await page.setViewportSize({width:390,height:844});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.setViewportSize({width:1400,height:1000});
+ await page.locator('[data-action="native.account.disconnect.open"]').click();await page.locator('[data-action="native.account.disconnect"]').click();await page.locator('.banner').filter({hasText:'has been disconnected'}).waitFor();assert.equal((await call('GET','native-account')).account.connected,false);
+ pass('Disconnect is explicit and narrow layouts remain usable');
+ await page.evaluate(async()=>{await window.agentInstanceControl.setDraft('account.location','local');await window.agentInstanceControl.perform('native.account.connect');});await wait('pending');await page.locator('[data-action="native.account.open"]').waitFor();assert.equal(await page.locator('[data-action="native.account.tunnel.ready"]').count(),0);
+ await page.evaluate(()=>window.agentInstanceControl.perform('native.account.cancel'));await wait('cancelled');
+ pass('Same-machine sign-in and cancellation have semantic control parity');
+ const started=cli('native-account','sign-in');assert.equal(started.state,'pending');const cancelled=cli('native-account','cancel','--job-id',started.id);assert.equal(cancelled.state,'cancelling');await wait('cancelled');const status=cli('native-account','status');assert.equal(status.login.state,'cancelled');assert(!JSON.stringify(status).includes('must-never'));
+ pass('CLI uses the same durable job and cancellation interfaces');
+ assert.deepEqual(errors,[]);pass('No browser errors or credential values in view state');console.log(JSON.stringify({passed:true,checks,provider_requests:false}));
+}finally{await context?.close();await browser?.close();await api?.dispose();if(service){service.kill();await new Promise(resolve=>{if(service.exitCode!==null)return resolve();const timer=setTimeout(()=>{service.kill('SIGKILL');resolve();},5000);service.once('exit',()=>{clearTimeout(timer);resolve();});});}await fs.rm(home,{recursive:true,force:true});}

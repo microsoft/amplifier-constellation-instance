@@ -1,0 +1,8 @@
+title = "Public source test fixtures"
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic subject UUID in profile package tests"
+regexTarget = "secret"
+regexes = ['''^00000000-0000-4000-8000-000000000001$''']
