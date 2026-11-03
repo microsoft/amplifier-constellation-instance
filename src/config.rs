@@ -24,6 +24,9 @@ pub struct InstanceConfig {
     pub server: ServerConfig,
     pub backend: Option<BackendConfig>,
     pub limits: Limits,
+    /// Optional installation-owned HTTP MCP connections. Header values live in named secrets.
+    #[serde(default)]
+    pub tool_connections: Vec<crate::tool_connections::Connection>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -89,6 +92,7 @@ impl InstanceConfig {
                 private_key_file: None,
             },
             backend: None,
+            tool_connections: vec![],
             limits: Limits {
                 max_connections: 8,
                 max_frame_bytes: 4 * 1024 * 1024,
@@ -100,6 +104,7 @@ impl InstanceConfig {
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(self.schema_version == 1, "Unsupported configuration schema");
+        crate::tool_connections::validate(&self.tool_connections)?;
         uuid::Uuid::parse_str(&self.instance_id)?;
         ensure!(
             !self.name.trim().is_empty() && self.name.len() <= 200,

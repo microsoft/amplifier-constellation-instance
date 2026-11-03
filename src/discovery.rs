@@ -430,7 +430,7 @@ pub fn openapi() -> Value {
                         json!({"type":"object","required":["value"],"properties":{"value":{"type":"string","writeOnly":true,"maxLength":65536}}})
                     }
                     "/tokens" => {
-                        json!({"type":"object","required":["name","scopes","expires_in_seconds"],"properties":{"name":{"type":"string"},"scopes":{"type":"array","items":{"enum":["admin","acp","observe","ui","profiles","context:owner","work:read","work","work:execute","memory:read","memory"]}},"expires_in_seconds":{"type":"integer","minimum":60,"maximum":31622400}}})
+                        json!({"type":"object","required":["name","scopes","expires_in_seconds"],"properties":{"name":{"type":"string"},"scopes":{"type":"array","items":{"enum":["admin","acp","observe","ui","profiles","context:owner","tools:use","work:read","work","work:execute","memory:read","memory"]}},"expires_in_seconds":{"type":"integer","minimum":60,"maximum":31622400}}})
                     }
                     "/views" => json!({"type":"object","properties":{"label":{"type":"string"}}}),
                     "/views/{id}" => {
