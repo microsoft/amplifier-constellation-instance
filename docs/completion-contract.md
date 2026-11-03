@@ -8,8 +8,15 @@ retain their review/verify/complete flow until a requester freezes a brief.
 This is an instance management contract, not an ACP extension. It uses the
 existing authenticated `POST /api/v1/work/{id}/commands` route and
 `agent-instance api` CLI. Every command includes `expected_revision`; stale
-writes fail. The richer workflow currently has a CLI/API surface; the dashboard
-does not yet have dedicated brief, reviewer, or closure controls.
+writes fail. The dashboard's Work detail has **Set acceptance criteria**,
+**Record delivered version**, **Record artifact review**, and **Accept and close**
+controls. Each uses this same API and authenticated principal. Forms preserve
+their ordinary drafts across reloads; submission checks the revision and exact
+brief/artifact hashes captured when the form opened.
+
+The semantic UI actions `completion.open` (work `id` and `command`) and
+`completion.save`, with `completion.*` drafts, expose those controls to an
+authorized agent or embedding experience. Opening a form does not approve it.
 
 ## Freeze the acceptance brief
 
