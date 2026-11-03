@@ -42,6 +42,12 @@ The file keeps the bearer value out of process arguments and connector
 configuration. On Unix it must be owned by the invoking account with no group
 or other access (for example mode `0600`); symlinks are rejected. The existing
 local control token remains unchanged and does not gain tool authority.
+Alternatively, explicitly save the scoped token as `secrets/acp-token` in a
+local attach home. That file becomes the default for `acp` from that home,
+allowing already-configured clients to retain their launch command and session
+bindings. An explicit token or token-file takes precedence. An invalid default
+ACP token fails rather than falling back to the more privileged control token.
+Without this optional file, existing local attach behavior is unchanged.
 
 On `session/new`, `session/load`, and `session/resume`, Instance adds ordinary
 ACP HTTP MCP descriptors. Client-provided servers remain available, but cannot

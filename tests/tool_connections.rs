@@ -40,6 +40,35 @@ fn private_token_file_is_bounded_and_never_accepts_shared_or_linked_credentials(
         assert!(acp::read_token_file(&path).is_err());
     }
 }
+
+#[test]
+fn explicit_local_enrollment_preserves_launch_identity_without_privileged_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    private_dir(&dir.path().join("secrets")).unwrap();
+    let scoped = dir.path().join("secrets/acp-token");
+    write_private(&dir.path().join("secrets/control-token"), b"management").unwrap();
+    assert_eq!(
+        acp::attach_credential(dir.path(), None).unwrap(),
+        "management"
+    );
+    write_private(&scoped, b"scoped-acp").unwrap();
+    assert_eq!(
+        acp::attach_credential(dir.path(), None).unwrap(),
+        "scoped-acp"
+    );
+    assert_eq!(
+        acp::attach_credential(dir.path(), Some("explicit".into())).unwrap(),
+        "explicit"
+    );
+    write_private(&scoped, b"").unwrap();
+    assert!(acp::attach_credential(dir.path(), None).is_err());
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(&scoped).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("missing"), &scoped).unwrap();
+        assert!(acp::attach_credential(dir.path(), None).is_err());
+    }
+}
 fn connection() -> Connection {
     Connection {
         name: "project-tools".into(),

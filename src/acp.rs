@@ -937,18 +937,30 @@ pub fn read_token_file(path: &Path) -> Result<String> {
     Ok(token.to_owned())
 }
 
-/// Standard ACP stdin/stdout adapter for an authenticated running instance.
-/// The network side is the private `agent-instance.wss/1` framing profile.
-pub async fn attach(home: PathBuf, url: Option<String>, token: Option<String>) -> Result<()> {
-    let endpoint = attach_url(&home, url)?;
+/// Explicit local ACP enrollment never changes the management credential.
+pub fn attach_credential(home: &Path, token: Option<String>) -> Result<String> {
     let token = match token {
         Some(token) => token,
-        None => std::fs::read_to_string(home.join("secrets/control-token"))
-            .context("Provide an access token or use an installed instance home")?,
+        None => match std::fs::symlink_metadata(home.join("secrets/acp-token")) {
+            Ok(_) => read_token_file(&home.join("secrets/acp-token"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::read_to_string(home.join("secrets/control-token"))
+                    .context("Provide an access token or use an installed instance home")?
+            }
+            Err(_) => bail!("Cannot inspect local ACP credential"),
+        },
     }
     .trim()
     .to_owned();
     ensure!(!token.is_empty(), "An access token is required");
+    Ok(token)
+}
+
+/// Standard ACP stdin/stdout adapter for an authenticated running instance.
+/// The network side is the private `agent-instance.wss/1` framing profile.
+pub async fn attach(home: PathBuf, url: Option<String>, token: Option<String>) -> Result<()> {
+    let endpoint = attach_url(&home, url)?;
+    let token = attach_credential(&home, token)?;
     let mut request = endpoint.as_str().into_client_request()?;
     request.headers_mut().insert(
         "Authorization",
