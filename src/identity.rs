@@ -19,8 +19,136 @@ use std::{io::Cursor, sync::Arc};
 
 pub const NAMESPACE: &str = "com.microsoft.amplifier.identity";
 pub const METHOD: &str = "_amplifier/identity/get";
+pub const SUBSCRIBE: &str = "_amplifier/identity/subscribe";
+pub const CHANGED: &str = "_amplifier/identity/changed";
 pub const MAX_UPLOAD: usize = 5 * 1024 * 1024;
 pub const MAX_IMAGE: usize = 1024 * 1024;
+
+pub fn capability(observation_only: bool) -> Value {
+    json!({"schema":"agent-identity/1","method":METHOD,
+        "observation":{"initialize_mode":"observe","subscribe":SUBSCRIBE,"changed":CHANGED},
+        "observation_only":observation_only})
+}
+
+pub fn is_observer(frame: &Value) -> bool {
+    frame["jsonrpc"] == "2.0"
+        && frame["method"] == "initialize"
+        && frame["params"]["_meta"][NAMESPACE]["mode"] == "observe"
+}
+
+struct ObserverGuard {
+    state: Arc<AppState>,
+    id: String,
+}
+impl Drop for ObserverGuard {
+    fn drop(&mut self) {
+        self.state.connections.lock().unwrap().remove(&self.id);
+    }
+}
+
+async fn send(out: &tokio::sync::mpsc::Sender<Value>, value: Value) -> anyhow::Result<()> {
+    // A slow observer may reconnect for the current snapshot; it cannot hold up
+    // configuration mutations or accumulate an unbounded queue of portraits.
+    tokio::time::timeout(std::time::Duration::from_secs(5), out.send(value)).await??;
+    Ok(())
+}
+
+/// Read-only presentation connection over the existing ACP bridge. It never
+/// launches a backend, owns no agent session, and cannot execute model work.
+pub async fn observe(
+    state: Arc<AppState>,
+    principal: String,
+    headers: Option<HeaderMap>,
+    first: Value,
+    mut incoming: tokio::sync::mpsc::Receiver<Value>,
+    outgoing: tokio::sync::mpsc::Sender<Value>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        first["params"]["protocolVersion"] == 1 && first.get("id").is_some(),
+        "Invalid observation initialization"
+    );
+    let config = state.instance_config();
+    let id = uuid::Uuid::new_v4().to_string();
+    {
+        let mut connections = state.connections.lock().unwrap();
+        anyhow::ensure!(
+            connections.len() < config.limits.max_connections,
+            "Agent connection limit reached"
+        );
+        connections.insert(
+            id.clone(),
+            json!({"id":id,"principal":principal,
+            "connected_at":crate::state::now_ms(),"status":"observing_identity",
+            "transport":"agent-instance.wss/1","backend":null}),
+        );
+    }
+    let _guard = ObserverGuard {
+        state: state.clone(),
+        id,
+    };
+    send(
+        &outgoing,
+        json!({"jsonrpc":"2.0","id":first["id"],"result":{
+        "protocolVersion":1,"agentCapabilities":{},"authMethods":[],
+        "agentInfo":{"name":"agent-instance","version":env!("CARGO_PKG_VERSION")},
+        "_meta":{NAMESPACE:capability(true)}}}),
+    )
+    .await?;
+    // Subscribe before taking a snapshot, so writes racing subscribe cannot fall
+    // in a gap. Lagged receivers recover by taking the current snapshot.
+    let mut events = state.events.subscribe();
+    let mut subscribed = false;
+    let mut revision = Value::Null;
+    loop {
+        let request = tokio::select! {
+            request = incoming.recv() => match request { Some(value) => Some(value), None => return Ok(()) },
+            event = events.recv() => {
+                if let Some(headers) = &headers {
+                    auth::check(&state, headers, "acp", false).map_err(|_| anyhow::anyhow!("ACP authorization ended"))?;
+                }
+                let changed = match event {
+                    Ok(value) => matches!(value["kind"].as_str(), Some("identity.avatar.changed" | "config.changed")),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                };
+                if subscribed && changed {
+                    let doc = document(&state, true)?;
+                    if doc["revision"] != revision {
+                        revision = doc["revision"].clone();
+                        send(&outgoing, json!({"jsonrpc":"2.0","method":CHANGED,"params":doc})).await?;
+                    }
+                }
+                None
+            }
+        };
+        let Some(request) = request else {
+            continue;
+        };
+        if let Some(headers) = &headers {
+            auth::check(&state, headers, "acp", false)
+                .map_err(|_| anyhow::anyhow!("ACP authorization ended"))?;
+        }
+        anyhow::ensure!(
+            serde_json::to_vec(&request)?.len() <= config.limits.max_frame_bytes,
+            "ACP observation frame too large"
+        );
+        let Some(id) = request.get("id") else {
+            continue;
+        };
+        if request["jsonrpc"] != "2.0" {
+            send(&outgoing, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"Expected an ACP JSON-RPC request"}})).await?;
+        } else if matches!(request["method"].as_str(), Some(METHOD | SUBSCRIBE)) {
+            let doc = document(&state, true)?;
+            if request["method"] == SUBSCRIBE {
+                subscribed = true;
+                revision = doc["revision"].clone();
+            }
+            send(&outgoing, json!({"jsonrpc":"2.0","id":id,"result":doc})).await?;
+        } else {
+            send(&outgoing, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"This connection only observes identity; use an ordinary ACP connection for sessions"}})).await?;
+        }
+    }
+}
 
 fn png(image: &RgbaImage) -> anyhow::Result<Vec<u8>> {
     let mut output = Cursor::new(Vec::new());

@@ -40,7 +40,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, header},
     middleware::{self, Next},
     response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post, put},
@@ -752,13 +752,9 @@ async fn acp_upgrade(
         return Err(ApiError::unauthorized());
     }
     let principal = auth::check(&state, &headers, "acp", false)?;
-    if !state.enabled() {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "Complete setup and start the agent before connecting".into(),
-            None,
-        ));
-    }
+    // The first ACP initialization chooses ordinary runtime use or optional
+    // presentation observation. The relay enforces runtime state for the former;
+    // the latter must keep working without an enabled model backend.
     let maximum = state.instance_config().limits.max_frame_bytes;
     Ok(ws
         .max_message_size(maximum)
