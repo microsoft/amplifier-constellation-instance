@@ -38,7 +38,8 @@ jobs:
       - name: Check real PAM with a disposable account
         run: python3 tests/pam_live.py --binary target/release/agent-instance
       - name: Package verified candidate
-        run: python3 scripts/package-release.py --binary target/release/agent-instance --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
+        run: |
+          python3 scripts/package-release.py --binary target/release/agent-instance --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
