@@ -24,7 +24,10 @@ def extract(archive, checksum, destination):
     with tarfile.open(archive, "r:gz") as bundle:
         members = bundle.getmembers()
         binary_name = "agent-instance.exe" if "windows" in archive.name else "agent-instance"
-        if {member.name for member in members} != {binary_name, "build-info.json"} or len(members) != 2:
+        required = {binary_name, "build-info.json"}
+        allowed = required | {"LICENSE", "THIRD-PARTY-NOTICES.txt"}
+        names = {member.name for member in members}
+        if not required <= names or not names <= allowed or len(names) != len(members):
             raise ValueError("Unexpected files in release archive")
         for member in members:
             if not member.isfile() or not 0 < member.size < 512 * 1024 * 1024:

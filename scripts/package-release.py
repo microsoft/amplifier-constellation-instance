@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package exactly the executable and non-secret build metadata for one target."""
+"""Package the executable, build metadata, license and dependency notices."""
 import argparse
 import hashlib
 import io
@@ -27,6 +27,7 @@ def main():
         parser.error("Binary did not identify as agent-instance")
     metadata = {
         "name": "agent-instance",
+        "repository": "microsoft/amplifier-constellation-instance",
         "version": match.group(1),
         "target": args.target,
         "commit": args.commit,
@@ -48,6 +49,13 @@ def main():
         information.mode = 0o600
         information.size = len(encoded)
         bundle.addfile(information, io.BytesIO(encoded))
+        root = Path(__file__).resolve().parent.parent
+        for name in ("LICENSE", "THIRD-PARTY-NOTICES.txt"):
+            contents = (root / name).read_bytes()
+            notice = tarfile.TarInfo(name)
+            notice.mode = 0o600
+            notice.size = len(contents)
+            bundle.addfile(notice, io.BytesIO(contents))
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix(archive.suffix + ".sha256").write_text(checksum + "  " + archive.name + "\n")
     print(archive)

@@ -253,6 +253,11 @@ release_dir="$AGENT_INSTALL_HOME/releases/${version}-${digest:0:12}"
 install -d -m 0700 "$AGENT_INSTALL_HOME" "$AGENT_INSTALL_HOME/bin" "$release_dir/bin"
 install -m 0700 "$LOCAL_BINARY" "$release_dir/bin/agent-instance"
 install -m 0700 "$LOCAL_BINARY" "$AGENT_INSTALL_HOME/bin/agent-instance"
+for notice in LICENSE THIRD-PARTY-NOTICES.txt; do
+  notice_source="$(dirname "$LOCAL_BINARY")/$notice"
+  [[ -f "$notice_source" ]] || notice_source="${SOURCE_CHECKOUT:-$SCRIPT_ROOT}/$notice"
+  install -m 0600 "$notice_source" "$release_dir/$notice"
+done
 "$AGENT_INSTALL_HOME/bin/agent-instance" init --home "$AGENT_INSTALL_HOME" --name "$AGENT_NAME" --owner "$AGENT_OWNER" --bind "$BIND_ADDRESS" --port "$PORT"
 if [[ "$DEFAULT_BACKEND" != none ]]; then
   note "Installing this agent's own $DEFAULT_BACKEND ACP runtime."

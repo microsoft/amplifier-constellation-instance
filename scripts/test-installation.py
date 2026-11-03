@@ -168,9 +168,19 @@ class InstallationTests(unittest.TestCase):
             destination = root / "unpacked"
             extract(archive, archive.with_suffix(".gz.sha256"), destination)
             self.assertEqual((destination / "agent-instance").read_bytes(), binary.read_bytes())
+            self.assertEqual((destination / "LICENSE").read_bytes(), (ROOT / "LICENSE").read_bytes())
+            self.assertEqual((destination / "THIRD-PARTY-NOTICES.txt").read_bytes(), (ROOT / "THIRD-PARTY-NOTICES.txt").read_bytes())
             metadata = json.loads((destination / "build-info.json").read_text())
             self.assertEqual(metadata["version"], "0.2.0")
             self.assertEqual(metadata["target"], "test-linux-gnu")
+
+    def test_archive_rejects_duplicate_notices(self):
+        extract = load("extract-release").extract
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive, checksum = self.make_archive(root, [("agent-instance", b"fake"), ("build-info.json", b"{}"), ("LICENSE", b"first"), ("LICENSE", b"second")])
+            with self.assertRaisesRegex(ValueError, "Unexpected files"):
+                extract(archive, checksum, root / "rejected")
 
 
 if __name__ == "__main__":

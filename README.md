@@ -10,11 +10,11 @@ Each installation has a stable identity, private folder, copied executable, cred
 
 ## Install
 
-On Debian/Ubuntu, install GitHub CLI and run:
+On Debian/Ubuntu, install Git and run:
 
 ```bash
 AGENT_INSTALL_SOURCE="$(mktemp -d)"
-gh repo clone microsoft/amplifier-constellation-instance "$AGENT_INSTALL_SOURCE/source" -- --depth 1
+git clone https://github.com/microsoft/amplifier-constellation-instance.git "$AGENT_INSTALL_SOURCE/source"
 bash "$AGENT_INSTALL_SOURCE/source/install.sh" --name "My agent"
 ```
 
