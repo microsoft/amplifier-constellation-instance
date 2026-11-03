@@ -19,6 +19,7 @@ mod replay;
 pub mod scheduler;
 pub mod server;
 pub mod state;
+pub mod tool_connections;
 pub mod views;
 pub mod welcome;
 pub mod work;

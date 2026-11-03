@@ -54,6 +54,9 @@ enum Command {
         url: Option<String>,
         #[arg(long)]
         token: Option<String>,
+        /// Read a scoped ACP credential from a private file instead of process arguments.
+        #[arg(long, conflicts_with = "token")]
+        token_file: Option<PathBuf>,
     },
     /// Inspect and authorize this instance's durable background work.
     Background {
@@ -338,7 +341,17 @@ async fn main() -> Result<()> {
                 )
             }
         }
-        Command::Acp { url, token } => agent_instance::acp::attach(cli.home, url, token).await,
+        Command::Acp {
+            url,
+            token,
+            token_file,
+        } => {
+            let token = match token_file {
+                Some(path) => Some(agent_instance::acp::read_token_file(&path)?),
+                None => token,
+            };
+            agent_instance::acp::attach(cli.home, url, token).await
+        }
         Command::NativeAccount { command } => {
             let (method, path, body) = match command {
                 NativeAccountCommand::Status => ("GET", "native-account", None),

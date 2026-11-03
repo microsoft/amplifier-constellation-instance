@@ -180,6 +180,33 @@ pub fn same_origin(headers: &HeaderMap) -> ApiResult<()> {
     }
     Ok(())
 }
+/// Capabilities that release installation secrets require an explicit token grant.
+/// The broad admin permission and owner browser cookie do not imply this grant.
+pub fn explicit_scope(state: &AppState, headers: &HeaderMap, scope: &str) -> bool {
+    let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    let scopes: Option<String> = state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT scopes FROM tokens WHERE hash=?1 AND expires_at>?2",
+            params![digest(token), now_ms()],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    scopes
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .is_some_and(|scopes| scopes.iter().any(|s| s == scope))
+}
+
 pub fn issue_token(
     state: &AppState,
     name: &str,
@@ -194,6 +221,7 @@ pub fn issue_token(
                 "admin",
                 "acp",
                 "context:owner",
+                "tools:use",
                 "observe",
                 "ui",
                 "profiles",
@@ -208,7 +236,7 @@ pub fn issue_token(
         || !(60..=366 * 86400).contains(&seconds)
     {
         return Err(ApiError::bad(
-            "Supply a name, scopes (admin/acp/context:owner/observe/ui/profiles/work:read/work/work:execute/memory:read/memory), and a lifetime between 60 seconds and 366 days",
+            "Supply a name, scopes (admin/acp/context:owner/tools:use/observe/ui/profiles/work:read/work/work:execute/memory:read/memory), and a lifetime between 60 seconds and 366 days",
         ));
     }
     let token = random_token();

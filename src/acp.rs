@@ -7,13 +7,14 @@ use crate::{
     config::{BackendConfig, expand, private_dir},
     context,
     state::{AppState, now_ms},
+    tool_connections,
 };
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -338,6 +339,9 @@ async fn relay_connection(
     let mut pending_context = BTreeMap::<String, context::Prepared>::new();
     let mut session_context = BTreeMap::<String, context::Prepared>::new();
     let mut pending = BTreeMap::<String, Pending>::new();
+    let mut tool_guard: Option<tool_connections::Guard> = None;
+    let mut pending_tools = BTreeSet::<String>::new();
+    let mut tool_recheck = tokio::time::interval(Duration::from_millis(500));
     let mut replay = crate::replay::ContextReplay::default();
     let mut ending_reason = "connection_ended";
     let mut first = Some(first);
@@ -345,11 +349,15 @@ async fn relay_connection(
     let run: Result<()> = async {
         loop {
             tokio::select! {
+                _ = tool_recheck.tick(), if tool_guard.is_some() => {
+                    if tool_guard.as_ref().unwrap().check(&state, auth_headers.as_ref()).is_err() { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
+                },
                 _ = stop.recv() => { ending_reason = "runtime_stopped"; bail!("Agent runtime stopped"); },
                 _ = tokio::time::sleep_until(startup_deadline), if !initialized => { ending_reason = "initialization_timeout"; bail!("ACP initialization timed out"); },
                 _ = tokio::time::sleep_until(idle_deadline) => { ending_reason = "idle_timeout"; bail!("ACP connection expired after inactivity"); },
                 value = async { if first.is_some() { first.take() } else { incoming.recv().await } } => {
                     let Some(mut value) = value else { ending_reason = "client_disconnected"; return Ok(()); };
+                    if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                     let mut supplied_profile: Option<(String, String, u64, Value)> = None;
                     let mut starting_work: Option<Pending> = None;
                     idle_deadline = Instant::now() + idle_duration;
@@ -363,6 +371,10 @@ async fn relay_connection(
                             reject_request(&outgoing, &value, -32600, "Duplicate in-flight JSON-RPC request ID").await?;
                             continue;
                         }
+                        if value.get("id").is_some() && pending.len() >= 128 {
+                            reject_request(&outgoing, &value, -32603, "Too many outstanding requests on this connection").await?;
+                            continue;
+                        }
                         if !initialized && method != "initialize" {
                             reject_request(&outgoing, &value, -32600, "Initialize this ACP connection before making other requests").await?;
                             continue;
@@ -372,6 +384,12 @@ async fn relay_connection(
                                 let result = crate::identity::document(&state, true)?;
                                 send_frontend(&outgoing, json!({"jsonrpc":"2.0","id":id,"result":result})).await?;
                             }
+                            continue;
+                        }
+                        if method.starts_with("session/") && let Some(sid) = value["params"]["sessionId"].as_str()
+                            && state.get_record("session_tool_access", sid)?.is_some()
+                            && !tool_connections::allowed(&state, auth_headers.as_ref()) {
+                            reject_request(&outgoing, &value, -32002, "This session requires explicit tools:use access").await?;
                             continue;
                         }
                         if matches!(method.as_str(), "session/new" | "session/load" | "session/resume") {
@@ -417,6 +435,26 @@ async fn relay_connection(
                                     reject_request(&outgoing, &value, -32002, "Load this session with its verified conversation grant before using it").await?;
                                     continue;
                                 }
+                        if matches!(method.as_str(), "session/new" | "session/load" | "session/resume") {
+                            let requires_tools = value["params"]["sessionId"].as_str().map(|sid| state.get_record("session_tool_access", sid)).transpose()?.flatten().is_some();
+                            match tool_connections::prepare(&state, auth_headers.as_ref(), &mut value["params"], http_mcp_supported, requires_tools) {
+                                Ok(Some(guard)) => {
+                                    if serde_json::to_vec(&value)?.len() > max_frame {
+                                        if let Some(prepared) = value.get("id").and_then(|id| pending_context.remove(&id.to_string())) { context::revoke(&state, &prepared.hash); }
+                                        reject_request(&outgoing, &value, -32602, "Configured tool connections exceed the ACP message limit").await?;
+                                        continue;
+                                    }
+                                    tool_guard = Some(guard);
+                                    if let Some(id) = value.get("id") { pending_tools.insert(id.to_string()); }
+                                }
+                                Ok(None) => (),
+                                Err(error) => {
+                                    if let Some(prepared) = value.get("id").and_then(|id| pending_context.remove(&id.to_string())) { context::revoke(&state, &prepared.hash); }
+                                    reject_request(&outgoing, &value, -32602, &error.to_string()).await?;
+                                    continue;
+                                }
+                            }
+                        }
                         if method == "session/prompt" && value["params"]["prompt"].is_array() {
                             let (current, prompt_revision) = {
                                 let document = state.config.read().unwrap();
@@ -458,6 +496,7 @@ async fn relay_connection(
                         }
                         observe(&state, &connection_id, "client_to_agent", &method, &value)?;
                     }
+                    if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                     let encoded = format!("{}\n", value);
                     tokio::time::timeout(Duration::from_secs(10), input.write_all(encoded.as_bytes())).await.context("ACP backend stopped accepting input")??;
                     input.flush().await?;
@@ -482,6 +521,7 @@ async fn relay_connection(
                 frame = frames.recv() => {
                     let Some(frame) = frame else { bail!("ACP backend closed its output"); };
                     let mut value = frame?;
+                    if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                     ensure!(is_rpc_message(&value), "ACP backend emitted an invalid JSON-RPC message");
                     idle_deadline = Instant::now() + idle_duration;
                     if let Some(method) = value["method"].as_str() {
@@ -499,7 +539,11 @@ async fn relay_connection(
                         if request.method == "session/load" && let Some(sid) = &request.session_id {
                             for frame in replay.finish(sid) { send_frontend(&outgoing, frame).await?; }
                         }
+                        let used_tools = pending_tools.remove(&request.id.to_string()) || request.session_id.as_deref().map(|sid| state.get_record("session_tool_access", sid)).transpose()?.flatten().is_some();
                         if value.get("result").is_some() {
+                            if used_tools && let Some(sid) = value["result"]["sessionId"].as_str().or(request.session_id.as_deref()).filter(|sid| sid.len() <= 512) {
+                                state.set_record("session_tool_access", sid, json!({"tools_required":true}))?;
+                            }
                             if request.method == "initialize" {
                                 initialized = true;
                                 http_mcp_supported = value["result"]["agentCapabilities"]["mcpCapabilities"]["http"] == true;
@@ -858,20 +902,65 @@ async fn read_json_frame<R: AsyncBufRead + Unpin>(
     ))
 }
 
-/// Standard ACP stdin/stdout adapter for an authenticated running instance.
-///
-/// The network side is our `agent-instance.wss/1` profile: one JSON-RPC object
-/// per WebSocket text message. It is not the proposed ACP HTTP transport.
-pub async fn attach(home: PathBuf, url: Option<String>, token: Option<String>) -> Result<()> {
-    let endpoint = attach_url(&home, url)?;
+/// Read an explicit credential without exposing it in process arguments.
+pub fn read_token_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).context("Cannot open ACP token file")?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= 8192,
+        "ACP token file must be a small regular file"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions and does not modify process state.
+        ensure!(
+            metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+            "ACP token file must belong to this account and have no group or other access"
+        );
+    }
+    let mut value = String::new();
+    file.take(8193).read_to_string(&mut value)?;
+    let token = value.trim();
+    ensure!(
+        value.len() <= 8192 && !token.is_empty() && !token.chars().any(char::is_whitespace),
+        "Invalid ACP token file contents"
+    );
+    Ok(token.to_owned())
+}
+
+/// Explicit local ACP enrollment never changes the management credential.
+pub fn attach_credential(home: &Path, token: Option<String>) -> Result<String> {
     let token = match token {
         Some(token) => token,
-        None => std::fs::read_to_string(home.join("secrets/control-token"))
-            .context("Provide an access token or use an installed instance home")?,
+        None => match std::fs::symlink_metadata(home.join("secrets/acp-token")) {
+            Ok(_) => read_token_file(&home.join("secrets/acp-token"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::read_to_string(home.join("secrets/control-token"))
+                    .context("Provide an access token or use an installed instance home")?
+            }
+            Err(_) => bail!("Cannot inspect local ACP credential"),
+        },
     }
     .trim()
     .to_owned();
     ensure!(!token.is_empty(), "An access token is required");
+    Ok(token)
+}
+
+/// Standard ACP stdin/stdout adapter for an authenticated running instance.
+/// The network side is the private `agent-instance.wss/1` framing profile.
+pub async fn attach(home: PathBuf, url: Option<String>, token: Option<String>) -> Result<()> {
+    let endpoint = attach_url(&home, url)?;
+    let token = attach_credential(&home, token)?;
     let mut request = endpoint.as_str().into_client_request()?;
     request.headers_mut().insert(
         "Authorization",

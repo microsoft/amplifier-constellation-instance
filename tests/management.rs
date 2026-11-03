@@ -741,3 +741,65 @@ async fn agent_portrait_is_authorized_revisioned_and_survives_restart() {
             .contains("iVBOR")
     );
 }
+
+#[tokio::test]
+async fn connected_tools_config_schema_and_explicit_tokens_use_existing_management_surface() {
+    let f = Fixture::new();
+    let (_, mut document) = f.admin("GET", "config", None).await;
+    document["config"]["tool_connections"] = json!([{
+        "name":"project-tools", "url":"https://tools.example/mcp",
+        "header_secrets":{"Authorization":"project-auth"}
+    }]);
+    let (status, _) = f
+        .admin(
+            "PUT",
+            "secrets/project-auth",
+            Some(json!({"value":"Bearer private-tool-value"})),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, saved) = f
+        .admin(
+            "PUT",
+            "config",
+            Some(json!({"expected_revision":document["revision"],"config":document["config"]})),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert!(!saved.to_string().contains("private-tool-value"));
+    assert_eq!(
+        saved["config"]["tool_connections"][0]["header_secrets"]["Authorization"],
+        "project-auth"
+    );
+    let (status, _) = f.admin("DELETE", "secrets/project-auth", None).await;
+    assert_eq!(
+        status, 400,
+        "Referenced tool credential cannot be deleted accidentally"
+    );
+    let (_, schema) = f.admin("GET", "schema", None).await;
+    assert!(schema["properties"]["tool_connections"].is_object());
+    let (_, spec) = f.admin("GET", "openapi.json", None).await;
+    assert!(spec.to_string().contains("tools:use"));
+    let (_,token)=f.admin("POST","tokens",Some(json!({"name":"Tool-enabled experience","scopes":["acp","tools:use"],"expires_in_seconds":3600}))).await;
+    assert!(token["token"].is_string());
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", f.token).parse().unwrap(),
+    );
+    assert!(!auth::explicit_scope(&f.state, &headers, "tools:use"));
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", token["token"].as_str().unwrap())
+            .parse()
+            .unwrap(),
+    );
+    assert!(auth::explicit_scope(&f.state, &headers, "tools:use"));
+    for path in ["config", "status", "events", "sessions"] {
+        let (_, data) = f.admin("GET", path, None).await;
+        assert!(
+            !data.to_string().contains("private-tool-value"),
+            "{path} leaked a credential"
+        );
+    }
+}

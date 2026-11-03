@@ -18,13 +18,14 @@ Automation uses `Authorization: Bearer <token>`, never a URL query parameter. To
 | `ui` | Display state and commands; view events only when `observe` is absent |
 | `acp` | Authenticated ACP WebSocket connection |
 | `context:owner` | Owner-level conversation context through a verified ACP context binding; no management access |
+| `tools:use` | Explicitly receive configured installation-owned MCP tools through ACP; requires `acp` separately. Neither `context:owner` nor `admin` implies this grant. |
 | `profiles` | Inspect, apply, and restore versioned communication/working-style packages; no identity, credentials, or runtime configuration access |
 | `work:read` | Read local responsibilities, assignments, templates, sharing policy and background execution reports; no mutations |
 | `work` | Read/change responsibilities and prepare/receive explicit delegation envelopes; no policy or runtime configuration changes |
 | `work:execute` | Configure the local background queue; authorize, cancel, reconcile or retry bounded runs; inspect execution reports. Does not imply ordinary work-record editing |
 | `memory:read` | Read attributed local memories and their history; no changes |
 | `memory` | Read, remember, resolve and archive attributed local memories; no background execution or configuration authority |
-| `admin` | All scopes, configuration, profiles, credentials, tokens, and lifecycle |
+| `admin` | Configuration, profiles, credentials, tokens, lifecycle, and other management scopes. `tools:use` must still be granted explicitly. |
 
 UI access includes editor drafts and can steer a visible display. Give it only to trusted controllers. It cannot apply configuration or run agent work through the view API. Use the corresponding administrative operation for a business action. Password/secret/token input values are excluded from view-state storage; ordinary draft text is private editable context, not a credential store.
 
@@ -124,3 +125,7 @@ Each new prompt reads one complete version. In-flight work retains its supplied 
 ## Responsibilities and profile delivery
 
 Optional capability IDs `agent-instance.organization/1`, `agent-instance.work/1`, `agent-instance.delegation/1` and `agent-instance.profile-use/1` are advertised by `descriptor`. Their versioned paths and read/mutation scopes are listed in `operations` and OpenAPI. See [the complete contract](responsibilities.md) for JSON shapes, transitions, audience enforcement, delegation provenance/deduplication and profile-use evidence. ACP-only integrations do not require these resources.
+
+## Installation-owned tools
+
+Optional [HTTP MCP tool connections](tool-connections.md) are configured through the same revision-checked `config` API/CLI and schema as other agent settings. Their credentials use the existing write-only secret API. Clients receive these connections only with an explicit `tools:use` token scope; ordinary ACP clients continue to work without them.
