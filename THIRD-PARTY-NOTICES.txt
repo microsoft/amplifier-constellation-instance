@@ -1,4 +1,4 @@
-Third-party dependency notices for Constellation Instance 0.11.0
+Third-party dependency notices for Constellation Instance
 
 This file covers the normal/build dependency closure in Cargo.lock for the shipped Linux x64/ARM64, macOS Intel/ARM64, and Windows x64 targets. Some packages and bundled subcomponents apply only to one platform. License and notice text is reproduced from the locked package sources. Regenerate this file when changing release dependencies.
 
