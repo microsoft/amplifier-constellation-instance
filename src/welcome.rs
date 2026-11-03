@@ -158,10 +158,14 @@ fn public_response(content_type: &'static str, body: impl IntoResponse) -> Respo
     h.insert("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'self'".parse().unwrap());
     r
 }
-async fn page() -> Response {
+async fn page(State(state): State<Arc<AppState>>) -> Response {
     public_response(
         "text/html; charset=utf-8",
-        include_str!("../ui/welcome.html"),
+        crate::server::named_page(
+            include_str!("../ui/welcome.html"),
+            &state.config.read().unwrap().config.name,
+            "Agent Instance setup",
+        ),
     )
 }
 async fn style() -> Response {

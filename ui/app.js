@@ -351,6 +351,7 @@
   }
   function findControl(id) { if(!id)return null; return [...root.querySelectorAll("[data-control]")].find(el=>el.dataset.control===id) || document.getElementById(id); }
   function render() {
+    if (app.doc?.config.name) document.title = `${app.doc.config.name}: Agent Instance`;
     if(app.loading)return;
     const saved=captureDom();
     if(!app.session){root.innerHTML=loginScreen();restoreSensitive(saved);return;}

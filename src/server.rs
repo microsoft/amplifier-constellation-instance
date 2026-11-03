@@ -1,3 +1,29 @@
+pub(crate) fn named_page(html: &str, name: &str, service: &str) -> String {
+    let escaped = name
+        .trim()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;");
+    let title = if escaped.is_empty() {
+        service.to_owned()
+    } else {
+        format!("{escaped}: {service}")
+    };
+    let Some(start) = html.find("<title>") else {
+        return html.to_owned();
+    };
+    let Some(end) = html[start..].find("</title>") else {
+        return html.to_owned();
+    };
+    format!(
+        "{}<title>{}</title>{}",
+        &html[..start],
+        title,
+        &html[start + end + 8..]
+    )
+}
 use crate::{
     acp, activity, auth,
     config::{InstanceConfig, valid_name, write_private},
@@ -241,10 +267,14 @@ async fn backend_login_cancel(
             .map_err(|e| ApiError::bad(e.to_string()))?,
     ))
 }
-async fn index() -> impl IntoResponse {
+async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../ui/index.html"),
+        named_page(
+            include_str!("../ui/index.html"),
+            &state.config.read().unwrap().config.name,
+            "Agent Instance",
+        ),
     )
 }
 async fn js() -> impl IntoResponse {
