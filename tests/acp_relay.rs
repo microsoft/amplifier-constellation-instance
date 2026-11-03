@@ -110,6 +110,7 @@ async fn early_launch_failures_have_actionable_secret_free_observations() {
             }
         }
         let client = install.connect();
+        client.tx.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}})).await.unwrap();
         assert!(
             tokio::time::timeout(Duration::from_secs(4), client.task)
                 .await

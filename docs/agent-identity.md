@@ -79,10 +79,62 @@ changes with name or portrait; `sha256` enables image-only deduplication. Image
 bytes are bounded to 1 MiB, static PNG, square 512–1024 pixels. Validate dimensions,
 encoding and checksum; do not fetch arbitrary URLs from identity responses.
 
-This operation uses the existing authenticated ACP channel, requires no session,
-and makes no model call. Poll to discover changes; this version has no push
-notification contract. Constellation's HTTP metadata omits inline data, while
-ACP includes it so clients need no HTTP management credential or special network
-route back to the agent. Future surfaces can derive small thumbnails, circular
-crops or platform renditions; future banner/animation roles should be separately
-negotiated rather than overloading this avatar contract.
+This operation uses the existing authenticated ACP channel and requires no
+session or model call. HTTP metadata omits inline data, while ACP includes it
+so clients need no HTTP management credential or special network route back to
+the agent.
+
+## Change notifications without a model process
+
+An observer uses the same ACP command and credential. In `initialize.params`,
+include:
+
+```json
+{"protocolVersion":1,"clientCapabilities":{},"_meta":{"com.microsoft.amplifier.identity":{"mode":"observe"}}}
+```
+
+A supporting server answers the ordinary ACP initialization with this additional
+identity capability:
+
+```json
+{
+  "schema":"agent-identity/1",
+  "method":"_amplifier/identity/get",
+  "observation":{"initialize_mode":"observe","subscribe":"_amplifier/identity/subscribe","changed":"_amplifier/identity/changed"},
+  "observation_only":true
+}
+```
+
+Only an explicitly acknowledged `observation_only: true` connection may be held
+open for this purpose. Constellation handles it in the installation service,
+without starting the runtime, even when the runtime is stopped or not yet set up.
+It exposes no session, prompt, tool, transcript, or management mutation methods.
+Ordinary ACP clients and runtime connections retain their existing capabilities;
+this does not change ACP's protocol version. The ordinary initialization also
+advertises the observation mode, with `observation_only: false`.
+
+Call `_amplifier/identity/subscribe` with `{}`. The response is the current full
+identity document, including image bytes. Changes then arrive as JSON-RPC
+notifications named `_amplifier/identity/changed`, with the same document in
+`params`. Registering precedes snapshot creation so changes cannot be lost in
+between. Rename, upload, and removal change the revision. Duplicate revisions
+are suppressed; unrelated instance events are never forwarded. Slow consumers
+may be disconnected and reconnect for the current snapshot. Intermediate image
+revisions are replaceable presentation state, not an event audit log.
+
+Reconnecting and subscribing always returns the current snapshot. Clients may
+coalesce bursts to the newest revision and deduplicate platform uploads by image
+checksum. They should retry failed connections or failed/rate-limited uploads,
+not poll healthy subscriptions. The authenticated connection and its token scope
+remain authoritative; an expired or revoked token cannot receive further image
+updates. No new credential is required.
+
+An older or third-party peer may ignore the initialization hint. If it does not
+explicitly acknowledge observation mode and these exact methods, obtain one
+snapshot through its advertised get method and close the connection. Expose a
+manual refresh or reconnect path; do not silently retain a costly agent process
+or claim automatic change notifications for that peer.
+
+Future surfaces can derive small thumbnails, circular crops or platform
+renditions; future banner/animation roles should be separately negotiated rather
+than overloading this avatar contract.

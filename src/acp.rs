@@ -123,9 +123,21 @@ async fn relay_inner(
     state: Arc<AppState>,
     principal: String,
     headers: Option<axum::http::HeaderMap>,
-    incoming: mpsc::Receiver<Value>,
+    mut incoming: mpsc::Receiver<Value>,
     outgoing: mpsc::Sender<Value>,
 ) -> Result<()> {
+    // Presentation observers use the same authenticated ACP transport, but must
+    // not launch or retain a model backend merely to learn that an image changed.
+    let first = tokio::time::timeout(Duration::from_secs(30), incoming.recv())
+        .await
+        .context("ACP initialization timed out")?;
+    let Some(first) = first else {
+        return Ok(());
+    };
+    if crate::identity::is_observer(&first) {
+        return crate::identity::observe(state, principal, headers, first, incoming, outgoing)
+            .await;
+    }
     let mut launch = LaunchProgress {
         connection_id: None,
         stage: "runtime_configuration",
@@ -138,6 +150,7 @@ async fn relay_inner(
         headers,
         incoming,
         outgoing,
+        first,
         &mut launch,
     )
     .await;
@@ -160,6 +173,7 @@ async fn relay_connection(
     auth_headers: Option<axum::http::HeaderMap>,
     mut incoming: mpsc::Receiver<Value>,
     outgoing: mpsc::Sender<Value>,
+    first: Value,
     launch: &mut LaunchProgress,
 ) -> Result<()> {
     let (config, config_revision) = {
@@ -326,6 +340,7 @@ async fn relay_connection(
     let mut pending = BTreeMap::<String, Pending>::new();
     let mut replay = crate::replay::ContextReplay::default();
     let mut ending_reason = "connection_ended";
+    let mut first = Some(first);
     launch.entered_loop = true;
     let run: Result<()> = async {
         loop {
@@ -333,7 +348,7 @@ async fn relay_connection(
                 _ = stop.recv() => { ending_reason = "runtime_stopped"; bail!("Agent runtime stopped"); },
                 _ = tokio::time::sleep_until(startup_deadline), if !initialized => { ending_reason = "initialization_timeout"; bail!("ACP initialization timed out"); },
                 _ = tokio::time::sleep_until(idle_deadline) => { ending_reason = "idle_timeout"; bail!("ACP connection expired after inactivity"); },
-                value = incoming.recv() => {
+                value = async { if first.is_some() { first.take() } else { incoming.recv().await } } => {
                     let Some(mut value) = value else { ending_reason = "client_disconnected"; return Ok(()); };
                     let mut supplied_profile: Option<(String, String, u64, Value)> = None;
                     let mut starting_work: Option<Pending> = None;
@@ -493,7 +508,7 @@ async fn relay_connection(
                                 ensure!(value["result"].is_object(), "ACP backend returned malformed initialization");
                                 value["result"]["agentInfo"] = json!({"name":"agent-instance","title":config.name,"version":env!("CARGO_PKG_VERSION")});
                                 if !value["result"]["_meta"].is_object() { value["result"]["_meta"] = json!({}); }
-                                value["result"]["_meta"][crate::identity::NAMESPACE] = json!({"schema":"agent-identity/1","method":crate::identity::METHOD});
+                                value["result"]["_meta"][crate::identity::NAMESPACE] = crate::identity::capability(false);
                                 value["result"]["_meta"][META_NAMESPACE] = json!({"instanceId":config.instance_id,"configRevision":config_revision,"backendAgentInfo":backend_info,"managementApi":"v1","remoteTransportProfile":"agent-instance.wss/1"});
                                 value["result"]["_meta"][META_NAMESPACE]["continuity"] = json!({
                                     "profile":"agent-instance.context/1",
