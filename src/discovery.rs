@@ -5,6 +5,18 @@ pub fn openapi() -> Value {
     let mut paths = serde_json::Map::new();
     for (path, methods, scope, description) in [
         (
+            "/identity",
+            vec!["get"],
+            "observe",
+            "Portable presentation identity and avatar revision; no image bytes in this metadata response.",
+        ),
+        (
+            "/identity/avatar",
+            vec!["get", "put", "delete"],
+            "admin",
+            "Read the authenticated PNG (observe scope), replace with base64 PNG/JPEG/WebP plus expected_revision, or remove with expected_revision in the query. Connected experiences can retrieve inline portraits through the optional ACP identity extension.",
+        ),
+        (
             "/native-account",
             vec!["get", "delete"],
             "admin",
@@ -320,6 +332,7 @@ pub fn openapi() -> Value {
         let mut item = serde_json::Map::new();
         for method in methods {
             let scope = match (path, method) {
+                ("/identity/avatar", "get") => "observe",
                 ("/memory", "get") => "memory:read",
                 ("/scheduler", "get") | ("/work/{id}/execution", "get") => "work:read",
                 ("/scheduler", "put") | ("/work/{id}/execution", "post") => "work:execute",
@@ -329,6 +342,12 @@ pub fn openapi() -> Value {
                 _ => scope,
             };
             let mut operation = json!({"description":description,"x-required-scope":scope,"security":if scope=="public" {json!([])}else{json!([{"bearer":[]},{"browserSession":[]}])},"responses":{"200":{"description":"Success; JSON except the SSE and WebSocket endpoints"},"400":{"description":"Invalid request"},"401":{"description":"Authentication required"},"403":{"description":"Scope, origin or CSRF check failed"},"409":{"description":"Revision conflict or incompatible runtime state"}}});
+            if path == "/identity/avatar" && method == "delete" {
+                operation["parameters"] = json!([{"name":"expected_revision","in":"query","required":true,"schema":{"type":"integer","minimum":0}}]);
+            }
+            if path == "/identity/avatar" && method == "get" {
+                operation["responses"]["200"] = json!({"description":"Authenticated PNG","content":{"image/png":{"schema":{"type":"string","format":"binary"}}}});
+            }
             if path.contains('{') {
                 let name = if path.contains("{name}") {
                     "name"
@@ -356,6 +375,7 @@ pub fn openapi() -> Value {
                     && matches!(path, "/native-account" | "/native-account/login"))
             {
                 let mut schema = match path {
+                    "/identity/avatar" => json!(schemars::schema_for!(crate::identity::Upload)),
                     "/native-account" => {
                         json!(schemars::schema_for!(crate::native_account::Disconnect))
                     }

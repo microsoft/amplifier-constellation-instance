@@ -42,6 +42,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/status", get(status))
         .route("/api/v1/descriptor", get(descriptor))
+        .route("/api/v1/identity", get(crate::identity::get))
+        .route(
+            "/api/v1/identity/avatar",
+            get(crate::identity::image_get)
+                .put(crate::identity::put)
+                .delete(crate::identity::delete)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/api/v1/schema", get(schema))
         .route("/api/v1/openapi.json", get(openapi))
         .route(
@@ -397,6 +405,15 @@ async fn descriptor(
         .as_array_mut()
         .unwrap()
         .push(json!({"path":"native-config/credential","methods":["POST"],"scope":"admin"}));
+    document["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("agent-identity/1"));
+    document["operations"].as_array_mut().unwrap().extend([
+        json!({"path":"identity","methods":["GET"],"scope":"observe"}),
+        json!({"path":"identity/avatar","methods":["GET"],"scope":"observe"}),
+        json!({"path":"identity/avatar","methods":["PUT","DELETE"],"scope":"admin"}),
+    ]);
     if native_config::installation(&state).is_ok() {
         document["capabilities"]
             .as_array_mut()

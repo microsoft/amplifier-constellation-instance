@@ -671,3 +671,73 @@ async fn concurrent_prompt_readers_always_receive_one_complete_profile_pair() {
     }
     reader.join().unwrap();
 }
+
+#[tokio::test]
+async fn agent_portrait_is_authorized_revisioned_and_survives_restart() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let f = Fixture::new();
+    assert_eq!(f.request("GET", "identity", None, None).await.0, 401);
+    let (status, before) = f.request("GET", "identity", None, Some(&f.token)).await;
+    assert_eq!(status, 200);
+    assert_eq!(before["avatar"]["kind"], "generated");
+    assert!(before["avatar"].get("data").is_none());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(640, 480, image::Rgba([120, 100, 80, 255]))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    let body = json!({"expected_revision":0,"media_type":"image/png","data":STANDARD.encode(bytes.into_inner())});
+    assert_eq!(
+        f.request("PUT", "identity/avatar", Some(body.clone()), None)
+            .await
+            .0,
+        401
+    );
+    let (status, after) = f
+        .request("PUT", "identity/avatar", Some(body.clone()), Some(&f.token))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(after["avatar"]["kind"], "uploaded");
+    assert_eq!(after["avatar_revision"], 1);
+    assert_ne!(before["revision"], after["revision"]);
+    assert_eq!(
+        f.request("PUT", "identity/avatar", Some(body), Some(&f.token))
+            .await
+            .0,
+        409
+    );
+    let restarted = AppState::open(f.state.home.clone()).unwrap();
+    assert_eq!(
+        agent_instance::identity::document(&restarted, false).unwrap(),
+        after
+    );
+    let (status, removed) = f
+        .request(
+            "DELETE",
+            "identity/avatar?expected_revision=1",
+            None,
+            Some(&f.token),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(removed["avatar"]["kind"], "generated");
+    assert_eq!(removed["avatar_revision"], 2);
+    assert_eq!(removed["avatar"]["sha256"], before["avatar"]["sha256"]);
+    assert_eq!(
+        f.request(
+            "DELETE",
+            "identity/avatar?expected_revision=1",
+            None,
+            Some(&f.token)
+        )
+        .await
+        .0,
+        409
+    );
+    assert!(
+        !f.request("GET", "events", None, Some(&f.token))
+            .await
+            .1
+            .to_string()
+            .contains("iVBOR")
+    );
+}
