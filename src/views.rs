@@ -134,6 +134,9 @@ pub fn apply_command(state: &mut Value, command: &Value) -> ApiResult<()> {
     match command["type"].as_str().unwrap_or("") {
         "navigate" => {
             state["route"] = command["route"].clone();
+            if command["route"] == "work" && command.get("work_id").is_some() {
+                state["filters"]["work_id"] = command["work_id"].clone();
+            }
             if command.get("step").is_some() {
                 state["step"] = command["step"].clone();
             }
