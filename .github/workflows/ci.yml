@@ -25,6 +25,8 @@ jobs:
         run: rustup toolchain install 1.93.0 --profile minimal --component clippy --component rustfmt
       - name: Check installation contracts
         run: python3 scripts/test-installation.py
+      - name: Check release retries preserve published assets
+        run: python3 scripts/test-upload-release.py
       - name: Check runtime provisioning boundaries
         run: python3 scripts/test-provisioning.py
       - name: Check formatting
