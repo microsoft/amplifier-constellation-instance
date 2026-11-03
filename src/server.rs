@@ -1,3 +1,29 @@
+pub(crate) fn named_page(html: &str, name: &str, service: &str) -> String {
+    let escaped = name
+        .trim()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;");
+    let title = if escaped.is_empty() {
+        service.to_owned()
+    } else {
+        format!("{escaped}: {service}")
+    };
+    let Some(start) = html.find("<title>") else {
+        return html.to_owned();
+    };
+    let Some(end) = html[start..].find("</title>") else {
+        return html.to_owned();
+    };
+    format!(
+        "{}<title>{}</title>{}",
+        &html[..start],
+        title,
+        &html[start + end + 8..]
+    )
+}
 use crate::{
     acp, activity, auth,
     config::{InstanceConfig, valid_name, write_private},
@@ -42,6 +68,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/status", get(status))
         .route("/api/v1/descriptor", get(descriptor))
+        .route("/api/v1/identity", get(crate::identity::get))
+        .route(
+            "/api/v1/identity/avatar",
+            get(crate::identity::image_get)
+                .put(crate::identity::put)
+                .delete(crate::identity::delete)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/api/v1/schema", get(schema))
         .route("/api/v1/openapi.json", get(openapi))
         .route(
@@ -233,10 +267,14 @@ async fn backend_login_cancel(
             .map_err(|e| ApiError::bad(e.to_string()))?,
     ))
 }
-async fn index() -> impl IntoResponse {
+async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../ui/index.html"),
+        named_page(
+            include_str!("../ui/index.html"),
+            &state.config.read().unwrap().config.name,
+            "Agent Instance",
+        ),
     )
 }
 async fn js() -> impl IntoResponse {
@@ -397,6 +435,15 @@ async fn descriptor(
         .as_array_mut()
         .unwrap()
         .push(json!({"path":"native-config/credential","methods":["POST"],"scope":"admin"}));
+    document["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("agent-identity/1"));
+    document["operations"].as_array_mut().unwrap().extend([
+        json!({"path":"identity","methods":["GET"],"scope":"observe"}),
+        json!({"path":"identity/avatar","methods":["GET"],"scope":"observe"}),
+        json!({"path":"identity/avatar","methods":["PUT","DELETE"],"scope":"admin"}),
+    ]);
     if native_config::installation(&state).is_ok() {
         document["capabilities"]
             .as_array_mut()

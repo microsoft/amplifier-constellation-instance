@@ -352,6 +352,13 @@ async fn relay_connection(
                             reject_request(&outgoing, &value, -32600, "Initialize this ACP connection before making other requests").await?;
                             continue;
                         }
+                        if method == crate::identity::METHOD {
+                            if let Some(id) = value.get("id") {
+                                let result = crate::identity::document(&state, true)?;
+                                send_frontend(&outgoing, json!({"jsonrpc":"2.0","id":id,"result":result})).await?;
+                            }
+                            continue;
+                        }
                         if matches!(method.as_str(), "session/new" | "session/load" | "session/resume") {
                             let error = value["params"]["cwd"].as_str().map_or_else(
                                 || Err(anyhow::anyhow!("Session cwd must be an absolute directory")),
@@ -486,6 +493,7 @@ async fn relay_connection(
                                 ensure!(value["result"].is_object(), "ACP backend returned malformed initialization");
                                 value["result"]["agentInfo"] = json!({"name":"agent-instance","title":config.name,"version":env!("CARGO_PKG_VERSION")});
                                 if !value["result"]["_meta"].is_object() { value["result"]["_meta"] = json!({}); }
+                                value["result"]["_meta"][crate::identity::NAMESPACE] = json!({"schema":"agent-identity/1","method":crate::identity::METHOD});
                                 value["result"]["_meta"][META_NAMESPACE] = json!({"instanceId":config.instance_id,"configRevision":config_revision,"backendAgentInfo":backend_info,"managementApi":"v1","remoteTransportProfile":"agent-instance.wss/1"});
                                 value["result"]["_meta"][META_NAMESPACE]["continuity"] = json!({
                                     "profile":"agent-instance.context/1",
