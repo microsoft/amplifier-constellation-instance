@@ -74,7 +74,7 @@ When a release has been built and published, set `AGENT_RELEASE_TAG` to that exi
 bash ./install.sh --release "$AGENT_RELEASE_TAG" --name "Architecture reviewer"
 ```
 
-The installer downloads a native x86_64 or ARM64 Linux archive through `gh release download`, checks its accompanying SHA-256, and extracts only the expected executable and build metadata. Missing assets fall back to a source build of the same tag. A checksum mismatch stops installation. Checksums detect damaged or inconsistent assets; they are not an independent signature. Prebuilt GNU/Linux assets are built on Ubuntu 24.04; use a source build when the host's libc/PAM libraries are incompatible. The release workflow initially creates a draft for review; this document does not imply a release already exists.
+The installer downloads a native x86_64 or ARM64 Linux archive through `gh release download`, checks its accompanying SHA-256, and extracts only the expected executable, build metadata, license and dependency notices. Older two-file archives remain readable. The installation retains the license and notices alongside its release. Missing assets fall back to a source build of the same tag. A checksum mismatch stops installation. Checksums detect damaged or inconsistent assets; they are not an independent signature. Prebuilt GNU/Linux assets are built on Ubuntu 24.04; use a source build when the host's libc/PAM libraries are incompatible. The release workflow initially creates a draft for review; this document does not imply a release already exists.
 
 For a locally built executable:
 

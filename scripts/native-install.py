@@ -73,6 +73,14 @@ def stage(home, binary):
         shutil.copyfile(binary, target)
         target.chmod(0o700)
         save(folder / "release.json", info)
+    for name in ("LICENSE", "THIRD-PARTY-NOTICES.txt"):
+        source = binary.parent / name
+        if not source.is_file():
+            source = Path(__file__).resolve().parent.parent / name
+        destination = folder / name
+        if not destination.exists():
+            shutil.copyfile(source, destination)
+            destination.chmod(0o600)
     return info
 
 

@@ -17,6 +17,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install build prerequisites
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
       - name: Install Rust without changing the runner default
@@ -35,6 +37,13 @@ jobs:
         run: cargo +1.93.0 build --release --locked
       - name: Check real PAM with a disposable account
         run: python3 tests/pam_live.py --binary target/release/agent-instance
+      - name: Package verified candidate
+        run: python3 scripts/package-release.py --binary target/release/agent-instance --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
 
   native:
     strategy:
@@ -47,6 +56,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -65,3 +76,12 @@ jobs:
         run: cargo +1.93.0 clippy --locked --all-targets -- -D warnings
       - name: Build native release
         run: cargo +1.93.0 build --release --locked
+      - name: Package verified candidate
+        run: |
+          suffix=""; if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          python scripts/package-release.py --binary "target/release/agent-instance${suffix}" --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
