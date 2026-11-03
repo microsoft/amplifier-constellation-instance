@@ -85,15 +85,11 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - name: Create private draft release if needed
-        run: |
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Agent Instance $RELEASE_TAG" --notes "Standalone Linux, macOS, and Windows binaries. See docs/native-platforms.md for host installation and authentication."
-          fi
-      - name: Upload release archives without replacing existing assets
-        run: gh release upload "$RELEASE_TAG" dist/*
+      - name: Stage draft assets or preserve the existing public release
+        run: python3 scripts/upload-release.py --tag "$RELEASE_TAG" --directory dist
