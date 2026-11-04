@@ -76,7 +76,7 @@ def prompt(req):
               "secret_present": os.getenv("FIXTURE_SECRET") == "fixture-secret-canary",
               "slack_env_present": "SLACK_BOT_TOKEN" in os.environ,
               "backend_home": os.getenv("HOME"), "xdg_config_home": os.getenv("XDG_CONFIG_HOME"),
-              "echo": text}
+              "echo": text, "block_meta": [v.get("_meta") for v in values]}
     if "REQUEST_PERMISSION" in text:
         done = threading.Event()
         callbacks["1"] = {"event": done}
@@ -115,7 +115,7 @@ for line in sys.stdin:
             answer(req, {"protocolVersion": 1, "agentInfo": {"name": "independent-python-fixture", "version": "1.0"},
                          "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"list": {}, "resume": {}, "close": {}}},
                          "authMethods": [{"id": "fixture-login", "name": "Fixture login"}],
-                         "_meta": {"fixture-preserved": True}})
+                         "_meta": {"fixture-preserved": True, "com.microsoft.amplifier.context-snapshot": {"version":1}}})
             continue
         if not initialized:
             fail(req, -32600, "Initialize first")

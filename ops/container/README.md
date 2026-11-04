@@ -176,3 +176,9 @@ cargo test --locked
 The model-free tests cover mount validation, unit input handling, firewall
 refresh ordering/private-address denial and service lifetime. Host acceptance
 also requires the live checks above; unit tests do not certify containment.
+
+The image includes C/C++ build tools, CMake, LLVM/libclang, OpenSSL and PAM
+headers alongside Rust. This supports the native instance's bindgen-based
+builds inside an agent workspace. Existing containers keep their original image;
+apply the updated image through an idle, owner-controlled replacement while
+preserving the installation's mounts, fixed routes and isolation settings.

@@ -482,6 +482,10 @@ async fn preserves_acp_capabilities_content_mcp_auth_and_configuration() {
     let detail = detail(&updates);
     assert_eq!(detail["types"], json!(["text", "text", "resource_link"]));
     assert_eq!(detail["configured_context"], true);
+    assert_eq!(
+        detail["block_meta"][0]["com.microsoft.amplifier.context-snapshot"]["version"],
+        1
+    );
     assert!(
         detail["echo"]
             .as_str()
