@@ -54,7 +54,10 @@ def enroll(home,state,connector_homes,worker):
     elif system=='Darwin':
         label='io.'+name;domain='gui/'+str(os.getuid());path=Path.home()/'Library/LaunchAgents'/(label+'.plist');path.parent.mkdir(parents=True,exist_ok=True)
         subprocess.run(['launchctl','bootout',domain+'/'+label],capture_output=True)
-        path.write_bytes(plistlib.dumps({'Label':label,'ProgramArguments':argv,'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':5,'StandardOutPath':str(state/'stdout.log'),'StandardErrorPath':str(state/'stderr.log')}));path.chmod(0o600)
+        # launchd does not inherit the installer shell's PATH. Preserve the
+        # owner's tool lookup so Homebrew gh remains available for release API
+        # rate-limit fallback and authenticated development-build downloads.
+        path.write_bytes(plistlib.dumps({'Label':label,'ProgramArguments':argv,'EnvironmentVariables':{'PATH':os.environ.get('PATH',os.defpath)},'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':5,'StandardOutPath':str(state/'stdout.log'),'StandardErrorPath':str(state/'stderr.log')}));path.chmod(0o600)
         run('launchctl','bootstrap',domain,str(path))
     elif system=='Windows':
         import base64
