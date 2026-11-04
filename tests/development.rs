@@ -59,6 +59,7 @@ fn setup_preserves_other_tools_replaces_only_github_and_keeps_secrets_private() 
     let (_d, s) = fixture();
     let mut c = s.instance_config();
     let project = Connection {
+        optional: false,
         name: "project-tools".into(),
         url: "https://project.example/mcp".into(),
         header_secrets: BTreeMap::new(),

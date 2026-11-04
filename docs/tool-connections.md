@@ -73,3 +73,17 @@ remain the backend's responsibility, so configure the exact trusted endpoint.
 The optional capability is `agent-instance.tool-connections/1`, advertised in the
 management descriptor. These are installation controls using standard ACP MCP
 parameters, not new ACP protocol methods.
+
+## Unavailable integrations
+
+Set `"optional": true` on an installation tool connection when unrelated work
+should continue if that integration is unavailable. Instance forwards this as
+`_meta["io.github.bkrabach.agent-runtime"].optional` on the standard MCP descriptor.
+Constellation Runtime bounds optional discovery to five seconds, omits that
+server's tools on failure, and reports the degraded connection to the agent and
+its runtime observations. Reload/reconnect retries discovery; it never retries a
+tool action automatically. The default is false, preserving required-connection
+behavior. Other ACP backends may ignore this namespaced extension.
+
+This option does not relax credential validation, `tools:use`, context grants, or
+revocation. The audience-authorizing continuity connection remains required.

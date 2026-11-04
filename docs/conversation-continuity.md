@@ -139,3 +139,10 @@ ACP. Both grants are rechecked on context tool calls; revocation takes effect on
 the next call. Admin credentials and authenticated owner browser sessions retain
 existing owner behavior. Shared-room adapters must continue using audience-bound
 conversation grants, never an owner-context credential.
+
+Verified owner conversations also receive a bounded authorized activity index
+across their permitted providers, plus current responsibilities and memory. General
+status questions should consult this index and available presence/context tools
+before declaring the agent idle. The index contains source references, not a
+claim that every session is currently executing. Shared rooms retain their existing
+audience-scoped orientation and do not receive the owner's private activity index.

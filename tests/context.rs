@@ -626,6 +626,12 @@ async fn acp_only_never_implies_owner_and_grants_are_stripped_revalidated_and_au
         1
     );
     assert!(result["metadata"].get(context::META).is_none());
+    assert!(
+        !result["orientation"]
+            .as_str()
+            .unwrap()
+            .contains("Private owner discussion")
+    );
     assert_eq!(result["metadata"]["preserved-client-metadata"], true);
     assert!(!result.to_string().contains("grant-canary"));
     assert!(
@@ -721,6 +727,9 @@ async fn owner_grants_cross_providers_but_resumed_sessions_require_the_same_veri
             .len(),
         4
     );
+    let briefing = result["orientation"].as_str().unwrap();
+    assert!(briefing.contains("authorized_activity"));
+    assert!(briefing.contains("Private owner discussion"));
     first.close().await;
     let mut second = f.client(false);
     second.init().await;

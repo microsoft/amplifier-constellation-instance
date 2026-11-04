@@ -71,6 +71,7 @@ fn explicit_local_enrollment_preserves_launch_identity_without_privileged_fallba
 }
 fn connection() -> Connection {
     Connection {
+        optional: false,
         name: "project-tools".into(),
         url: "https://tools.example/mcp".into(),
         header_secrets: BTreeMap::from([("Authorization".into(), "project-auth".into())]),
@@ -488,5 +489,30 @@ async fn installed_tools_preserve_client_servers_and_reject_unsafe_secret_values
         assert!(!result.to_string().contains("Injected"));
         c.close().await;
     }
+    f.no_leaks();
+}
+
+#[tokio::test]
+async fn optional_connection_metadata_survives_new_and_load_without_weakening_tool_scope() {
+    let f = Fixture::new();
+    f.state.config.write().unwrap().config.tool_connections[0].optional = true;
+    let (headers, _) = f.token(&["acp", "tools:use"]);
+    let mut c = f.connect(headers.clone());
+    c.init().await;
+    let r = c.request("session/new", f.params(None)).await;
+    assert_eq!(r["result"]["_meta"]["optional"], json!([true]));
+    let sid = r["result"]["sessionId"].as_str().unwrap().to_owned();
+    c.close().await;
+    let mut c = f.connect(headers);
+    c.init().await;
+    let r = c.request("session/load", f.params(Some(&sid))).await;
+    assert_eq!(r["result"]["_meta"]["optional"], json!([true]));
+    c.close().await;
+    let (plain, _) = f.token(&["acp"]);
+    let mut c = f.connect(plain);
+    c.init().await;
+    let r = c.request("session/new", f.params(None)).await;
+    assert_eq!(r["result"]["_meta"]["optional"], json!([]));
+    c.close().await;
     f.no_leaks();
 }
