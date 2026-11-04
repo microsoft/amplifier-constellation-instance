@@ -59,11 +59,28 @@ published artifact; it is not a reproducible-build or independent-signature clai
 Stable releases with the same version as an installed development binary are not
 silently substituted.
 
-Updates close admission to new prompts, wait for active prompts and pending Slack
-replies, and hold the connector's admission lock across cutover. A chat-requested
-update waits for the requesting response to finish. Runtime and instance changes
-restart the enrolled services, then verify installed hashes, the instance identity,
-and fresh Slack reconnection. Failure restores previous binaries. An interrupted
+Slack-only updates close admission and drain work only for the changed connectors.
+They leave the instance, runtime, other connectors, and their active ACP connections
+running. The frozen plan records the service scope; failure and rollback use that
+same scope and restore only changed executables. The helper verifies the existing
+instance identity without requiring a new process, plus fresh reconnection of the
+updated Slack connectors. An unrelated connector's pending work does not block it.
+
+Runtime and instance changes close admission to new prompts, wait for active
+prompts and pending Slack replies, and restart the enrolled services. A
+chat-requested update waits for the requesting response to finish. These updates
+verify installed hashes, the instance identity, and fresh Slack reconnection.
+Other experience owners still need to coordinate their own ongoing work before
+an instance/runtime restart; an idle ACP connection is not a paused workstream.
+Unknown custom providers retain the conservative installation-wide restart scope.
+
+New Slack enrollment records `service_name` on its component. Existing schema-1
+registrations infer it from the connector identity or native installation receipt.
+An ambiguous mapping falls back to the installation-wide scope. Plans made before
+scoped updates recover using their original installation-wide behavior. Changing
+an enrollment after a scoped plan is prepared requires preparing a new plan.
+
+Failure restores previous binaries. An interrupted
 cutover recovers on helper restart. Configuration, credentials, conversation stores
 and new messages are not overwritten by old backups. Unknown delivery outcomes
 prevent cutover and require reconciliation. The update request remains queued or

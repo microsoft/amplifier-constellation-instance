@@ -1,4 +1,4 @@
-import contextlib, importlib.util, io, json, pathlib, tarfile, tempfile, unittest, zipfile
+import contextlib, importlib.util, io, json, pathlib, sqlite3, subprocess, sys, tarfile, tempfile, time, unittest, uuid, zipfile
 from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('worker',ROOT/'worker.py');w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
@@ -13,8 +13,8 @@ class UpdateTests(unittest.TestCase):
   obj.policy={'revision':0,'agent_initiated':True,'check_minutes':60,'channel':'stable','install':'on_request','window_start_utc':2,'window_hours':2}
   obj.api=lambda *args,**kwargs:{'policy':obj.policy,'active_prompts':0}
   obj.report=lambda *args,**kwargs:{'policy':obj.policy,'active_prompts':0}
-  obj.control=lambda action:None
-  obj.health=lambda expected:None
+  obj.control=lambda action,scope=None:None
+  obj.health=lambda expected,scope=None:None
   return obj
  def plan(self,obj):
   folder=self.state/'plans'/'123';folder.mkdir(parents=True);(folder/'instance.candidate').write_bytes(b'new-binary')
@@ -42,7 +42,7 @@ class UpdateTests(unittest.TestCase):
   obj.apply(plan,obj.policy,True,True);self.assertEqual(self.binary.read_bytes(),b'old-binary');self.assertEqual(obj.state['state'],'rolled_back');self.assertEqual((self.home/'conversation.json').read_text(),'keep new messages')
  def test_health_failure_restores_previous_binary(self):
   obj=self.worker();plan=self.plan(obj);calls=[]
-  def health(expected):
+  def health(expected,scope=None):
    calls.append(expected)
    if len(calls)==1:raise ValueError('new version failed')
   obj.health=health
@@ -111,7 +111,107 @@ class UpdateTests(unittest.TestCase):
   with patch.object(w,'candidate',return_value={'id':'instance','available':False,'installed_sha256':w.digest(self.binary)}),patch.object(w,'run',return_value=b'{"available":true,"version":"new"}'):
    plan=obj.plan(obj.policy)
   (self.state/'plans'/plan['id']/'source.provider.json').write_text('{}')
-  obj.control=lambda action:self.fail('service stopped before validation')
+  obj.control=lambda action,scope=None:self.fail('service stopped before validation')
   with self.assertRaisesRegex(ValueError,'provider_plan_changed'):obj.apply(plan,obj.policy)
+
+ def connector_fixture(self):
+  self.registration['services']=[{'kind':'systemd-user','name':'instance.service'}]
+  self.registration['slack_homes']=[]
+  for i in range(2):
+   home=self.root/('slack-'+str(i));(home/'bin').mkdir(parents=True);(home/'updates').mkdir();(home/'updates/admission.lock').touch()
+   binary=home/'bin/acp-slack-adapter';binary.write_bytes(b'old-slack')
+   identity=str(uuid.uuid4());name='acp-slack-adapter-'+identity+'.service'
+   w.write(home/'adapter.json',{'id':identity,'enabled':True,'server':{'port':19000+i}})
+   (home/'secrets').mkdir();(home/'secrets/control-token').write_text('fixture-only')
+   with contextlib.closing(sqlite3.connect(home/'state.sqlite3')) as db:
+    db.executescript('CREATE TABLE jobs(status TEXT); CREATE TABLE outbox(status TEXT);')
+    if i:db.execute("INSERT INTO jobs VALUES ('running')")
+    db.commit()
+   self.registration['components'].append({'id':'slack-'+str(i),'kind':'slack','binary':str(binary)})
+   self.registration['services'].append({'kind':'systemd-user','name':name})
+   self.registration['slack_homes'].append(str(home))
+  w.write(self.path,self.registration);obj=self.worker();plan=self.plan(obj)
+  plan['components'][0]={'id':'instance','available':False,'installed_sha256':w.digest(self.binary)}
+  for i,p in enumerate(self.registration['components'][1:]):
+   part={'id':p['id'],'available':i==0,'installed_sha256':w.digest(p['binary'])}
+   if i==0:
+    candidate=self.state/'plans/123/slack-0.candidate';candidate.write_bytes(b'new-slack');part['sha256']=w.digest(candidate)
+   plan['components'].append(part)
+  return obj,plan
+
+ def test_connector_only_apply_and_rollback_leave_live_host_connection_alone(self):
+  obj,plan=self.connector_fixture();calls=[];drains=[];host_stat=self.binary.stat()
+  # A real persistent transport represents another experience's ACP connection.
+  host=subprocess.Popen([sys.executable,'-u','-c','import sys\nfor line in sys.stdin: print(line.strip(), flush=True)'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+  self.addCleanup(lambda: (host.terminate(),host.wait(),host.stdin.close(),host.stdout.close()) if host.poll() is None else None)
+  def service(argv,**kwargs):
+   action,name=argv[-2:];calls.append((action,name))
+   if name=='instance.service':host.terminate();host.wait()
+   return b''
+  def report(**kwargs):
+   drains.append(kwargs.get('drain',False));return {'policy':obj.policy,'active_prompts':1}
+  obj.report=report;obj.control=lambda action,scope=None:w.Worker.control(obj,action,scope)
+  with patch.object(w,'run',side_effect=service):
+   obj.apply(plan,obj.policy)
+   host.stdin.write('still connected\n');host.stdin.flush();self.assertEqual(host.stdout.readline(),'still connected\n')
+   obj.apply(plan,obj.policy,rollback=True)
+   host.stdin.write('still connected after rollback\n');host.stdin.flush();self.assertEqual(host.stdout.readline(),'still connected after rollback\n')
+  name=self.registration['services'][1]['name']
+  self.assertEqual(calls,[('stop',name),('start',name)]*2)
+  self.assertFalse(any(drains));self.assertEqual(self.binary.stat().st_mtime_ns,host_stat.st_mtime_ns)
+  self.assertFalse((pathlib.Path(self.registration['slack_homes'][1])/'updates/drain.json').exists())
+  self.assertEqual((pathlib.Path(self.registration['slack_homes'][0])/'bin/acp-slack-adapter').read_bytes(),b'old-slack')
+
+ def test_connector_health_accepts_unrestarted_host_and_ignores_other_connector(self):
+  obj,plan=self.connector_fixture();scope=obj.restart_scope(plan)
+  obj.api=lambda *a,**k:{'instance_id':'fixture','uptime_ms':86400000}
+  expected={p['id']:w.digest(p['binary']) for p in obj.c['components']}
+  obj.state['cutover_at']=1234
+  with patch.object(w.ssl,'create_default_context'),patch.object(w,'http_json',return_value={'state':{'slack_connection':{'state':'connected'}},'runtime':{'updated_at':1235}}) as http:
+   w.Worker.health(obj,expected,scope)
+  self.assertEqual(http.call_count,1);self.assertIn(':19000/',http.call_args.args[0])
+
+ def test_connector_failure_and_crash_recovery_keep_frozen_service_scope(self):
+  obj,plan=self.connector_fixture();calls=[];checks=[]
+  obj.control=lambda action,scope=None:calls.append((action,scope))
+  def health(expected,scope=None):
+   checks.append(scope)
+   if len(checks)==1:raise ValueError('new connector failed')
+  obj.health=health
+  with self.assertRaisesRegex(ValueError,'new connector failed'):obj.apply(plan,obj.policy)
+  self.assertTrue(all(not scope['instance'] and len(scope['services'])==1 for _,scope in calls))
+  calls.clear();obj.health=lambda *a:None
+  # Recover from the persisted plan, as a newly started helper does.
+  obj.rollback(w.read(self.state/'plans/123/plan.json'))
+  self.assertEqual(len(calls),2);self.assertFalse(calls[0][1]['instance'])
+
+ def test_runtime_and_unknown_provider_changes_keep_full_restart_dependencies(self):
+  obj,plan=self.connector_fixture();plan['components'][0]['available']=True
+  self.assertEqual(obj.restart_scope(plan),obj.full_restart_scope())
+  plan['components'][0]['available']=False
+  obj.c['components'].append({'id':'image','provider':'command'})
+  plan['components'].append({'id':'image','available':True})
+  self.assertEqual(obj.restart_scope(plan),obj.full_restart_scope())
+
+ def test_legacy_connector_mapping_and_explicit_native_service_mapping(self):
+  obj,plan=self.connector_fixture();scope=obj.restart_scope(plan);self.assertFalse(scope['instance'])
+  obj.c['services'][1]={'kind':'launchd','name':'io.fixture.connector'}
+  home=pathlib.Path(obj.c['slack_homes'][0]);w.write(home/'install.json',{'service':obj.c['services'][1]})
+  self.assertEqual(obj.restart_scope(plan)['services'],['io.fixture.connector'])
+  obj.c['components'][1]['service_name']='io.fixture.connector';(home/'install.json').unlink()
+  self.assertEqual(obj.restart_scope(plan)['services'],['io.fixture.connector'])
+  del obj.c['components'][1]['service_name']
+  self.assertTrue(obj.restart_scope(plan)['instance'])
+
+ def test_changed_scope_rejected_before_cutover_or_rollback(self):
+  obj,plan=self.connector_fixture();plan['restart_scope']=obj.restart_scope(plan)
+  obj.c['services'][1]['name']='different.service'
+  obj.control=lambda *a:self.fail('service stopped before scope validation')
+  with self.assertRaisesRegex(ValueError,'restart_scope_changed'):obj.apply(plan,obj.policy)
+  with self.assertRaisesRegex(ValueError,'restart_scope_changed'):obj.rollback(plan)
+
+ def test_invalid_explicit_service_binding_is_rejected(self):
+  self.registration['components'][0]['service_name']='missing.service';w.write(self.path,self.registration)
+  with self.assertRaisesRegex(ValueError,'unknown_component_service'):w.load_registration(self.path)
 
 if __name__=='__main__':unittest.main()

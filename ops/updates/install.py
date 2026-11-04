@@ -28,7 +28,7 @@ def enroll(home,state,connector_homes,worker):
     for n,folder in enumerate(connector_homes):
         folder=folder.resolve();adapter=json.loads((folder/'adapter.json').read_text())
         services.append(service(folder,'acp-slack-adapter',str(uuid.UUID(adapter['id']))))
-        components.append({'id':'slack-'+str(n+1),'kind':'slack','binary':str(folder/'bin/acp-slack-adapter')})
+        components.append({'id':'slack-'+str(n+1),'kind':'slack','binary':str(folder/'bin/acp-slack-adapter'),'service_name':services[-1]['name']})
     if previous:
         known={p['id'] for p in components}
         components.extend(p for p in previous['components'] if p['id'] not in known and p.get('kind') not in ('instance','runtime','slack'))
