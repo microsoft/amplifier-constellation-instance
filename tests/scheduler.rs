@@ -318,6 +318,126 @@ async fn interruption_never_replays_side_effects_without_reconciliation() {
     stop.send(()).unwrap();
     task.await.unwrap();
 }
+
+#[tokio::test]
+async fn graceful_restart_keeps_uncertain_work_held_while_scheduler_remains_live() {
+    let f = Fixture::new();
+    f.enable(false);
+    let w = f.create("SLOW_RUN", true);
+    let run = f.queue(&w, budget());
+    let (stop, task) = scheduler::start(f.state.clone()).unwrap();
+    f.wait(&run, &["running"]).await;
+
+    // "running" is persisted before the ACP prompt is delivered. Require
+    // independent backend evidence that the original action actually started.
+    let prompts = f.dir.path().join("work/prompts.log");
+    for _ in 0..200 {
+        if std::fs::read_to_string(&prompts).is_ok_and(|contents| contents.lines().count() == 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let started_before_restart = std::fs::read_to_string(&prompts).unwrap().lines().count();
+    assert_eq!(
+        started_before_restart, 1,
+        "fixture never durably recorded the original prompt"
+    );
+
+    stop.send(()).unwrap();
+    task.await.unwrap();
+    let interrupted = f.wait(&run, &["needs_reconciliation"]).await;
+    assert!(interrupted["reconciliation"].is_null());
+
+    let reopened = Arc::new(AppState::open(f.dir.path().into()).unwrap());
+    let (stop, task) = scheduler::start(reopened.clone()).unwrap();
+
+    // Prove the restarted claim loop is live with unrelated authorized work.
+    // This is not a resolver: it has no relationship to the held execution and
+    // never receives authority to reconcile or retry it.
+    let mut control = work::create_work(
+        &reopened,
+        serde_json::from_value(
+            json!({"title":"Scheduler liveness control","goal":"Write and check a local fixture artifact"}),
+        )
+        .unwrap(),
+        "operator",
+        None,
+    )
+    .unwrap();
+    control = work::command_work(
+        &reopened,
+        control["id"].as_str().unwrap(),
+        serde_json::from_value(
+            json!({"expected_revision":control["revision"],"command":{"type":"accept"}}),
+        )
+        .unwrap(),
+        "operator",
+        None,
+    )
+    .unwrap();
+    let control_run = scheduler::command(
+        &reopened,
+        control["id"].as_str().unwrap(),
+        serde_json::from_value(json!({
+            "type":"queue",
+            "expected_work_revision":control["revision"],
+            "request_id":"scheduler-liveness-control",
+            "budget":budget()
+        }))
+        .unwrap(),
+        "operator",
+    )
+    .unwrap();
+    for _ in 0..200 {
+        let current = reopened
+            .get_record("work_execution", control_run["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        if current["state"] == "reported" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        reopened
+            .get_record("work_execution", control_run["id"].as_str().unwrap(),)
+            .unwrap()
+            .unwrap()["state"],
+        "reported",
+        "restarted scheduler did not execute the liveness control"
+    );
+
+    // Hands-off with respect to the uncertain work: the harness never calls
+    // reconcile/retry, queues resolver work, sends a wake message, or repairs a
+    // grant. Persistence alone is not autonomous recovery.
+    let held = reopened
+        .get_record("work_execution", run["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(held["state"], "needs_reconciliation");
+    assert!(held["reconciliation"].is_null());
+    assert_eq!(
+        scheduler::inspect(&reopened).unwrap()["counts"]["needs_reconciliation"],
+        1
+    );
+    assert_eq!(
+        scheduler::inspect_work(&reopened, w["id"].as_str().unwrap(), None).unwrap()["runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "uncertain work changed without explicit recovery authority"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&prompts).unwrap().lines().count(),
+        started_before_restart + 1,
+        "expected exactly the unrelated liveness prompt and no replay"
+    );
+
+    stop.send(()).unwrap();
+    task.await.unwrap();
+}
+
 #[tokio::test]
 async fn time_output_tool_and_approval_limits_stop_with_explicit_uncertainty() {
     for (goal, budget, reason) in [
