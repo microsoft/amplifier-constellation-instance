@@ -54,6 +54,12 @@ sudo install -m 0644 ops/container/apparmor.profile /etc/apparmor.d/constellatio
 sudo apparmor_parser -r /etc/apparmor.d/constellation-installation
 ```
 
+The image includes Rust 1.93 (the Constellation crates require Rust 1.88 or
+newer) and PAM development headers for Linux tests. For native command internet
+access, explicitly set `command_network` to `inherit` using an updated Linux
+runtime. Workspace and host-file boundaries remain in place, and the container
+firewall still controls reachable destinations.
+
 Record the resulting image ID and use that immutable ID in private manifests.
 Keep the bridge, firewall configuration and manifests outside repositories and
 outside all container mounts. Persist `firewall.py` and its configuration in a

@@ -78,7 +78,7 @@ pub fn summary(state: &AppState) -> ApiResult<Value> {
                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         });
     let environment = if let Some(c) = native {
-        json!({"kind":"native_isolated_workspace","build_verified":false,"network":"disabled", "command_seconds":c["limits"]["command_seconds"],
+        json!({"kind":"native_isolated_workspace","build_verified":false,"network":c.get("command_network").and_then(Value::as_str).unwrap_or("isolated"), "command_seconds":c["limits"]["command_seconds"],
             "message":"Local files and isolated commands are available. Repository checkout, dependency installation, and a project build have not been verified."})
     } else {
         json!({"kind":"external_acp_backend","build_verified":false,"message":"Execution is provided by the connected agent. A project build has not been verified."})

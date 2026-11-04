@@ -56,7 +56,13 @@ store until removed there.
 
 A configured/verified GitHub connection does not establish checkout, dependency
 installation, test execution, repository write permission, or successful PR creation.
-The current native local command boundary remains isolated and has no network.
+Native local commands keep workspace file isolation. With an updated Linux runtime,
+**Model & capabilities → Command network access** can separately use the
+installation’s network (including its container firewall). Networking stays off
+until the owner enables it. The same `command_network` setting is exposed through
+the native configuration API, CLI, and semantic `native.command_network` UI draft.
+The enclosing environment determines reachable addresses; this is not a separate
+internet-only firewall. Credentials remain managed by their respective tools.
 `ready_to_develop` and `environment.build_verified` remain false until a future
 project/environment acceptance check can establish them. Status describes that
 limit instead of presenting account connectivity as full development readiness.
