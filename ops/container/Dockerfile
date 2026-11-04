@@ -5,7 +5,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git gh python3 python3-venv python3-pip python3-pam \
-    nodejs npm build-essential pkg-config libssl-dev libpam0g libpam0g-dev bubblewrap \
+    nodejs npm build-essential pkg-config cmake libclang-dev llvm-dev libssl-dev libpam0g libpam0g-dev bubblewrap \
     tini iproute2 && rm -rf /var/lib/apt/lists/*
 COPY --from=rust-toolchain /toolchain/bin/ /usr/local/bin/
 COPY --from=rust-toolchain /toolchain/lib/ /usr/local/lib/

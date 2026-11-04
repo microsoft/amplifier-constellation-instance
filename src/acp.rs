@@ -335,6 +335,7 @@ async fn relay_connection(
     let mut idle_deadline = Instant::now() + idle_duration;
     let mut initialized = false;
     let mut http_mcp_supported = false;
+    let mut context_snapshots_supported = false;
     let mut native_history = Value::Null;
     let mut pending_context = BTreeMap::<String, context::Prepared>::new();
     let mut session_context = BTreeMap::<String, context::Prepared>::new();
@@ -472,7 +473,11 @@ async fn relay_connection(
                                 }
                             } else { String::new() };
                             let context = format!("[Configured agent instance context]\nName: {}\nPurpose: {}\nInstructions:\n{}\nProfiles:\n{}\n{}\n[/Configured agent instance context]", current.name, current.purpose, current.instructions, profiles, continuity);
-                            value["params"]["prompt"].as_array_mut().unwrap().insert(0, json!({"type":"text","text":context,"_meta":{"io.github.bkrabach.agent-instance":{"context":true}}}));
+                            let mut block=json!({"type":"text","text":context,"_meta":{"io.github.bkrabach.agent-instance":{"context":true}}});
+                            if context_snapshots_supported {
+                                block["_meta"]["com.microsoft.amplifier.context-snapshot"]=json!({"version":1,"key":format!("instance:{}",current.instance_id),"retainedText":"Earlier installation context; use the latest supplied identity, profile, permissions and authorized context. Retrieve original evidence through session_history when needed."});
+                            }
+                            value["params"]["prompt"].as_array_mut().unwrap().insert(0, block);
                             if serde_json::to_vec(&value)?.len() > max_frame {
                                 reject_request(&outgoing, &value, -32602, "Prompt and configured instance context exceed the message limit").await?;
                                 continue;
@@ -552,6 +557,7 @@ async fn relay_connection(
                             if request.method == "initialize" {
                                 initialized = true;
                                 http_mcp_supported = value["result"]["agentCapabilities"]["mcpCapabilities"]["http"] == true;
+                                context_snapshots_supported = value["result"]["_meta"]["com.microsoft.amplifier.context-snapshot"]["version"] == 1;
                                 native_history = value["result"]["_meta"]["io.github.bkrabach.agent-runtime"]["history"].clone();
                                 let backend_info = value["result"].get("agentInfo").cloned().unwrap_or(Value::Null);
                                 ensure!(value["result"].is_object(), "ACP backend returned malformed initialization");
