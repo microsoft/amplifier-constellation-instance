@@ -93,6 +93,9 @@ ExecStart=/usr/bin/python3 {state}/bridge.py {state}/bridge.json
 Restart=on-failure
 RestartSec=2
 UMask=0077
+MemoryMax=128M
+TasksMax=64
+LimitNOFILE=256
 [Install]
 WantedBy=default.target
 ''')
