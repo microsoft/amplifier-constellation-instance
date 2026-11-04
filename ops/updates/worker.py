@@ -32,7 +32,7 @@ def run(argv,timeout=90):
     return p.stdout
 
 def version(text):
-    m=re.search(r'\b(\d+)\.(\d+)\.(\d+)',text)
+    m=re.search(r'\bv?(\d+)\.(\d+)\.(\d+)',text)
     if not m: raise ValueError('version_unavailable')
     return tuple(map(int,m.groups()))
 

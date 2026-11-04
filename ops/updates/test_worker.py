@@ -22,6 +22,20 @@ class UpdateTests(unittest.TestCase):
  def test_helper_state_cannot_be_inside_agent(self):
   self.registration['state']=str(self.home/'helper');w.write(self.path,self.registration)
   with self.assertRaisesRegex(ValueError,'outside'):w.load_registration(self.path)
+ def test_stable_github_tags_match_installed_versions(self):
+  for tag in ['v0.14.0','v0.12.0']:
+   with self.subTest(tag=tag),patch.object(w,'gh',return_value={'tag_name':tag}),patch.object(w,'run',return_value=b'agent-instance 0.14.0'),patch.object(w,'download') as download:
+    result=w.candidate(self.registration['components'][0],'stable',self.state)
+    self.assertFalse(result['available']);download.assert_not_called()
+ def test_newer_prefixed_release_prepares_verified_candidate(self):
+  blob=io.BytesIO()
+  with zipfile.ZipFile(blob,'w') as z:z.writestr('agent-instance',b'new-binary')
+  release={'tag_name':'v0.15.0','html_url':'https://github.com/microsoft/amplifier-constellation-instance/releases/tag/v0.15.0','assets':[{'name':'agent-instance-aarch64-unknown-linux-gnu.tar.gz','browser_download_url':'https://github.com/microsoft/amplifier-constellation-instance/releases/download/v0.15.0/binary','digest':'sha256:'+'a'*64}]}
+  def download(url,dest,digest):dest.write_bytes(blob.getvalue())
+  with patch.object(w,'platform_names',return_value=('Linux','aarch64','aarch64-unknown-linux-gnu')),patch.object(w,'gh',return_value=release),patch.object(w,'run',side_effect=[b'agent-instance 0.14.0',b'agent-instance 0.15.0']),patch.object(w,'download',side_effect=download) as fetch:
+   result=w.candidate(self.registration['components'][0],'stable',self.state)
+   self.assertTrue(result['available']);self.assertEqual(result['tag'],'v0.15.0');self.assertEqual(fetch.call_args.args[2],release['assets'][0]['digest'])
+   self.assertEqual((self.state/'instance.candidate').read_bytes(),b'new-binary')
  def test_apply_and_manual_rollback_preserve_data(self):
   obj=self.worker();plan=self.plan(obj);(self.home/'conversation.json').write_text('keep new messages')
   obj.apply(plan,obj.policy,True);self.assertEqual(self.binary.read_bytes(),b'new-binary');self.assertEqual(obj.state['state'],'succeeded')
