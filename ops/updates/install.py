@@ -10,6 +10,11 @@ def enroll(home,state,connector_homes,worker):
     if state.is_relative_to(home):raise ValueError('Place the helper outside the agent directory')
     config=json.loads((home/'config.json').read_text())['config'];identifier=str(uuid.UUID(config['instance_id']))
     spec=importlib.util.spec_from_file_location('update_worker',worker);w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
+    existing_path=state/'registration.json'
+    previous=w.load_registration(existing_path) if existing_path.exists() else None
+    if previous and (previous['instance_id']!=identifier or Path(previous['home']).resolve()!=home):raise ValueError('Helper directory belongs to a different installation')
+    if (state/'state.json').exists() and w.read(state/'state.json').get('state') in w.CRITICAL|{'waiting_for_idle'}:raise ValueError('Wait for the current update before changing enrollment')
+    connector_homes=list(dict.fromkeys([Path(h) for h in (previous or {}).get('slack_homes',[])]+[h.resolve() for h in connector_homes]))
     services=[];components=[];system=platform.system()
     def service(folder,kind,id):
         if system=='Linux':return {'kind':'systemd-user','name':kind+'-'+id+'.service'}
@@ -24,6 +29,11 @@ def enroll(home,state,connector_homes,worker):
         folder=folder.resolve();adapter=json.loads((folder/'adapter.json').read_text())
         services.append(service(folder,'acp-slack-adapter',str(uuid.UUID(adapter['id']))))
         components.append({'id':'slack-'+str(n+1),'kind':'slack','binary':str(folder/'bin/acp-slack-adapter')})
+    if previous:
+        known={p['id'] for p in components}
+        components.extend(p for p in previous['components'] if p['id'] not in known and p.get('kind') not in ('instance','runtime','slack'))
+        service_names={s['name'] for s in services}
+        services.extend(s for s in previous['services'] if s['name'] not in service_names)
     registration={'schema':1,'instance_id':identifier,'home':str(home),'state':str(state),'components':components,'services':services,'slack_homes':[str(h.resolve()) for h in connector_homes]}
     state.mkdir(parents=True,exist_ok=True,mode=0o700)
     for p in connector_homes:
@@ -38,7 +48,9 @@ def enroll(home,state,connector_homes,worker):
         def quote(x):return '"'+x.replace('\\','\\\\').replace('"','\\"').replace('%','%%').replace('$','$$')+'"'
         unit=Path.home()/'.config/systemd/user'/(name+'.service');unit.parent.mkdir(parents=True,exist_ok=True)
         unit.write_text('[Unit]\nDescription=Updates for one Constellation installation\nAfter=network-online.target\n[Service]\nExecStart='+' '.join(map(quote,argv))+'\nRestart=on-failure\nRestartSec=5\nUMask=0077\n[Install]\nWantedBy=default.target\n');unit.chmod(0o600)
+        active=subprocess.run(['systemctl','--user','is-active','--quiet',name+'.service'],capture_output=True).returncode==0
         run('systemctl','--user','daemon-reload');run('systemctl','--user','enable','--now',name+'.service')
+        if active:run('systemctl','--user','restart',name+'.service')
     elif system=='Darwin':
         label='io.'+name;domain='gui/'+str(os.getuid());path=Path.home()/'Library/LaunchAgents'/(label+'.plist');path.parent.mkdir(parents=True,exist_ok=True)
         subprocess.run(['launchctl','bootout',domain+'/'+label],capture_output=True)
