@@ -26,7 +26,9 @@ jobs:
       - name: Check optional container administration contracts
         run: python3 ops/container/test_container.py
       - name: Check installation updater recovery
-        run: python3 ops/updates/test_worker.py
+        run: |
+          python3 ops/updates/test_worker.py
+          python3 ops/updates/test_container_provider.py
       - name: Check installation contracts
         run: python3 scripts/test-installation.py
       - name: Check release retries preserve published assets

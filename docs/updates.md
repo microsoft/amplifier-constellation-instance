@@ -87,3 +87,33 @@ The UI's route, drafts, controls and actions use the existing view API, includin
 `updates.check`, `updates.update`, `updates.rollback` and `updates.save`. A voice
 agent can display the page, edit settings, and press the same controls through the
 existing authenticated browser-control interface.
+
+## Exact plans for additional software
+
+Owner-enrolled command providers may set `"protocol": 2` and supply a fixed
+`verify` command in addition to `status`, `plan`, `apply`, and `rollback`. The
+helper saves the entire plan response in a private file and verifies its hash
+before stopping services. It supplies the file through
+`CONSTELLATION_UPDATE_PLAN`; the file contains `id`, `component`, and `plan`.
+Commands must consume this saved plan, rather than re-resolving "latest" during
+installation. A successful `verify` exit is required after apply and rollback.
+Rollback must be idempotent and handle an interrupted apply. Only providers whose
+apply was attempted are rolled back. Providers keep their own private receipts
+outside the agent's writable folders. Existing protocol-1 registrations continue
+to work, with their previous provider-owned transaction semantics.
+
+`ops/updates/container_provider.py` implements this protocol for existing Linux
+Constellation containers. Its owner-only configuration names an absolute
+`manifest`, `state`, and `installer` path plus an `image` reference and optional
+`pull: true`. Each command is an absolute Python path, the absolute provider path,
+`--config`, the private config path, `--action`, and the action name. Planning
+resolves the image to its immutable local Docker digest. Apply preserves mounts,
+credentials and network restrictions, retains the previous container, and checks
+the running image. The surrounding helper also verifies instance/Slack health.
+An owner must publish or select an image source; this does not publish images or
+make arbitrary software on the computer eligible for updates.
+
+Source-installed services, game adapters and their package dependencies can use
+the same protocol with their own build, digest, health and rollback logic. They
+are not silently treated as single-binary updates. The dashboard reports enrolled
+components, not a promise that every installed program has an update provider.
