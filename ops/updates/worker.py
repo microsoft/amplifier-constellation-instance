@@ -58,9 +58,14 @@ def load_registration(path):
                 a=p['commands'][action]
                 if not a or not Path(a[0]).is_absolute() or not all(isinstance(x,str) for x in a):raise ValueError('fixed_absolute_provider_commands_required')
         else: raise ValueError('unsupported_provider')
+    service_names=set()
     for s in c.get('services',[]):
         if s['kind'] not in ['systemd-user','launchd','scheduled-task']:raise ValueError('unsupported_service')
         if not re.fullmatch(r'[A-Za-z0-9_.@-]+',s['name']):raise ValueError('invalid_service_name')
+        if s['name'] in service_names:raise ValueError('duplicate_service_name')
+        service_names.add(s['name'])
+    for p in c['components']:
+        if 'service_name' in p and p['service_name'] not in service_names:raise ValueError('unknown_component_service')
     return c
 
 def http_json(url,body=None,headers=None,ctx=None,method=None):
@@ -155,8 +160,38 @@ class Worker:
     def save(self,**values):self.state.update(values,updated_at=int(time.time()*1000));write(self.file,self.state)
     def report(self,drain=False,finished=None):
         return self.api('updates/report',{'status':self.state,'finished_request':finished,'drain_seconds':60 if drain else 0})
-    def control(self,action):
-        services=self.c.get('services',[])
+    def full_restart_scope(self):
+        return {'services':[s['name'] for s in self.c.get('services',[])],
+                'instance':True,'slack_homes':self.c.get('slack_homes',[])}
+    def restart_scope(self,plan):
+        """Keep a connector-only update out of unrelated ACP connections.
+
+        Recognize older registrations by the connector's installed identity.
+        Unknown providers and runtime/instance changes retain full dependencies.
+        """
+        names=set();homes=[]
+        registered={s['name'] for s in self.c.get('services',[])}
+        by_id={p['id']:p for p in self.c['components']}
+        for part in plan['components']:
+            if not part['available']:continue
+            p=by_id[part['id']]
+            if p.get('provider','github')!='github' or p.get('kind')!='slack':return self.full_restart_scope()
+            home=Path(p['binary']).parent.parent
+            if str(home) not in self.c.get('slack_homes',[]):return self.full_restart_scope()
+            name=p.get('service_name')
+            if name is None:
+                try:
+                    identity=str(uuid.UUID(read(home/'adapter.json')['id']))
+                    name='acp-slack-adapter-'+identity+'.service'
+                    if name not in registered:name=read(home/'install.json')['service']['name']
+                except (OSError,ValueError,KeyError,TypeError):return self.full_restart_scope()
+            if name not in registered:return self.full_restart_scope()
+            names.add(name);homes.append(str(home))
+        return {'services':[s['name'] for s in self.c.get('services',[]) if s['name'] in names],
+                'instance':False,'slack_homes':list(dict.fromkeys(homes))}
+    def control(self,action,scope=None):
+        scope=scope or self.full_restart_scope()
+        services=[s for s in self.c.get('services',[]) if s['name'] in scope['services']]
         for s in (reversed(services) if action=='stop' else services):
             if s['kind']=='systemd-user':run(['systemctl','--user',action,s['name']])
             elif s['kind']=='launchd':
@@ -167,15 +202,17 @@ class Worker:
             else:
                 verb='Start' if action=='start' else 'Stop'
                 run(['powershell.exe','-NoProfile','-NonInteractive','-Command',verb+'-ScheduledTask -TaskName "'+s['name']+'"'])
-    def health(self,expected):
+    def health(self,expected,scope=None):
+        scope=scope or self.full_restart_scope()
         deadline=time.monotonic()+60
         while time.monotonic()<deadline:
             try:
                 status=self.api('status')
-                if status['instance_id']!=self.c['instance_id'] or status['uptime_ms']>90000:raise ValueError('instance_not_restarted')
+                if status['instance_id']!=self.c['instance_id']:raise ValueError('instance_identity_mismatch')
+                if scope['instance'] and status['uptime_ms']>90000:raise ValueError('instance_not_restarted')
                 for p in self.c['components']:
                     if p.get('provider','github')=='github' and digest(p['binary'])!=expected[p['id']]:raise ValueError('installed_binary_mismatch')
-                for home in self.c.get('slack_homes',[]):
+                for home in scope['slack_homes']:
                     cfg=read(Path(home)/'adapter.json');ctx=ssl.create_default_context(cafile=str(Path(home)/'tls/root-ca.crt'))
                     h={'Authorization':'Bearer '+(Path(home)/'secrets/control-token').read_text().strip()}
                     value=http_json('https://127.0.0.1:'+str(cfg['server']['port'])+'/api/v1/status',headers=h,ctx=ctx)
@@ -209,6 +246,7 @@ class Worker:
                     part['provider_plan_sha256']=digest(file)
                 components.append(part)
         plan={'id':identifier,'components':components,'policy_revision':policy['revision'],'channel':policy['channel'],'created_at':int(time.time()*1000)}
+        plan['restart_scope']=self.restart_scope(plan)
         write(folder/'plan.json',plan)
         self.save(state='available' if any(p['available'] for p in components) else 'up_to_date',plan_id=identifier,components=components,last_check=int(time.time()*1000))
         self.prune_plans();self.report();return plan
@@ -225,26 +263,27 @@ class Worker:
         current=self.api()['policy']
         if current['revision']!=policy['revision'] or agent and not current['agent_initiated']:raise ValueError('update_policy_changed')
     @contextlib.contextmanager
-    def drained(self,policy,agent):
+    def drained(self,policy,agent,scope=None):
+        scope=scope or self.full_restart_scope()
         locks=[]
         try:
             self.save(state='waiting_for_idle');deadline=time.monotonic()+1800
             while True:
-                self.allowed(policy,agent);status=self.report(drain=True);busy=status['active_prompts']
-                for path in self.c.get('slack_homes',[]):
+                self.allowed(policy,agent);status=self.report(drain=scope['instance']);busy=status['active_prompts'] if scope['instance'] else 0
+                for path in scope['slack_homes']:
                     h=Path(path);write(h/'updates/drain.json',{'expires_at':int(time.time()*1000)+60000,'plan_id':self.state['plan_id']})
                     with sqlite3.connect('file:'+str(h/'state.sqlite3')+'?mode=ro',uri=True) as db:
                         busy+=db.execute("SELECT (SELECT count(*) FROM jobs WHERE status='running')+(SELECT count(*) FROM outbox WHERE status IN ('ready','sending','uncertain'))").fetchone()[0]
                 if not busy:
                     if os.name!='nt':
                         import fcntl
-                        for path in self.c.get('slack_homes',[]):
+                        for path in scope['slack_homes']:
                             f=(Path(path)/'updates/admission.lock').open('rb');fcntl.flock(f,fcntl.LOCK_EX);locks.append(f)
                     # Recheck after admission locks; a prompt may have entered just
                     # before the drain signal was published.
-                    if self.report(drain=True)['active_prompts']==0:
+                    if self.report(drain=scope['instance'])['active_prompts']==0 or not scope['instance']:
                         pending=0
-                        for path in self.c.get('slack_homes',[]):
+                        for path in scope['slack_homes']:
                             with sqlite3.connect('file:'+str(Path(path)/'state.sqlite3')+'?mode=ro',uri=True) as db:
                                 pending+=db.execute("SELECT (SELECT count(*) FROM jobs WHERE status='running')+(SELECT count(*) FROM outbox WHERE status IN ('ready','sending','uncertain'))").fetchone()[0]
                         if not pending:break
@@ -255,22 +294,26 @@ class Worker:
             yield
         finally:
             for f in locks:f.close()
-            for path in self.c.get('slack_homes',[]):write(Path(path)/'updates/drain.json',{'expires_at':0})
+            for path in scope['slack_homes']:write(Path(path)/'updates/drain.json',{'expires_at':0})
     def replace(self,source,dest):
         dest=Path(dest);temp=dest.with_name(dest.name+'.update-'+uuid.uuid4().hex)
         shutil.copyfile(source,temp);temp.chmod(0o755)
         with temp.open('r+b') as f:os.fsync(f.fileno())
         os.replace(temp,dest)
     def rollback(self,plan):
-        folder=self.root/'plans'/plan['id'];self.validate_provider_plans(plan);self.save(state='rolling_back');self.control('stop')
+        # Old interrupted plans actually stopped every registered service.
+        scope=plan.get('restart_scope') or self.full_restart_scope()
+        if 'restart_scope' in plan and scope!=self.restart_scope(plan):raise ValueError('restart_scope_changed')
+        folder=self.root/'plans'/plan['id'];self.validate_provider_plans(plan);self.save(state='rolling_back',cutover_at=int(time.time()*1000));self.control('stop',scope)
         expected={}
         for p in self.c['components']:
             if p.get('provider','github')=='github':
                 backup=folder/(p['id']+'.previous');expected[p['id']]=plan['previous'][p['id']]
                 if digest(backup)!=expected[p['id']]:raise ValueError('rollback_digest_mismatch')
-                self.replace(backup,p['binary'])
+                part=next(x for x in plan['components'] if x['id']==p['id'])
+                if part['available'] or 'restart_scope' not in plan:self.replace(backup,p['binary'])
             elif p['id'] in plan.get('provider_attempts',[x['id'] for x in plan['components'] if x['available']]):self.provider_call(p,'rollback',folder)
-        self.control('start');self.provider_verify(plan);self.health(expected);self.save(state='rolled_back',rollback_plan_id=None);self.report()
+        self.control('start',scope);self.provider_verify(plan);self.health(expected,scope);self.save(state='rolled_back',rollback_plan_id=None);self.report()
     def validate_provider_plans(self,plan):
         folder=self.root/'plans'/plan['id']
         for p in self.c['components']:
@@ -281,7 +324,12 @@ class Worker:
         folder=self.root/'plans'/plan['id'];self.save(plan_id=plan['id'])
         if not rollback and not any(p['available'] for p in plan['components']):self.save(state='up_to_date');return
         if not rollback and plan['policy_revision']!=policy['revision']:raise ValueError('plan_policy_changed')
-        with self.drained(policy,agent):
+        scope=(plan.get('restart_scope') or self.full_restart_scope()) if rollback else self.restart_scope(plan)
+        if not rollback:
+            if 'restart_scope' in plan and plan['restart_scope']!=scope:raise ValueError('restart_scope_changed')
+            plan['restart_scope']=scope
+            write(folder/'plan.json',plan)
+        with self.drained(policy,agent,scope):
             self.allowed(policy,agent)
             if scheduled and policy['install']=='window' and not self.in_window(policy):raise ValueError('update_window_ended_before_idle')
             if rollback:
@@ -304,9 +352,9 @@ class Worker:
                 expected[p['id']]=part['sha256'] if part['available'] else previous[p['id']]
             plan['previous']=previous;plan['provider_attempts']=[];write(folder/'plan.json',plan)
             # State survives both instance restarts and helper interruption.
-            self.save(state='stopping',cutover_at=int(time.time()*1000));self.report(drain=True)
+            self.save(state='stopping',cutover_at=int(time.time()*1000));self.report(drain=scope['instance'])
             try:
-                self.control('stop');self.save(state='swapping')
+                self.control('stop',scope);self.save(state='swapping')
                 for p in self.c['components']:
                     part=next(x for x in plan['components'] if x['id']==p['id'])
                     if part['available']:
@@ -314,7 +362,7 @@ class Worker:
                         else:
                             plan.setdefault('provider_attempts',[]).append(p['id']);write(folder/'plan.json',plan)
                             self.provider_call(p,'apply',folder)
-                self.control('start');self.save(state='verifying');self.provider_verify(plan);self.health(expected)
+                self.control('start',scope);self.save(state='verifying');self.provider_verify(plan);self.health(expected,scope)
                 self.save(state='succeeded',rollback_plan_id=plan['id'],installed_at=int(time.time()*1000));self.report()
             except BaseException:
                 try:self.rollback(plan)
