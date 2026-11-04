@@ -799,3 +799,46 @@ async fn runtime_stop_kills_backend_and_its_descendant() {
     }
     panic!("Backend descendant survived runtime stop");
 }
+
+#[tokio::test]
+async fn optional_attention_is_intercepted_but_plain_acp_and_streaming_still_work() {
+    use agent_instance::{attention, state::now_ms};
+    let i = Installation::new();
+    // Offline provider exercises the separately-labeled, bounded engage preference.
+    i.state.config.write().unwrap().config.attention = Some(attention::Config {
+        endpoint: "http://127.0.0.1:9/".into(),
+        model: "fixture".into(),
+        protocol: "system_one".into(),
+        auth: "bearer".into(),
+        credential_secret: "provider-test".into(),
+        decisions_per_hour: 20,
+        turns_per_hour: 5,
+        uncertain_turns_per_hour: 1,
+    });
+    let mut c = i.connect();
+    let init = c.initialize().await;
+    assert_eq!(init["result"]["_meta"][attention::META]["enabled"], true);
+    let sid = c.new_session(&i.work).await;
+    let event = json!({"sessionId":sid,"occurredAt":now_ms(),"context":{"conversation_id":"room","agent":{"id":"a","name":"Agent"},"participants":[{"id":"a","name":"Agent"},{"id":"b","name":"Human"}],"messages":[{"id":"event","sender":"b","text":"What are you working on?"}],"trigger_id":"event"}});
+    c.send(200, attention::METHOD, event.clone()).await;
+    let offer = c.response(200).await.0["result"].clone();
+    assert_eq!(offer["action"], "engage");
+    c.send(201,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"One admitted response"}],"_meta":{attention::META:{"id":offer["id"],"ticket":offer["ticket"]}}})).await;
+    let (r, updates) = c.response(201).await;
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+    assert!(
+        detail(&updates)["echo"]
+            .as_str()
+            .unwrap()
+            .contains("One admitted response")
+    );
+    c.send(202, attention::METHOD, event).await;
+    assert_eq!(c.response(202).await.0["result"]["reason"], "duplicate");
+    c.send(203,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"Direct ordinary ACP still works"}]})).await;
+    assert_eq!(c.response(203).await.0["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        attention::report(&i.state).unwrap()["counts"]["status:admitted"],
+        1
+    );
+    c.disconnect().await;
+}

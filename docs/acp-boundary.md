@@ -60,3 +60,11 @@ The fixture tests transport and lifecycle mechanics; they do not prove an arbitr
 - [Extensibility](https://agentclientprotocol.com/protocol/v1/extensibility)
 - [Active remote transport proposal](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport)
 - [Official compatibility test kit](https://github.com/agentclientprotocol/acp-tck)
+
+## Optional host attention
+
+[Attention](attention.md) is consumed by Instance before a prompt reaches the
+backend. Advertised backend capabilities, authentication, permissions, streaming
+and session state remain backend-owned. Plain clients need not adopt the
+extension; plain engines do not implement it. Engine-family changes require a
+new installation; this boundary does not promise portable session files.

@@ -91,6 +91,8 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(crate::identity::delete)
                 .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
+        .route("/api/v1/attention", get(attention_report))
+        .route("/api/v1/attention/review", post(attention_review))
         .route("/api/v1/schema", get(schema))
         .route("/api/v1/openapi.json", get(openapi))
         .route(
@@ -854,4 +856,38 @@ async fn acp_socket(state: Arc<AppState>, headers: HeaderMap, actor: String, soc
     drop(output_rx);
     // Closing either queue asks the relay to terminate its child process group.
     let _ = tokio::time::timeout(Duration::from_secs(10), relay).await;
+}
+
+async fn attention_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    auth::check(&state, &headers, "observe", false)?;
+    Ok(Json(crate::attention::report(&state).map_err(|_| {
+        crate::error::ApiError::bad("Attention journal unavailable")
+    })?))
+}
+async fn attention_review(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(v): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::check(&state, &headers, "admin", true)?;
+    let id = v["id"]
+        .as_str()
+        .ok_or_else(|| crate::error::ApiError::bad("Choose an event"))?;
+    let verdict = v["verdict"]
+        .as_str()
+        .filter(|v| ["should_engage", "should_hold", "insufficient_evidence"].contains(v))
+        .ok_or_else(|| crate::error::ApiError::bad("Choose a review verdict"))?;
+    let _lock = state.attention_lock.lock().unwrap();
+    let mut row = state
+        .get_record("attention_events", id)
+        .map_err(|_| crate::error::ApiError::bad("Journal unavailable"))?
+        .ok_or_else(|| crate::error::ApiError::bad("Event not found"))?;
+    row["review"] = json!({"verdict":verdict,"at":now_ms()});
+    state
+        .set_record("attention_events", id, row)
+        .map_err(|_| crate::error::ApiError::bad("Journal unavailable"))?;
+    Ok(Json(json!({"saved":true})))
 }

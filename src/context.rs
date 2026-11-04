@@ -400,6 +400,18 @@ pub fn bind(state: &AppState, prepared: &Prepared, sid: &str) -> Result<()> {
     }
     Ok(())
 }
+/// Recheck current source authorization without fetching a conversation transcript.
+pub async fn revalidate(state: &AppState, hash: &str) -> Result<()> {
+    let lease = state
+        .context_leases
+        .lock()
+        .unwrap()
+        .get(hash)
+        .cloned()
+        .ok_or_else(|| anyhow!("Context session is no longer active"))?;
+    validate_lease(state, &lease).await?;
+    Ok(())
+}
 pub async fn orientation(state: &AppState, hash: &str) -> Result<Value> {
     let lease = state
         .context_leases
