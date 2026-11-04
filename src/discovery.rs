@@ -149,6 +149,24 @@ pub fn openapi() -> Value {
             "Invalidate the current browser session.",
         ),
         (
+            "/development",
+            vec!["get"],
+            "admin",
+            "Inspect repository access and execution readiness independently.",
+        ),
+        (
+            "/development/github",
+            vec!["post", "delete"],
+            "admin",
+            "Connect or remove this installation’s GitHub tools.",
+        ),
+        (
+            "/development/github/check",
+            vec!["post"],
+            "admin",
+            "Verify GitHub authentication and tools without writing to a repository.",
+        ),
+        (
             "/descriptor",
             vec!["get"],
             "observe",
@@ -372,9 +390,18 @@ pub fn openapi() -> Value {
             }
             if ["post", "put", "patch"].contains(&method)
                 || (method == "delete"
-                    && matches!(path, "/native-account" | "/native-account/login"))
+                    && matches!(
+                        path,
+                        "/native-account" | "/native-account/login" | "/development/github"
+                    ))
             {
                 let mut schema = match path {
+                    "/development/github" if method == "delete" => {
+                        json!(schemars::schema_for!(crate::development::Disconnect))
+                    }
+                    "/development/github" => {
+                        json!(schemars::schema_for!(crate::development::Connect))
+                    }
                     "/identity/avatar" => json!(schemars::schema_for!(crate::identity::Upload)),
                     "/native-account" => {
                         json!(schemars::schema_for!(crate::native_account::Disconnect))

@@ -37,6 +37,19 @@ jobs:
         run: cargo +1.93.0 clippy --locked --all-targets -- -D warnings
       - name: Build release executable
         run: cargo +1.93.0 build --release --locked
+      - uses: actions/setup-node@v4
+        if: matrix.runner == 'ubuntu-24.04'
+        with:
+          node-version: 22
+      - name: Install browser test dependencies
+        if: matrix.runner == 'ubuntu-24.04'
+        working-directory: ui/tests
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: Check owner development setup and programmable view
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
+        run: node ui/tests/development.mjs
       - name: Check model-free identity events across TLS and stdio
         run: python3 tests/identity_wss_live.py --binary target/release/agent-instance
       - name: Check real PAM with a disposable account
