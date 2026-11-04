@@ -87,6 +87,10 @@ requests just because their callers are local.
 5. Disable incompatible in-app host-service updaters before migration. Executable
    mounts are read-only; this recipe uses owner-managed updates. Do not pass
    Docker or host systemd control through to the agent to make an updater work.
+   For a Slack connector, prepare its `updates/admission.lock` before mounting
+   the update controls read-only, and use a connector build that can lock an
+   existing read-only file. Keep that same inode available to the host updater;
+   disabling the policy does not remove its drain/recovery coordination.
 6. Run `python3 ops/container/install.py /private/path/installation.json` as the
    owner. Existing container names are rejected; replacement is explicit.
 7. Verify login success/failure, authenticated ACP initialization, new and saved
@@ -94,6 +98,11 @@ requests just because their callers are local.
    host SSH files, Docker controls and unapproved private endpoints are absent
    or unreachable. Restart the container's **systemd service** and verify its
    dependent agent/connector services recover.
+   For Slack, run its `check --target all` inside the container. Require both
+   a fresh live Socket Mode connection and a successful ACP session check.
+   A running service, valid credentials, or a saved `connected` status from an
+   earlier process is insufficient. Verify an actual DM/reply with the owner
+   before considering the conversation path accepted.
 
 The private manifest includes:
 
