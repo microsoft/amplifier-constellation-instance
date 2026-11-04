@@ -546,6 +546,10 @@ fn tools() -> Value {
         .as_array_mut()
         .unwrap()
         .extend(crate::memory::mcp_tools());
+    result["tools"]
+        .as_array_mut()
+        .unwrap()
+        .extend(crate::updates::mcp_tools());
     result
 }
 async fn call_tool(state: &AppState, hash: &str, lease: &Lease, body: &Value) -> Result<Value> {
@@ -553,6 +557,9 @@ async fn call_tool(state: &AppState, hash: &str, lease: &Lease, body: &Value) ->
     let args = &body["arguments"];
     let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 40);
     match body["name"].as_str() {
+        Some("installation_updates") => {
+            crate::updates::mcp_call(state, args).map_err(|e| anyhow!(e.1))
+        }
         Some("context_list") => {
             let cursor = args["cursor"].as_str();
             ensure!(

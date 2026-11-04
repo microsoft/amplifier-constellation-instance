@@ -67,6 +67,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/auth/session", get(auth::session))
         .route("/api/v1/auth/logout", post(auth::logout))
         .route("/api/v1/status", get(status))
+        .route(
+            "/api/v1/updates",
+            get(crate::updates::get).post(crate::updates::command),
+        )
+        .route("/api/v1/updates/policy", put(crate::updates::configure))
+        .route("/api/v1/updates/report", post(crate::updates::report))
         .route("/api/v1/development", get(crate::development::status))
         .route(
             "/api/v1/development/github",
@@ -440,6 +446,15 @@ async fn descriptor(
 ) -> ApiResult<Json<Value>> {
     auth::check(&state, &headers, "observe", false)?;
     let mut document = json!({"api_version":"1","instance_id":state.instance_config().instance_id,"implementation":{"name":"agent-instance","version":env!("CARGO_PKG_VERSION")},"schema":"api/v1/schema","profile_packages":{"accepted_schemas":["twin-profile/1"],"activation":"next_prompt","rollback":true,"path":"api/v1/profile-package"},"capabilities":["config","profiles","profile-packages","secrets","runtime-control","observations","ui-state","runtime-setup","certificate-help","conversation-continuity","agent-instance.organization/1","agent-instance.work/1","agent-instance.delegation/1","agent-instance.profile-use/1","agent-instance.scheduler/1","agent-instance.memory/1","agent-instance.native-config/1","agent-instance.tool-connections/1","agent-instance.development/1"],"acp":{"transport":"stdio","attach":state.addresses.read().unwrap()["acp_attach"],"remote_bridge":{"profile":"agent-instance.wss/1","path":"api/v1/acp","authentication":"Bearer token with acp scope","standard_acp_transport":false}},"ui":{"entry":"./","embed_protocol":"agent-instance.ui/1","embed_origins":state.instance_config().server.embed_origins},"operations":[{"path":"native-config","methods":["GET","PUT"],"scope":"admin"},{"path":"native-config/schema","methods":["GET"],"scope":"admin"},{"path":"native-config/validate","methods":["POST"],"scope":"admin"},{"path":"memory","methods":["GET"],"scope":"memory:read"},{"path":"memory","methods":["POST"],"scope":"memory"},{"path":"memory/{id}","methods":["GET"],"scope":"memory:read"},{"path":"memory/{id}/commands","methods":["POST"],"scope":"memory"},{"path":"scheduler","methods":["GET"],"scope":"work:read"},{"path":"scheduler","methods":["PUT"],"scope":"work:execute"},{"path":"work/{id}/execution","methods":["GET"],"scope":"work:read"},{"path":"work/{id}/execution","methods":["POST"],"scope":"work:execute"},{"path":"organization","methods":["GET"],"scope":"work:read"},{"path":"organization","methods":["PUT"],"scope":"admin"},{"path":"work","methods":["GET"],"scope":"work:read"},{"path":"work","methods":["POST"],"scope":"work"},{"path":"work/{id}","methods":["GET"],"scope":"work:read"},{"path":"work/{id}/commands","methods":["POST"],"scope":"work"},{"path":"work/{id}/export","methods":["POST"],"scope":"work"},{"path":"work/import","methods":["POST"],"scope":"work"},{"path":"profile-use","methods":["GET"],"scope":"observe"},{"path":"profile-package","methods":["GET","POST"],"scope":"profiles"},{"path":"profile-package/restore","methods":["POST"],"scope":"profiles"},{"path":"context/providers","methods":["GET","PUT"],"scope":"admin"},{"path":"activity","methods":["GET"],"scope":"observe"},{"path":"backend","methods":["GET"],"scope":"observe"},{"path":"backend/install","methods":["POST"],"scope":"admin"},{"path":"backend/account","methods":["GET"],"scope":"admin"},{"path":"backend/account/login","methods":["GET","POST","DELETE"],"scope":"admin"},{"path":"config","methods":["GET","PUT"],"scope":"admin"},{"path":"config/validate","methods":["POST"],"scope":"admin"},{"path":"lifecycle","methods":["POST"],"scope":"admin"},{"path":"profiles/{name}","methods":["GET","PUT"],"scope":"admin"},{"path":"secrets/{name}","methods":["PUT","DELETE"],"scope":"admin"},{"path":"tokens","methods":["GET","POST"],"scope":"admin"},{"path":"connections","methods":["GET"],"scope":"observe"},{"path":"sessions","methods":["GET"],"scope":"observe"},{"path":"events","methods":["GET"],"scope":"observe"},{"path":"views","methods":["GET","POST"],"scope":"ui"},{"path":"views/{id}","methods":["GET","PATCH"],"scope":"ui"},{"path":"views/{id}/commands","methods":["POST"],"scope":"ui"},{"path":"views/{id}/ack","methods":["POST"],"scope":"ui"}]});
+    document["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("constellation.installation-updates/1"));
+    document["operations"].as_array_mut().unwrap().extend([
+        json!({"path":"updates","methods":["GET"],"scope":"observe"}),
+        json!({"path":"updates","methods":["POST"],"scope":"admin"}),
+        json!({"path":"updates/policy","methods":["PUT"],"scope":"admin"}),
+    ]);
     document["operations"]
         .as_array_mut()
         .unwrap()

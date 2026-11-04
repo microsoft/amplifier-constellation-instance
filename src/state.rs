@@ -28,6 +28,8 @@ pub struct AppState {
     pub runtime_enabled: AtomicBool,
     pub connections: Mutex<BTreeMap<String, Value>>,
     pub started_at: i64,
+    pub update_commands: Mutex<()>,
+    pub update_admission: Mutex<(i64, usize)>,
     pub addresses: RwLock<Value>,
     pub context_leases: Mutex<BTreeMap<String, crate::context::Lease>>,
     pub login_gate: std::sync::Arc<tokio::sync::Semaphore>,
@@ -43,6 +45,16 @@ impl AppState {
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS records(collection TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(collection,id)); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,kind TEXT NOT NULL,data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS tokens(hash TEXT PRIMARY KEY,id TEXT NOT NULL,name TEXT NOT NULL,scopes TEXT NOT NULL,expires_at INTEGER NOT NULL,created_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS browser_sessions(hash TEXT PRIMARY KEY,owner TEXT NOT NULL,csrf TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS login_attempts(key TEXT PRIMARY KEY,failures INTEGER NOT NULL,locked_until INTEGER NOT NULL);")?;
         crate::activity::migrate(&db, config.config.limits.event_retention)?;
         let enabled = config.config.enabled;
+        let update_until = db
+            .query_row(
+                "SELECT value FROM records WHERE collection='updates' AND id='helper'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v["drain_until"].as_i64())
+            .unwrap_or(0);
         Ok(Self {
             home,
             profile_lock: Mutex::new(()),
@@ -53,6 +65,8 @@ impl AppState {
             runtime_enabled: AtomicBool::new(enabled),
             connections: Mutex::new(BTreeMap::new()),
             started_at: now_ms(),
+            update_commands: Mutex::new(()),
+            update_admission: Mutex::new((update_until, 0)),
             addresses: RwLock::new(json!({})),
             context_leases: Mutex::new(BTreeMap::new()),
             login_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),

@@ -93,7 +93,7 @@ All UI business actions use the same API. The bundled browser additionally expos
 
 Application errors return `{error,detail}` and meaningful HTTP status codes. Invalid framework-level JSON may be rejected before the application handler. Configuration and display conflicts return 409 with the current revision. Reload and deliberately reconcile rather than replaying a stale edit. Single-profile edits and secrets retain last-writer-wins behavior. Style-package apply and restore require the current profile revision, independent of the configuration revision. Single-profile style edits create a new local snapshot and advance that profile revision, so a pending package apply cannot silently overwrite them.
 
-The optional scheduler runs bounded, explicitly authorized local responsibilities; it is not a recurring job planner or fleet dispatcher. There is no remote-machine provisioning, deployment/upgrade API, or fleet authority in v1. Runtime installation provisions only this existing instance. The CLI `api METHOD RESOURCE --file body.json` exposes every JSON resource without requiring a dedicated subcommand. ACP, embedding, and administrator access do not independently grant access to other machines.
+The optional scheduler runs bounded, explicitly authorized local responsibilities; it is not a recurring job planner or fleet dispatcher. The optional installation update API manages locally enrolled components; it confers no remote-machine provisioning or fleet authority. Runtime installation provisions only this existing instance. The CLI `api METHOD RESOURCE --file body.json` exposes every JSON resource without requiring a dedicated subcommand. ACP, embedding, and administrator access do not independently grant access to other machines.
 
 ## Public connection help
 
@@ -129,3 +129,7 @@ Optional capability IDs `agent-instance.organization/1`, `agent-instance.work/1`
 ## Installation-owned tools
 
 Optional [HTTP MCP tool connections](tool-connections.md) are configured through the same revision-checked `config` API/CLI and schema as other agent settings. Their credentials use the existing write-only secret API. Clients receive these connections only with an explicit `tools:use` token scope; ordinary ACP clients continue to work without them.
+
+## Installation updates
+
+See [Updates](updates.md) for the optional `constellation.installation-updates/1` management capability, policies, commands, host helper, and agent tool.

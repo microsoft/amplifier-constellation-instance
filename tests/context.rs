@@ -492,7 +492,7 @@ async fn owner_native_clients_get_merged_mcp_and_cross_surface_context_without_c
     assert_eq!(items.as_array().unwrap().len(), 4);
     assert_eq!(
         result["tools"]["result"]["tools"].as_array().unwrap().len(),
-        12
+        13
     );
     assert_eq!(
         result["initialize"]["result"]["protocolVersion"],

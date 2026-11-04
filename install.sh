@@ -337,3 +337,10 @@ if [[ "$DEFAULT_BACKEND" != none ]]; then
 else
   note "The agent has no backend (--backend none). Configure a custom ACP backend in Advanced settings before enabling work."
 fi
+
+# Each installation owns its updater; the helper survives service restarts.
+if (( START_SERVICE )); then
+  if ! "$AGENT_INSTALL_HOME/bin/agent-instance" --home "$AGENT_INSTALL_HOME" install-updates; then
+    note "Update helper setup needs attention. Re-run: agent-instance --home <installation> install-updates"
+  fi
+fi

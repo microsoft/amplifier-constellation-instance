@@ -4,8 +4,8 @@
   const root = document.getElementById("app");
   const base = new URL("./", document.baseURI);
   const API = new URL("api/v1/", base);
-  const routes = ["dashboard", "work", "memory", "organization", "configuration", "profiles", "connections", "activity", "access"];
-  const titles = {memory:"Memory",work:"Responsibilities",organization:"Roles & relationships",setup:"Set up your agent",dashboard:"Overview",configuration:"Configuration",profiles:"Context & profiles",connections:"Connections",activity:"Activity",access:"Access & credentials"};
+  const routes = ["dashboard", "updates", "work", "memory", "organization", "configuration", "profiles", "connections", "activity", "access"];
+  const titles = {updates:"Updates",memory:"Memory",work:"Responsibilities",organization:"Roles & relationships",setup:"Set up your agent",dashboard:"Overview",configuration:"Configuration",profiles:"Context & profiles",connections:"Connections",activity:"Activity",access:"Access & credentials"};
   const profileNames = {communication:"Communication", "working-style":"Working style", identity:"Identity & personal context"};
   const icons = {
     overview:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -28,7 +28,7 @@
     screen:'<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
     chevron:'<path d="m9 5 7 7-7 7"/>'
   };
-  const app = {
+  const app = {updates:null,updatesError:"",
     development:null,developmentError:"",nativeConfig:null,nativeSchema:null,nativeError:"",nativeAccount:null,nativeAccountError:"",nativeAccountTimer:null,nativeModels:null,memory:null,memoryError:"",scheduler:null,execution:null,schedulerError:"",work:null,organization:null,workError:"",profileUse:null,profileUseError:"",workSaving:false,
     contextProviders:[], contextError:"", session:null, csrf:"", doc:null, status:null, schema:null, view:null, events:[], connections:[], sessions:[],
     secrets:[], tokens:[], profiles:{}, profilePackage:null, profilePackageError:"", profilePackageBusy:false, profilePackageImport:null, profilePackageImportError:"", profilePackageExpected:null, sessionDetail:null, source:null, online:true, streamOnline:false,
@@ -58,7 +58,7 @@
   function announce(s) { document.getElementById("announcements").textContent=s; }
   function setNotice(s) { app.notice=s; app.error=""; announce(s); render(); }
   function fail(error) { app.error=error.message || String(error); announce(app.error); render(); }
-  function listIcon(route) { return ({memory:"profile",work:"profile",organization:"connections",dashboard:"overview",configuration:"settings",profiles:"profile",connections:"connections",activity:"activity",access:"access",setup:"plus"})[route]; }
+  function listIcon(route) { return ({updates:"refresh",memory:"profile",work:"profile",organization:"connections",dashboard:"overview",configuration:"settings",profiles:"profile",connections:"connections",activity:"activity",access:"access",setup:"plus"})[route]; }
   function safeLink(url) { try { const u=new URL(url,base); return ["https:","http:"].includes(u.protocol) ? u.href : ""; } catch {return "";} }
 
   async function api(path,options={}) {
@@ -87,6 +87,7 @@
     let value=get(app.doc.config,path); if(opts.json)value=JSON.stringify(value ?? opts.default ?? (opts.array?[]:{}),null,2);else value=value??opts.default??"";
     return field(label,`config.${path}`,value,{...opts,textarea:opts.json || opts.textarea,code:opts.json||opts.code});
   }
+  function select(label,key,value,choices){return `<label class="field"><span class="field-label">${esc(label)}</span><select class="input" data-action="edit-draft" data-draft="${esc(key)}" data-control="${esc(key)}">${choices.map(([id,text])=>`<option value="${esc(id)}" ${String(value)===String(id)?"selected":""}>${esc(text)}</option>`).join("")}</select></label>`;}
   function checkbox(label,key,fallback,help="") { return `<label class="check"><input type="checkbox" data-action="edit-draft" data-draft="${esc(key)}" data-control="${esc(key)}" ${draft(key,fallback)?"checked":""}>${esc(label)}</label>${help?`<p class="field-help">${esc(help)}</p>`:""}`; }
 
   async function loadMemory(){try{app.memory=await api("memory");app.memoryError="";}catch(e){app.memoryError=e.message;}render();}
@@ -200,9 +201,14 @@
     if(!visible.length)return empty("A quiet start","Activity will appear as clients connect and the agent works.","activity");
     return `<div class="timeline">${visible.map(e=>`<div class="timeline-item"><div class="timeline-icon">${icon(String(e.kind).includes("error")?"info":"activity")}</div><button class="event-button" type="button" data-action="event.inspect" data-event="${esc(e.seq)}"><div class="timeline-title">${esc(eventSummary(e)||title(e.kind))}</div><div class="timeline-time">${esc(displayTime(eventTime(e)))} · ${esc(title(e.category||"activity"))}</div></button></div>`).join("")}</div>`;
   }
+  async function loadUpdates(){try{app.updates=await api("updates");app.updatesError="";}catch(e){app.updatesError=e.message;}}
+  function updatesCard(){const u=app.updates;return `<section class="card section-gap" data-control="updates.summary"><div class="card-header"><div><h2>Updates</h2><p>${esc(u?.helper_connected?title(u.helper.state||"Ready"):"Update helper is not connected")}</p></div>${button("Manage updates","navigate",{small:true,attrs:'data-route="updates"'})}</div></section>`;}
+  function updatesPage(){const u=app.updates,p=u?.policy||{},h=u?.helper||{};const enabled=u?.helper_connected&&!u?.request?.pending;return heading("Keep this agent up to date.","Update this installation and its registered connections.")+`<section class="card" data-control="updates.status"><h2>${esc(title(h.state||"Waiting for update helper"))}</h2>${app.updatesError?banner(app.updatesError,"warning"):""}${h.error?banner(h.error,"warning"):""}<p>${u?.helper_connected?"Updates wait for current work and replies to finish.":"The host update service is offline or has not been installed."}</p><div class="row-actions">${button("Check now","updates.check",{disabled:!enabled})}${button("Update now","updates.update",{primary:true,disabled:!enabled})}${h.rollback_plan_id?button("Roll back","updates.rollback",{disabled:!enabled}):""}</div>${(h.components||[]).length?`<div class="table-wrap"><table><thead><tr><th>Component</th><th>Installed</th><th>Available</th></tr></thead><tbody>${h.components.map(c=>`<tr><td>${esc(title(c.id))}</td><td>${esc(h.state==="succeeded"&&c.available?c.target_version:c.version)}</td><td>${esc(c.available&&h.state!=="succeeded"?c.target_version:"Up to date")}</td></tr>`).join("")}</tbody></table></div>`:""}<p class="card-note">${h.last_check?"Last checked "+esc(displayTime(h.last_check)):"No update check yet."}</p></section><section class="card section-gap"><h2>Preferences</h2>${select("Check for updates","updates.check_minutes",draft("updates.check_minutes",p.check_minutes??60),[[0,"Manually"],[15,"Every 15 minutes"],[60,"Hourly"],[360,"Every 6 hours"],[1440,"Daily"]])}${select("Install updates","updates.install",draft("updates.install",p.install||"on_request"),[["on_request","When requested"],["when_idle","Automatically when idle"],["window","During a scheduled window"]])}${select("Update channel","updates.channel",draft("updates.channel",p.channel||"stable"),[["stable","Stable releases"],["development","Latest passing development build"]])}${draft("updates.install",p.install)==="window"?field("Window starts · UTC hour","updates.window_start_utc",p.window_start_utc??2,{type:"number",min:0,max:23})+field("Window length · hours","updates.window_hours",p.window_hours??2,{type:"number",min:1,max:24}):""}${checkbox("Allow agent-initiated updates","updates.agent_initiated",p.agent_initiated||false)}<p class="card-note">When enabled, the agent can request updates from any conversation, regardless of who asks.</p><div class="form-footer"><span></span>${button("Save preferences","updates.save",{primary:true})}</div></section>`;}
+  async function updateAction(action){await api("updates",{method:"POST",body:{action,request_id:crypto.randomUUID(),plan_id:action==="rollback"?app.updates?.helper?.rollback_plan_id:null}});await loadUpdates();setNotice("Update request queued. You can close this page; check here for the result.");}
+  async function saveUpdates(){await flushDrafts();const p=app.updates.policy;await api("updates/policy",{method:"PUT",body:{revision:p.revision,agent_initiated:!!draft("updates.agent_initiated",p.agent_initiated),check_minutes:Number(draft("updates.check_minutes",p.check_minutes)),install:draft("updates.install",p.install),channel:draft("updates.channel",p.channel),window_start_utc:Number(draft("updates.window_start_utc",p.window_start_utc)),window_hours:Number(draft("updates.window_hours",p.window_hours))}});await clearDraftNamespace("updates");await loadUpdates();setNotice("Update preferences saved.");}
   function dashboard() {
     const s=app.status||{}, c=app.doc.config; const enabled=s.enabled;
-    return heading("A little clarity, at a glance.","The identity, connections, and recent work of this one agent.",button("Refresh","refresh",{icon:"refresh"}))+(!c.setup_complete?`<div class="notice-strip"><p>This instance is installed. Complete its setup to begin accepting work.</p>${button("Continue setup","navigate",{primary:true,attrs:'data-route="setup"',icon:"arrow"})}</div>`:"")+`<section class="hero card"><div class="hero-identity"><div class="avatar">${portraitImage()}</div><div><h2>${esc(c.name)}</h2><p>${esc(c.purpose||"A new independent agent, ready for a purpose of its own.")}</p><div class="connection-line">${badge(enabled?"Ready for connections":"Runtime stopped",enabled?"green":"")}<span class="mono">${esc(c.instance_id)}</span></div></div></div><div class="hero-controls">${lifecycleButton()}</div></section><div class="metrics">${metric("ACP connections",app.connections.length,"Clients attached to this agent","connections")}${metric("Sessions",app.sessions.length,"Working contexts reported","profile")}${metric("Service uptime",age(s.uptime_ms),"Management service remains available","clock")}${metric("Configuration",`r${app.doc.revision}`,s.config_revision!==undefined&&s.config_revision!==app.doc.revision?`Active revision ${s.config_revision}`:"Saved configuration revision","settings")}</div>${profileUseCard()}<div class="grid asymmetric section-gap"><section class="card"><div class="card-header"><div><h2>Connect to this agent</h2><p>Use its ACP entrypoint from a client or adapter.</p></div>${badge("ACP","blue")}</div><div class="connection-code" data-control="connection.instructions">${esc(attachInfo())}</div>${button("Copy connection information","connection.copy",{small:true,icon:"copy"})}<p class="card-note">Adapters connect through ACP. Their Slack, Teams, or other platform settings belong to the adapter.</p></section><section class="card"><div class="card-header"><div><h2>Recent activity</h2><p>What this instance has been doing.</p></div>${button("View all","navigate",{quiet:true,small:true,attrs:'data-route="activity"'})}</div>${app.recentActivityError?banner(app.recentActivityError,"warning"):timeline(app.activityRecent,5)}</section></div><section class="card section-gap"><div class="card-header"><div><h2>At home on this machine</h2><p>Active addresses and the saved listener configuration.</p></div>${button("Edit settings","navigate",{quiet:true,small:true,attrs:'data-route="configuration"'})}</div><div class="grid two"><div>${addressRows()}</div><dl class="detail-list"><div class="detail-row"><dt>Runtime backend</dt><dd class="mono">${esc(app.backend?.name||"Not configured")}</dd></div><div class="detail-row"><dt>Installation owner</dt><dd>${esc(c.owner)}</dd></div><div class="detail-row"><dt>View connection</dt><dd>${app.streamOnline?"Live updates connected":"Live updates reconnecting"}</dd></div></dl></div></section>`;
+    return heading("A little clarity, at a glance.","The identity, connections, and recent work of this one agent.",button("Refresh","refresh",{icon:"refresh"}))+(!c.setup_complete?`<div class="notice-strip"><p>This instance is installed. Complete its setup to begin accepting work.</p>${button("Continue setup","navigate",{primary:true,attrs:'data-route="setup"',icon:"arrow"})}</div>`:"")+`<section class="hero card"><div class="hero-identity"><div class="avatar">${portraitImage()}</div><div><h2>${esc(c.name)}</h2><p>${esc(c.purpose||"A new independent agent, ready for a purpose of its own.")}</p><div class="connection-line">${badge(enabled?"Ready for connections":"Runtime stopped",enabled?"green":"")}<span class="mono">${esc(c.instance_id)}</span></div></div></div><div class="hero-controls">${lifecycleButton()}</div></section><div class="metrics">${metric("ACP connections",app.connections.length,"Clients attached to this agent","connections")}${metric("Sessions",app.sessions.length,"Working contexts reported","profile")}${metric("Service uptime",age(s.uptime_ms),"Management service remains available","clock")}${metric("Configuration",`r${app.doc.revision}`,s.config_revision!==undefined&&s.config_revision!==app.doc.revision?`Active revision ${s.config_revision}`:"Saved configuration revision","settings")}</div>${updatesCard()}${profileUseCard()}<div class="grid asymmetric section-gap"><section class="card"><div class="card-header"><div><h2>Connect to this agent</h2><p>Use its ACP entrypoint from a client or adapter.</p></div>${badge("ACP","blue")}</div><div class="connection-code" data-control="connection.instructions">${esc(attachInfo())}</div>${button("Copy connection information","connection.copy",{small:true,icon:"copy"})}<p class="card-note">Adapters connect through ACP. Their Slack, Teams, or other platform settings belong to the adapter.</p></section><section class="card"><div class="card-header"><div><h2>Recent activity</h2><p>What this instance has been doing.</p></div>${button("View all","navigate",{quiet:true,small:true,attrs:'data-route="activity"'})}</div>${app.recentActivityError?banner(app.recentActivityError,"warning"):timeline(app.activityRecent,5)}</section></div><section class="card section-gap"><div class="card-header"><div><h2>At home on this machine</h2><p>Active addresses and the saved listener configuration.</p></div>${button("Edit settings","navigate",{quiet:true,small:true,attrs:'data-route="configuration"'})}</div><div class="grid two"><div>${addressRows()}</div><dl class="detail-list"><div class="detail-row"><dt>Runtime backend</dt><dd class="mono">${esc(app.backend?.name||"Not configured")}</dd></div><div class="detail-row"><dt>Installation owner</dt><dd>${esc(c.owner)}</dd></div><div class="detail-row"><dt>View connection</dt><dd>${app.streamOnline?"Live updates connected":"Live updates reconnecting"}</dd></div></dl></div></section>`;
   }
 
   function portraitImage(cls="") {return app.identity?`<img class="agent-portrait ${cls}" src="${new URL("identity/avatar",API)}?v=${esc(app.identity.avatar_revision)}" alt="${esc(app.doc?.config.name||"Agent")} portrait">`:esc(initial());}
@@ -364,7 +370,7 @@
     if(app.loading)return;
     const saved=captureDom();
     if(!app.session){root.innerHTML=loginScreen();restoreSensitive(saved);return;}
-    const page={setup,dashboard,work:workPage,memory:memoryPage,organization:organizationPage,configuration,profiles,connections,activity,access}[currentRoute()]||dashboard;
+    const page={setup,dashboard,updates:updatesPage,work:workPage,memory:memoryPage,organization:organizationPage,configuration,profiles,connections,activity,access}[currentRoute()]||dashboard;
     root.innerHTML=shell(page());
     restoreSensitive(saved);
     if(app.tokenOnce){const field=root.querySelector("[data-token-once]");if(field)field.value=app.tokenOnce;}
@@ -396,6 +402,7 @@
     render();
     if(before.selected_session!==view.state.selected_session)await loadSessionDetail();
     if(view.state.route==="activity"&&(before.route!=="activity"||activityFilterKey(before.filters)!==activityFilterKey(view.state.filters)))await loadActivity();
+    if(view.state.route==="updates" && before.route!=="updates"){await loadUpdates();render();}
     if(view.state.route==="profiles" && before.route!=="profiles")await loadProfiles();
     if(view.state.route==="memory"&&before.route!=="memory")await loadMemory();
     if(["work","organization"].includes(view.state.route)&&(before.route!==view.state.route||before.filters?.work_id!==view.state.filters?.work_id))await loadWork();
@@ -403,7 +410,7 @@
   function command(commandValue) {
     if(commandValue?.type==="set_draft"){
       const path=String(commandValue.path||"");
-      const allowed=Object.keys(configFields).map(k=>`config.${k}`).concat(Object.keys(profileNames).map(k=>`profiles.${k}`),workDrafts.concat(["access.secret_name","access.token_name","access.token_hours","access.token_scopes.observe","access.token_scopes.ui","access.token_scopes.acp","access.token_scopes.context:owner","access.token_scopes.tools:use","access.token_scopes.profiles","access.token_scopes.admin","access.token_scopes.work:read","access.token_scopes.work","access.token_scopes.work:execute","access.token_scopes.memory:read","access.token_scopes.memory"]));
+      const allowed=Object.keys(configFields).map(k=>`config.${k}`).concat(Object.keys(profileNames).map(k=>`profiles.${k}`),workDrafts.concat(["updates.check_minutes","updates.install","updates.channel","updates.agent_initiated","updates.window_start_utc","updates.window_hours","access.secret_name","access.token_name","access.token_hours","access.token_scopes.observe","access.token_scopes.ui","access.token_scopes.acp","access.token_scopes.context:owner","access.token_scopes.tools:use","access.token_scopes.profiles","access.token_scopes.admin","access.token_scopes.work:read","access.token_scopes.work","access.token_scopes.work:execute","access.token_scopes.memory:read","access.token_scopes.memory"]));
       if(!allowed.includes(path))return Promise.reject(new Error("Use a supported non-secret draft field. Credentials have dedicated write-only APIs."));
     }
     const work=async()=>{
@@ -539,6 +546,10 @@
 
   async function perform(action,payload={}) {
     switch(action){
+      case "updates.check":return updateAction("check");
+      case "updates.update":return updateAction("update");
+      case "updates.rollback":return updateAction("rollback");
+      case "updates.save":return saveUpdates();
       case "development.check":await loadDevelopment();render();return;
       case "development.open":await loadDevelopment();return command({type:"open_modal",modal:"development-github"});
       case "development.manual":return command({type:"set_filter",key:"development_manual",value:!state().filters?.development_manual});
@@ -648,6 +659,7 @@
     if(results[4].status==="fulfilled")app.backend=results[4].value;
     if(results[5].status==="fulfilled"){app.contextProviders=asArray(results[5].value.providers);app.contextError="";}else{app.contextError="Conversation sources could not be loaded.";}
     if(results[6]?.status==="fulfilled"){app.profileUse=results[6].value;app.profileUseError="";}else{app.profileUse=null;app.profileUseError="Profile delivery evidence could not be loaded.";}
+    if(["updates","dashboard"].includes(currentRoute()))await loadUpdates();
     if(currentRoute()==="connections")await loadDevelopment();
     if(currentRoute()==="memory")await loadMemory();
     if(["work","organization"].includes(currentRoute()))await loadWork();
@@ -740,6 +752,7 @@
     let viewId;try{viewId=sessionStorage.getItem(storageKey());}catch{}
     if(viewId){try{app.view=await api(`views/${encodeURIComponent(viewId)}`);}catch{app.view=null;}}
     if(!app.view){app.view=await api("views",{method:"POST",body:{label:`Browser · ${navigator.platform||"web"}`}});try{sessionStorage.setItem(storageKey(),app.view.id);}catch{}if(doc.config.setup_complete)await command({type:"navigate",route:"dashboard"});}
+    await loadUpdates();
     await migrateSetupDraft();
     if(backend.kind==="native")await loadNativeAccount(false);
     try{app.profileUse=await api("profile-use");}catch{}

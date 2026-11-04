@@ -256,6 +256,8 @@ def install(args):
             metadata["service"] = make_service(home, config)
             save(home / "install.json", metadata)
             service_command(metadata["service"], "start")
+            if "install-updates" in run([home / "bin" / binary_name(), "--help"]):
+                run([home / "bin" / binary_name(), "--home", home, "install-updates"])
             healthy = health(home, config["instance_id"], info["version"])
         return result(home, metadata, healthy)
 

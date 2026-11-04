@@ -52,6 +52,7 @@ fn valid_view(value: &Value) -> ApiResult<()> {
         || ![
             "setup",
             "dashboard",
+            "updates",
             "configuration",
             "profiles",
             "connections",

@@ -339,6 +339,7 @@ async fn relay_connection(
     let mut pending_context = BTreeMap::<String, context::Prepared>::new();
     let mut session_context = BTreeMap::<String, context::Prepared>::new();
     let mut pending = BTreeMap::<String, Pending>::new();
+    let mut update_admissions = BTreeMap::new();
     let mut tool_guard: Option<tool_connections::Guard> = None;
     let mut pending_tools = BTreeSet::<String>::new();
     let mut tool_recheck = tokio::time::interval(Duration::from_millis(500));
@@ -490,6 +491,10 @@ async fn relay_connection(
                                 reject_request(&outgoing, &value, -32603, "Too many outstanding requests on this connection").await?;
                                 continue;
                             }
+                            if method == "session/prompt" {
+                                if let Some(guard)=crate::updates::admit(&state) { update_admissions.insert(key.clone(),guard); }
+                                else {reject_request(&outgoing,&value,-32002,"This installation is updating; retry after it reconnects").await?;continue;}
+                            }
                             let request = Pending { id:id.clone(), method:method.clone(), session_id:value["params"]["sessionId"].as_str().map(str::to_owned), cwd:value["params"]["cwd"].as_str().map(str::to_owned), work_id:(method == "session/prompt").then(||uuid::Uuid::new_v4().to_string()), started_at:now_ms() };
                             if request.work_id.is_some() { starting_work = Some(request.clone()); }
                             pending.insert(key, request);
@@ -595,7 +600,9 @@ async fn relay_connection(
                             state.event("acp.response", json!({"connection_id":connection_id,"method":request.method.chars().take(120).collect::<String>(),"success":value.get("error").is_none()}))?;
                         }
                     }
+                    let response_id=if value.get("method").is_none(){value.get("id").map(|id|id.to_string())}else{None};
                     send_frontend(&outgoing, value).await?;
+                    if let Some(id)=response_id {update_admissions.remove(&id);}
                 }
             }
         }

@@ -49,6 +49,7 @@ fn safe_data(data: &Value) -> Value {
         "direction",
         "update_kind",
         "stage",
+        "state",
         "reason",
         "action",
         "stop_reason",
@@ -108,6 +109,38 @@ fn safe_data(data: &Value) -> Value {
 
 pub(crate) fn metadata(kind: &str, data: &Value) -> Metadata {
     let (category, severity, summary) = match kind {
+        "updates.requested" => (
+            "configuration",
+            "info",
+            "Queued an installation update request",
+        ),
+        "updates.configured" => (
+            "configuration",
+            "info",
+            "Updated installation update preferences",
+        ),
+        "updates.progress" => match data["state"].as_str() {
+            Some("succeeded") => (
+                "outcomes",
+                "info",
+                "Installed and verified component updates",
+            ),
+            Some("rolled_back") => (
+                "outcomes",
+                "warning",
+                "Restored the previous component versions",
+            ),
+            Some("failed" | "check_failed" | "recovery_required") => {
+                ("problems", "warning", "Installation updates need attention")
+            }
+            Some("available") => ("configuration", "info", "Component updates are available"),
+            Some("up_to_date") => (
+                "configuration",
+                "info",
+                "Installed components are up to date",
+            ),
+            _ => ("configuration", "info", "Installation update in progress"),
+        },
         "scheduler.configured" => ("configuration", "info", "Updated background work settings"),
         "scheduler.permission_denied" => (
             "problems",
