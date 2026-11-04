@@ -57,7 +57,7 @@ sudo apparmor_parser -r /etc/apparmor.d/constellation-installation
 Record the resulting image ID and use that immutable ID in private manifests.
 Keep the bridge, firewall configuration and manifests outside repositories and
 outside all container mounts. Persist `firewall.py` and its configuration in a
-root-owned directory, invoke them from a system service after Docker starts and
+root-owned directory, invoke them from `constellation-container-firewall.service` after Docker starts and
 before the owner's agent services start, and reapply after Docker restarts. Do
 not add `--privileged`, host networking, or unrestricted private-network access
 to work around connection failures.

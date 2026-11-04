@@ -106,6 +106,7 @@ After={bridge} network-online.target
 Wants={' '.join(services)}
 PartOf={bridge}
 [Service]
+ExecStartPre=/usr/bin/systemctl is-active --quiet constellation-container-firewall.service
 ExecStartPre=/usr/bin/test -S {state}/sockets/owner-login.sock
 ExecStart=/usr/bin/docker start --attach {name}
 ExecStop=/usr/bin/docker stop --time 35 {name}
