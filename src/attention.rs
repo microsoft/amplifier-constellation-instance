@@ -85,6 +85,9 @@ pub fn capability(state: &AppState) -> Value {
 fn key(parts: Value) -> String {
     format!("{:x}", Sha256::digest(parts.to_string().as_bytes()))
 }
+fn policy_key(config: &crate::config::InstanceConfig) -> String {
+    key(json!([config.attention, config.name, config.purpose]))
+}
 fn fresh(at: i64) -> bool {
     at <= now_ms() + 5000 && at >= now_ms() - 600_000
 }
@@ -117,9 +120,10 @@ pub fn reserve(
     binding: Option<&Value>,
 ) -> Result<Value> {
     attention_policy::validate(&event.context)?;
-    let config = state
-        .instance_config()
+    let installed = state.instance_config();
+    let config = installed
         .attention
+        .as_ref()
         .context("Attention is not configured")?;
     config.validate()?;
     ensure!(
@@ -173,7 +177,7 @@ pub fn reserve(
         return Ok(json!({"action":"hold","reason":"decision_budget","id":id}));
     }
     let status = "evaluating";
-    let row = json!({"id":id,"audience":audience,"connection":connection,"principal":principal,"session_id":event.session_id,"event_id":event.context.trigger_id,"occurred_at":event.occurred_at,"requested_at":now_ms(),"status":status,"reason":status,"evidence_sha256":key(json!(event.context)),"review":"unreviewed","config_sha256":key(json!(config))});
+    let row = json!({"id":id,"audience":audience,"connection":connection,"principal":principal,"session_id":event.session_id,"event_id":event.context.trigger_id,"occurred_at":event.occurred_at,"requested_at":now_ms(),"status":status,"reason":status,"evidence_sha256":key(json!(event.context)),"review":"unreviewed","config_sha256":policy_key(&installed)});
     save(state, &row)?;
     state.set_record(
         "attention_heads",
@@ -183,9 +187,14 @@ pub fn reserve(
     Ok(row)
 }
 
-async fn query(state: &AppState, config: &Config, context: &Context) -> Result<Value> {
+async fn query(
+    state: &AppState,
+    installed: &crate::config::InstanceConfig,
+    config: &Config,
+    context: &Context,
+) -> Result<Value> {
     let mut evidence = json!(context);
-    evidence["installed_purpose"] = json!(state.instance_config().purpose);
+    evidence["installed_purpose"] = json!(installed.purpose);
     let instructions = attention_policy::instructions();
     let choices = attention_policy::choices();
     let body = if config.protocol == "openai_decisions" {
@@ -222,21 +231,21 @@ pub async fn evaluate(state: Arc<AppState>, mut row: Value, event: Event) -> Res
     if row["status"] != "evaluating" {
         return Ok(json!({"action":"hold","reason":row["reason"],"id":row["id"]}));
     }
-    let config = state
-        .instance_config()
-        .attention
-        .context("Attention disabled")?;
+    let installed = state.instance_config();
+    let config = installed.attention.as_ref().context("Attention disabled")?;
     state.event("attention.requested", json!({"id":row["id"]}))?;
     let start = now_ms();
-    let result = query(&state, &config, &event.context).await.and_then(|v| {
-        let answer = attention_policy::normalize(&v)?;
-        row["probabilities"] = if v["answers"].is_array() {
-            v["answers"][0]["probabilities"].clone()
-        } else {
-            v["answers"]["participation"]["probabilities"].clone()
-        };
-        Ok(answer)
-    });
+    let result = query(&state, &installed, config, &event.context)
+        .await
+        .and_then(|v| {
+            let answer = attention_policy::normalize(&v)?;
+            row["probabilities"] = if v["answers"].is_array() {
+                v["answers"][0]["probabilities"].clone()
+            } else {
+                v["answers"]["participation"]["probabilities"].clone()
+            };
+            Ok(answer)
+        });
     let (judgment, reason, engage, investigate) = match result {
         Ok(v) => v,
         // A fresh event gets at most one bounded opportunity during an outage, never repeated polling.
@@ -246,14 +255,12 @@ pub async fn evaluate(state: Arc<AppState>, mut row: Value, event: Event) -> Res
     let current = state
         .get_record("attention_events", row["id"].as_str().unwrap())?
         .context("Event no longer exists")?;
-    let valid =
-        current["status"] == "evaluating"
-            && head(&state, &row)?
-            && fresh(event.occurred_at)
-            && state.enabled()
-            && state.instance_config().attention.as_ref().is_some_and(|c| {
-                serde_json::to_value(c).ok() == serde_json::to_value(&config).ok()
-            });
+    let valid = current["status"] == "evaluating"
+        && head(&state, &row)?
+        && fresh(event.occurred_at)
+        && state.enabled()
+        && row["config_sha256"] == policy_key(&installed)
+        && row["config_sha256"] == policy_key(&state.instance_config());
     row["judgment"] = json!(judgment);
     row["reason"] = json!(reason);
     row["investigate"] = json!(investigate);
@@ -295,10 +302,8 @@ pub fn consume(
     let ticket = metadata["ticket"]
         .as_str()
         .context("Missing attention ticket")?;
-    let config = state
-        .instance_config()
-        .attention
-        .context("Attention disabled")?;
+    let installed = state.instance_config();
+    let config = installed.attention.as_ref().context("Attention disabled")?;
     let _lock = state.attention_lock.lock().unwrap();
     let mut row = state
         .get_record("attention_events", id)?
@@ -318,7 +323,7 @@ pub fn consume(
         "Attention ticket is stale, superseded, cancelled, or already used"
     );
     ensure!(
-        row["config_sha256"] == key(json!(config)),
+        row["config_sha256"] == policy_key(&installed),
         "Attention settings changed; old offers are invalid"
     );
     let recent: Vec<_> = rows(state)?

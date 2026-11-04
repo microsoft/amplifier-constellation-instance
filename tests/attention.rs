@@ -171,6 +171,9 @@ async fn supersession_cancellation_and_config_change_revoke_offers() {
     assert!(attention::consume(&s, "p", "c", "session", &a).is_err());
     attention::cancel(&s, "c", Some("session"));
     assert!(attention::consume(&s, "p", "c", "session", &b).is_err());
+    let changed_role = offer(s.clone(), "changed-role").await;
+    s.config.write().unwrap().config.purpose = "A different responsibility".into();
+    assert!(attention::consume(&s, "p", "c", "session", &changed_role).is_err());
     let c = offer(s.clone(), "c").await;
     s.config
         .write()

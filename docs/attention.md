@@ -96,7 +96,7 @@ successful host validation can consume the offer. Existing permissions and
 source delivery checks still apply after admission.
 
 Tickets are bound to the authenticated principal, ACP connection, loaded
-session, audience, original event and policy configuration. Another connection
+session, audience, original event, installed name/purpose and policy configuration. Another connection
 cannot reuse them. The journal deduplicates the original event across reconnects;
 it does not promise to replay an event lost during a crash. Stale events,
 superseded evidence, edited duplicate events, cancellation, configuration changes
@@ -115,7 +115,9 @@ for ACP access control. Direct prompts intentionally do not require tickets.
 ## Policy and investigation
 
 Confident hold stays quiet. Engage proceeds within limits. Explicit semantic
-uncertainty and low confidence favor one bounded opportunity to reason. Provider
+uncertainty and low confidence favor one bounded opportunity to reason. Version 1
+treats a chosen-answer probability below 0.6 as low confidence; this is an
+experimental threshold, not a claim that provider probabilities are calibrated. Provider
 errors may also get that limited opportunity, but are labeled `provider_error`,
 not counted as semantic uncertainty. Refusals remain holds and are separately
 flagged. Defaults are 600 decision attempts, 60 admitted-or-claimed ambient
