@@ -40,4 +40,23 @@ class Tests(unittest.TestCase):
  def test_cannot_mount_helper_state_into_agent(self):
   c=m.read(self.root/'config.json');c['state']=str(self.root/'agent/provider');m.write(self.root/'config.json',c)
   with self.assertRaisesRegex(ValueError,'outside_agent'):m.Provider(self.root/'config.json')
+ def test_rollback_waits_for_restored_container_startup(self):
+  self.prepare();_,receipt,_=self.p.context();m.write(receipt,{'state':'applied'})
+  starting={**self.current,'State':{'Running':False,'Status':'exited'}}
+  with patch.object(m,'exists',side_effect=[True,True,False]),patch.object(m,'run') as run,patch.object(m,'inspect',side_effect=[starting,self.current]),patch.object(m.time,'sleep') as sleep:
+   result=self.p.rollback()
+  self.assertTrue(result['healthy']);sleep.assert_called_once_with(0.25)
+  starts=[c for c in run.call_args_list if c.args[:3]==('systemctl','--user','start')]
+  self.assertEqual(len(starts),1)
+  self.assertEqual(m.read(receipt)['state'],'rolled_back')
+ def test_stopped_container_does_not_pass_or_wait_forever(self):
+  self.prepare();_,receipt,_=self.p.context();m.write(receipt,{'expected_image':self.current['Image']})
+  with patch.object(m,'inspect',return_value={**self.current,'State':{'Running':False}}),patch.object(m.time,'monotonic',side_effect=[100,100,130]),patch.object(m.time,'sleep') as sleep:
+   with self.assertRaisesRegex(ValueError,'health_mismatch'):self.p.verify()
+  sleep.assert_called_once_with(0.25)
+ def test_wrong_image_fails_without_waiting(self):
+  self.prepare();_,receipt,_=self.p.context();m.write(receipt,{'expected_image':self.new['Id']})
+  with patch.object(m,'inspect',return_value=self.current),patch.object(m.time,'sleep') as sleep:
+   with self.assertRaisesRegex(ValueError,'health_mismatch'):self.p.verify()
+  sleep.assert_not_called()
 if __name__=='__main__':unittest.main()

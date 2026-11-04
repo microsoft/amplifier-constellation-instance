@@ -4,7 +4,7 @@
 Run outside the container. Fixed --config/--action argv; the helper supplies the
 frozen plan path in the environment. No agent-supplied commands or image names.
 """
-import argparse, contextlib, importlib.util, io, json, os, re, subprocess, tempfile
+import argparse, contextlib, importlib.util, io, json, os, re, subprocess, tempfile, time
 from pathlib import Path
 
 
@@ -77,9 +77,16 @@ class Provider:
         write(receipt,{'state':'rolled_back','expected_image':p['previous_image']})
         return self.verify()
     def verify(self):
-        _,receipt,_=self.context();expected=read(receipt)['expected_image'];actual=inspect(self.name)
-        if actual['Image']!=expected or not actual['State']['Running']:raise ValueError('container_image_or_health_mismatch')
-        return {'version':expected,'healthy':True}
+        _,receipt,_=self.context();expected=read(receipt)['expected_image']
+        # A simple systemd service is started before `docker start` has finished.
+        # Observe that transition without reissuing any cutover or start command.
+        deadline=time.monotonic()+30
+        while True:
+            actual=inspect(self.name)
+            if actual['Image']!=expected:raise ValueError('container_image_or_health_mismatch')
+            if actual['State']['Running']:return {'version':expected,'healthy':True}
+            if time.monotonic()>=deadline:raise ValueError('container_image_or_health_mismatch')
+            time.sleep(0.25)
 
 if __name__=='__main__':
     os.umask(0o077);p=argparse.ArgumentParser(description=__doc__)
