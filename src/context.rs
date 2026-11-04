@@ -411,8 +411,13 @@ pub async fn orientation(state: &AppState, hash: &str) -> Result<Value> {
     validate_lease(state, &lease).await?;
     if let Access::Grant { provider_id, grant } = &lease.access {
         let data = query(state, provider_id, json!({"operation":"orientation","access":{"mode":"grant","grant":grant},"conversation_id":lease.binding["conversation_id"],"thread_id":lease.binding["thread_id"],"limit":12})).await;
+        let activity = if lease.binding["owner"] == true {
+            Some(list_context(state, &lease, None, 8, None).await?)
+        } else {
+            None
+        };
         return Ok(
-            json!({"current":lease.binding,"orientation":data.as_ref().ok(),"memory":crate::memory::orientation(state,&lease.binding).map_err(|e|anyhow!(e.1))?,"responsibilities":crate::work::orientation(state,&lease.binding).map_err(|e|anyhow!(e.1))?,"error":data.err().map(|e|e.to_string())}),
+            json!({"authorized_activity":activity,"current":lease.binding,"orientation":data.as_ref().ok(),"memory":crate::memory::orientation(state,&lease.binding).map_err(|e|anyhow!(e.1))?,"responsibilities":crate::work::orientation(state,&lease.binding).map_err(|e|anyhow!(e.1))?,"error":data.err().map(|e|e.to_string())}),
         );
     }
     let mut value = list_context(state, &lease, None, 12, None).await?;

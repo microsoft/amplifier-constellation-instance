@@ -19,6 +19,9 @@ pub struct Connection {
     pub url: String,
     #[serde(default)]
     pub header_secrets: BTreeMap<String, String>,
+    /// Allow this integration to be unavailable without blocking unrelated work.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 pub fn validate(connections: &[Connection]) -> Result<()> {
@@ -183,7 +186,7 @@ pub fn prepare(
             values.push(json!({"name":header,"value":secret}));
         }
         descriptors.push(
-            json!({"type":"http","name":connection.name,"url":connection.url,"headers":values}),
+            json!({"type":"http","name":connection.name,"url":connection.url,"headers":values,"_meta":{"io.github.bkrabach.agent-runtime":{"optional":connection.optional}}}),
         );
     }
     params["mcpServers"]

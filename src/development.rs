@@ -339,6 +339,7 @@ pub fn install(state: &AppState, expected: u64, authorization: &str, actor: &str
     // Keep unrelated connections, including project/world tools.
     doc.config.tool_connections.retain(|c| c.url != ENDPOINT);
     doc.config.tool_connections.push(Connection {
+        optional: false,
         name,
         url: ENDPOINT.into(),
         header_secrets: BTreeMap::from([
