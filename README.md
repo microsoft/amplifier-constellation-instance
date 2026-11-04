@@ -125,3 +125,7 @@ Use of Microsoft trademarks or logos in modified versions of this project must n
 Any use of third-party trademarks or logos are subject to those third-party's policies.
 
 Agent image uploads and the optional ACP identity interface: [portable images](docs/agent-identity.md).
+
+### Optional Linux containment
+
+For an existing Linux installation, see the [per-installation container recipe](ops/container/README.md). It preserves ACP connections and managed certificate renewal while keeping host login and service administration outside the container. This is an experimental administrator path with host-managed updates.

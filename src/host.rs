@@ -38,7 +38,7 @@ pub fn local_addresses() -> Vec<IpAddr> {
     addresses.dedup();
     addresses
 }
-pub fn certificate_names() -> Vec<String> {
+pub fn certificate_names() -> Result<Vec<String>> {
     let mut sans = vec![
         "localhost".to_owned(),
         "127.0.0.1".to_owned(),
@@ -57,10 +57,45 @@ pub fn certificate_names() -> Vec<String> {
     {
         sans.push(hostname.trim().to_owned());
     }
-    sans.sort();
-    sans.dedup();
-    sans
+    additional_certificate_names(
+        sans,
+        std::env::var("AGENT_INSTANCE_CERTIFICATE_NAMES")
+            .ok()
+            .as_deref(),
+    )
 }
+
+// A container sees its private interfaces, while clients still use the host's
+// published addresses. The installer supplies these names; clients cannot.
+fn additional_certificate_names(
+    mut names: Vec<String>,
+    additional: Option<&str>,
+) -> Result<Vec<String>> {
+    if let Some(value) = additional {
+        let supplied: Vec<String> = serde_json::from_str(value).context(
+            "AGENT_INSTANCE_CERTIFICATE_NAMES must be a JSON array of hostnames or IP addresses",
+        )?;
+        ensure!(
+            supplied.len() <= 64,
+            "Too many additional certificate names"
+        );
+        for name in supplied {
+            ensure!(
+                !name.is_empty()
+                    && name.len() <= 253
+                    && name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b".-:".contains(&c)),
+                "Invalid additional certificate name"
+            );
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 pub fn init(
     home: &Path,
     name: String,
@@ -85,7 +120,7 @@ pub fn init(
     for folder in ["tls", "secrets", "profiles", "workspace", "backend"] {
         private_dir(&home.join(folder))?;
     }
-    welcome::prepare(home, &config.instance_id, certificate_names())?;
+    welcome::prepare(home, &config.instance_id, certificate_names()?)?;
     for file in ["communication.md", "working-style.md", "identity.md"] {
         write_private(&home.join("profiles").join(file), b"")?;
     }
@@ -182,7 +217,7 @@ pub async fn serve(home: PathBuf) -> Result<()> {
     }
     let config = state.instance_config();
     if config.server.certificate_file.is_none() {
-        welcome::prepare(&state.home, &config.instance_id, certificate_names())?;
+        welcome::prepare(&state.home, &config.instance_id, certificate_names()?)?;
     }
     let cert = welcome::configured_cert(&state.home, &config);
     let key = PathBuf::from(expand(
@@ -360,4 +395,48 @@ pub async fn api(home: &Path, method: &str, path: &str, body: Option<Value>) -> 
         serde_json::from_str::<Value>(&text).context("Service returned a non-JSON response")?;
     ensure!(status.is_success(), "{}: {}", status, value);
     Ok(value)
+}
+
+#[cfg(test)]
+mod certificate_name_tests {
+    use super::additional_certificate_names;
+
+    #[test]
+    fn published_addresses_augment_private_interfaces_without_duplicates() {
+        let actual = additional_certificate_names(
+            vec!["localhost".into(), "172.30.240.10".into()],
+            Some(r#"["192.0.2.12","agent.example.test","localhost","::1"]"#),
+        )
+        .unwrap();
+        assert_eq!(
+            actual,
+            [
+                "172.30.240.10",
+                "192.0.2.12",
+                "::1",
+                "agent.example.test",
+                "localhost"
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_installer_settings_fail_before_certificate_changes() {
+        for input in [
+            r#""hostname""#,
+            r#"[""]"#,
+            r#"["https://example.test"]"#,
+            r#"["*.example.test"]"#,
+            r#"["host\nname"]"#,
+        ] {
+            assert!(additional_certificate_names(Vec::new(), Some(input)).is_err());
+        }
+        assert!(
+            additional_certificate_names(
+                Vec::new(),
+                Some(&serde_json::to_string(&vec!["host"; 65]).unwrap())
+            )
+            .is_err()
+        );
+    }
 }
