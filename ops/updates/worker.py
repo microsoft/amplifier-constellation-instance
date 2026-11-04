@@ -26,8 +26,8 @@ def digest(path):
     with Path(path).open('rb') as f:
         while block:=f.read(1024*1024):result.update(block)
     return result.hexdigest()
-def run(argv,timeout=90):
-    p=subprocess.run([str(a) for a in argv],capture_output=True,stdin=subprocess.DEVNULL,timeout=timeout)
+def run(argv,timeout=90,env=None):
+    p=subprocess.run([str(a) for a in argv],capture_output=True,stdin=subprocess.DEVNULL,timeout=timeout,env=env)
     if p.returncode: raise RuntimeError('command_failed')
     return p.stdout
 
@@ -52,7 +52,9 @@ def load_registration(path):
             if not Path(p['binary']).is_file() or Path(p['binary']).is_symlink():raise ValueError('ordinary_binary_required')
         elif p['provider']=='command':
             # Extensible owner-enrolled provider. No values from chat enter argv.
-            for action in ['status','plan','apply','rollback']:
+            if p.get('protocol',1) not in (1,2):raise ValueError('unsupported_command_protocol')
+            actions=['status','plan','apply','rollback']+(['verify'] if p.get('protocol')==2 else [])
+            for action in actions:
                 a=p['commands'][action]
                 if not a or not Path(a[0]).is_absolute() or not all(isinstance(x,str) for x in a):raise ValueError('fixed_absolute_provider_commands_required')
         else: raise ValueError('unsupported_provider')
@@ -182,6 +184,16 @@ class Worker:
                 return
             except Exception:time.sleep(.5)
         raise ValueError('reconnection_verification_failed')
+    def provider_call(self,component,action,folder):
+        env=os.environ.copy()
+        if component.get('protocol')==2:
+            env['CONSTELLATION_UPDATE_PLAN']=str(folder/(component['id']+'.provider.json'))
+        return run(component['commands'][action],timeout=600,env=env)
+    def provider_verify(self,plan):
+        folder=self.root/'plans'/plan['id']
+        for p in self.c['components']:
+            if p.get('provider')=='command' and p.get('protocol')==2 and p['id'] in plan.get('provider_attempts',[]):
+                self.provider_call(p,'verify',folder)
     def plan(self,policy):
         identifier=str(uuid.uuid4());folder=self.root/'plans'/identifier;folder.mkdir(parents=True,mode=0o700)
         self.save(state='checking',error=None);self.report();components=[]
@@ -189,7 +201,13 @@ class Worker:
             if p.get('provider','github')=='github':components.append(candidate(p,policy['channel'],folder))
             else:
                 current=json.loads(run(p['commands']['status']).decode())
-                result=json.loads(run(p['commands']['plan']).decode());components.append({'id':p['id'],'available':bool(result['available']),'version':str(current.get('version','')),'target_version':str(result.get('version','')),'provider':'command'})
+                result=json.loads(self.provider_call(p,'plan',folder).decode())
+                part={'id':p['id'],'available':bool(result['available']),'version':str(current.get('version','')),'target_version':str(result.get('version','')),'provider':'command'}
+                if p.get('protocol')==2:
+                    file=folder/(p['id']+'.provider.json')
+                    write(file,{'id':identifier,'component':p['id'],'plan':result})
+                    part['provider_plan_sha256']=digest(file)
+                components.append(part)
         plan={'id':identifier,'components':components,'policy_revision':policy['revision'],'channel':policy['channel'],'created_at':int(time.time()*1000)}
         write(folder/'plan.json',plan)
         self.save(state='available' if any(p['available'] for p in components) else 'up_to_date',plan_id=identifier,components=components,last_check=int(time.time()*1000))
@@ -244,15 +262,21 @@ class Worker:
         with temp.open('r+b') as f:os.fsync(f.fileno())
         os.replace(temp,dest)
     def rollback(self,plan):
-        folder=self.root/'plans'/plan['id'];self.save(state='rolling_back');self.control('stop')
+        folder=self.root/'plans'/plan['id'];self.validate_provider_plans(plan);self.save(state='rolling_back');self.control('stop')
         expected={}
         for p in self.c['components']:
             if p.get('provider','github')=='github':
                 backup=folder/(p['id']+'.previous');expected[p['id']]=plan['previous'][p['id']]
                 if digest(backup)!=expected[p['id']]:raise ValueError('rollback_digest_mismatch')
                 self.replace(backup,p['binary'])
-            elif any(x['id']==p['id'] and x['available'] for x in plan['components']):run(p['commands']['rollback'])
-        self.control('start');self.health(expected);self.save(state='rolled_back',rollback_plan_id=None);self.report()
+            elif p['id'] in plan.get('provider_attempts',[x['id'] for x in plan['components'] if x['available']]):self.provider_call(p,'rollback',folder)
+        self.control('start');self.provider_verify(plan);self.health(expected);self.save(state='rolled_back',rollback_plan_id=None);self.report()
+    def validate_provider_plans(self,plan):
+        folder=self.root/'plans'/plan['id']
+        for p in self.c['components']:
+            if p.get('provider')=='command' and p.get('protocol')==2:
+                part=next(x for x in plan['components'] if x['id']==p['id'])
+                if digest(folder/(p['id']+'.provider.json'))!=part['provider_plan_sha256']:raise ValueError('provider_plan_changed')
     def apply(self,plan,policy,agent=False,rollback=False,scheduled=False):
         folder=self.root/'plans'/plan['id'];self.save(plan_id=plan['id'])
         if not rollback and not any(p['available'] for p in plan['components']):self.save(state='up_to_date');return
@@ -268,6 +292,7 @@ class Worker:
                     expected=part['sha256'] if part['available'] else part['installed_sha256']
                     if digest(p['binary'])!=expected:raise ValueError('installed_binary_changed')
                 self.rollback(plan);return
+            self.validate_provider_plans(plan)
             previous={};expected={}
             for p in self.c['components']:
                 if p.get('provider','github')!='github':continue
@@ -277,7 +302,7 @@ class Worker:
                 if part['available'] and digest(folder/(p['id']+'.candidate'))!=part['sha256']:raise ValueError('candidate_digest_mismatch')
                 shutil.copyfile(p['binary'],folder/(p['id']+'.previous'))
                 expected[p['id']]=part['sha256'] if part['available'] else previous[p['id']]
-            plan['previous']=previous;write(folder/'plan.json',plan)
+            plan['previous']=previous;plan['provider_attempts']=[];write(folder/'plan.json',plan)
             # State survives both instance restarts and helper interruption.
             self.save(state='stopping',cutover_at=int(time.time()*1000));self.report(drain=True)
             try:
@@ -286,8 +311,10 @@ class Worker:
                     part=next(x for x in plan['components'] if x['id']==p['id'])
                     if part['available']:
                         if p.get('provider','github')=='github':self.replace(folder/(p['id']+'.candidate'),p['binary'])
-                        else:run(p['commands']['apply'],timeout=600)
-                self.control('start');self.save(state='verifying');self.health(expected)
+                        else:
+                            plan.setdefault('provider_attempts',[]).append(p['id']);write(folder/'plan.json',plan)
+                            self.provider_call(p,'apply',folder)
+                self.control('start');self.save(state='verifying');self.provider_verify(plan);self.health(expected)
                 self.save(state='succeeded',rollback_plan_id=plan['id'],installed_at=int(time.time()*1000));self.report()
             except BaseException:
                 try:self.rollback(plan)

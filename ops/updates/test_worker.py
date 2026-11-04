@@ -89,4 +89,29 @@ class UpdateTests(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,'window_ended'):obj.apply(plan,obj.policy,scheduled=True)
   self.assertEqual(self.binary.read_bytes(),b'old-binary')
 
+ def test_frozen_provider_plan_and_health_failure_rollback(self):
+  obj=self.worker();comp={'id':'image','provider':'command','protocol':2,'commands':{x:['/provider',x] for x in ['status','plan','apply','rollback','verify']}}
+  obj.c['components'].append(comp);calls=[]
+  def invoke(argv,**kwargs):
+   action=argv[-1];calls.append(action)
+   if action=='status':return b'{"version":"old"}'
+   if action=='plan':return b'{"available":true,"version":"new","image":"sha256:fixed"}'
+   plan=json.loads(pathlib.Path(kwargs['env']['CONSTELLATION_UPDATE_PLAN']).read_text())
+   self.assertEqual(plan['plan']['image'],'sha256:fixed')
+   if action=='verify' and 'rollback' not in calls:raise ValueError('provider health failed')
+   return b'{}'
+  with patch.object(w,'candidate',return_value={'id':'instance','available':False,'installed_sha256':w.digest(self.binary)}),patch.object(w,'run',side_effect=invoke):
+   plan=obj.plan(obj.policy)
+   with self.assertRaisesRegex(ValueError,'provider health'):obj.apply(plan,obj.policy)
+  self.assertEqual(calls,['status','plan','apply','verify','rollback','verify'])
+  self.assertEqual(obj.state['state'],'rolled_back')
+ def test_tampered_provider_plan_never_stops_services(self):
+  obj=self.worker();comp={'id':'source','provider':'command','protocol':2,'commands':{x:['/provider',x] for x in ['status','plan','apply','rollback','verify']}}
+  obj.c['components'].append(comp)
+  with patch.object(w,'candidate',return_value={'id':'instance','available':False,'installed_sha256':w.digest(self.binary)}),patch.object(w,'run',return_value=b'{"available":true,"version":"new"}'):
+   plan=obj.plan(obj.policy)
+  (self.state/'plans'/plan['id']/'source.provider.json').write_text('{}')
+  obj.control=lambda action:self.fail('service stopped before validation')
+  with self.assertRaisesRegex(ValueError,'provider_plan_changed'):obj.apply(plan,obj.policy)
+
 if __name__=='__main__':unittest.main()
