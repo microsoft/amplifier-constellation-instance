@@ -23,6 +23,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
       - name: Install Rust without changing the runner default
         run: rustup toolchain install 1.93.0 --profile minimal --component clippy --component rustfmt
+      - name: Check optional container administration contracts
+        run: python3 ops/container/test_container.py
       - name: Check installation contracts
         run: python3 scripts/test-installation.py
       - name: Check release retries preserve published assets

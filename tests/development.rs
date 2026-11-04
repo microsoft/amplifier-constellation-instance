@@ -23,6 +23,38 @@ fn fixture() -> (tempfile::TempDir, Arc<AppState>) {
     (d, s)
 }
 #[test]
+fn network_status_tracks_native_owner_policy_without_claiming_build_readiness() {
+    let (_d, s) = fixture();
+    let engine = s.home.join("engine");
+    std::fs::create_dir_all(&engine).unwrap();
+    let executable = engine.join("agent-runtime");
+    std::fs::write(&executable, b"fixture-only, never executed").unwrap();
+    let mut config = s.instance_config();
+    config.backend = Some(agent_instance::config::BackendConfig {
+        command: executable.to_string_lossy().into_owned(),
+        args: vec!["--home".into(), engine.to_string_lossy().into_owned()],
+        env: BTreeMap::new(),
+        secret_env: BTreeMap::new(),
+        working_directory: s.home.to_string_lossy().into_owned(),
+        allowed_working_roots: vec![s.home.to_string_lossy().into_owned()],
+    });
+    server::replace_config(&s, 1, config, "fixture").unwrap();
+    for policy in [None, Some("inherit"), Some("isolated")] {
+        let mut native = json!({"limits":{"command_seconds":60}});
+        if let Some(policy) = policy {
+            native["command_network"] = json!(policy);
+        }
+        std::fs::write(engine.join("runtime.json"), native.to_string()).unwrap();
+        let summary = development::summary(&s).unwrap();
+        assert_eq!(
+            summary["environment"]["network"],
+            policy.unwrap_or("isolated")
+        );
+        assert_eq!(summary["environment"]["build_verified"], false);
+        assert_eq!(summary["ready_to_develop"], false);
+    }
+}
+#[test]
 fn setup_preserves_other_tools_replaces_only_github_and_keeps_secrets_private() {
     let (_d, s) = fixture();
     let mut c = s.instance_config();
