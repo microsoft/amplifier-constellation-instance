@@ -25,6 +25,8 @@ jobs:
         run: rustup toolchain install 1.93.0 --profile minimal --component clippy --component rustfmt
       - name: Check optional container administration contracts
         run: python3 ops/container/test_container.py
+      - name: Check installation updater recovery
+        run: python3 ops/updates/test_worker.py
       - name: Check installation contracts
         run: python3 scripts/test-installation.py
       - name: Check release retries preserve published assets
@@ -47,6 +49,11 @@ jobs:
         if: matrix.runner == 'ubuntu-24.04'
         working-directory: ui/tests
         run: npm ci && npx playwright install --with-deps chromium
+      - name: Check update dashboard and programmable view
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
+        run: node ui/tests/updates.mjs
       - name: Check owner development setup and programmable view
         if: matrix.runner == 'ubuntu-24.04'
         env:
@@ -88,6 +95,7 @@ jobs:
         run: echo 'C:/Program Files/Git/usr/bin' >> "$GITHUB_PATH"
       - name: Check native installer and runtime boundaries
         run: |
+          python ops/updates/test_worker.py
           python scripts/test-native-installation.py
           python scripts/test-provisioning.py
       - name: Test native executable and process boundaries

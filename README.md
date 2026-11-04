@@ -129,3 +129,7 @@ Agent image uploads and the optional ACP identity interface: [portable images](d
 ### Optional Linux containment
 
 For an existing Linux installation, see the [per-installation container recipe](ops/container/README.md). It preserves ACP connections and managed certificate renewal while keeping host login and service administration outside the container. This is an experimental administrator path with host-managed updates.
+
+### Updates
+
+Use **Updates** to check, install, schedule checks, or let the agent request updates from chat. Each installation owns its update helper. See [installation updates](docs/updates.md).

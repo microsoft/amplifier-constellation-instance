@@ -80,6 +80,27 @@ enum Command {
         #[command(subcommand)]
         command: DevelopmentCommand,
     },
+    /// Check or update registered components of this installation.
+    Updates {
+        #[arg(default_value="status", value_parser=["status","check","plan","update","apply","rollback","configure"])]
+        action: String,
+        #[arg(long)]
+        plan_id: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Install the independent update helper on the host (outside containers).
+    InstallUpdates {
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[arg(long)]
+        slack_home: Vec<PathBuf>,
+    },
+    /// Write this version's update helper for the host installation.
+    ExportUpdateHelper {
+        #[arg(long)]
+        path: PathBuf,
+    },
     Schema,
 }
 #[derive(Subcommand)]
@@ -294,6 +315,64 @@ async fn main() -> Result<()> {
                 )
             }
         },
+        Command::ExportUpdateHelper { path } => {
+            agent_instance::config::write_private(
+                &path,
+                include_bytes!("../ops/updates/worker.py"),
+            )?;
+            Ok(())
+        }
+        Command::InstallUpdates { state, slack_home } => {
+            let staging = std::env::temp_dir()
+                .join(format!("constellation-updater-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&staging)?;
+            agent_instance::config::write_private(
+                &staging.join("worker.py"),
+                include_bytes!("../ops/updates/worker.py"),
+            )?;
+            agent_instance::config::write_private(
+                &staging.join("install.py"),
+                include_bytes!("../ops/updates/install.py"),
+            )?;
+            let python = if cfg!(windows) { "python" } else { "python3" };
+            let mut cmd = std::process::Command::new(python);
+            cmd.arg("-I")
+                .arg(staging.join("install.py"))
+                .arg("--home")
+                .arg(&cli.home);
+            if let Some(state) = state {
+                cmd.arg("--state").arg(state);
+            }
+            for home in slack_home {
+                cmd.arg("--slack-home").arg(home);
+            }
+            let result = cmd.status();
+            let _ = std::fs::remove_dir_all(&staging);
+            anyhow::ensure!(result?.success(), "Update helper installation failed");
+            Ok(())
+        }
+        Command::Updates {
+            action,
+            plan_id,
+            file,
+        } => {
+            let result = if action == "status" {
+                host::api(&cli.home, "GET", "updates", None).await?
+            } else if action == "configure" {
+                host::api(
+                    &cli.home,
+                    "PUT",
+                    "updates/policy",
+                    Some(read_json(
+                        file.context("Supply --file with update settings")?,
+                    )?),
+                )
+                .await?
+            } else {
+                host::api(&cli.home,"POST","updates",Some(json!({"action":action,"plan_id":plan_id,"request_id":uuid::Uuid::new_v4().to_string()}))).await?
+            };
+            print(result)
+        }
         Command::Development { command } => {
             let (method, path, body) = match command {
                 DevelopmentCommand::Status => ("GET", "development", None),
