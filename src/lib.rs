@@ -1,5 +1,7 @@
 pub mod acp;
 pub mod activity;
+pub mod attention;
+pub mod attention_policy;
 pub mod auth;
 pub mod config;
 pub mod context;

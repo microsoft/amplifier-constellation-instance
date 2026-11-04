@@ -19,6 +19,7 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 pub struct AppState {
+    pub attention_lock: Mutex<()>,
     pub home: PathBuf,
     pub profile_lock: Mutex<()>,
     pub config: RwLock<ConfigDocument>,
@@ -56,6 +57,7 @@ impl AppState {
             .and_then(|v| v["drain_until"].as_i64())
             .unwrap_or(0);
         Ok(Self {
+            attention_lock: Mutex::new(()),
             home,
             profile_lock: Mutex::new(()),
             config: RwLock::new(config),

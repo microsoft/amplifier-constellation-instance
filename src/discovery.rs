@@ -5,6 +5,18 @@ pub fn openapi() -> Value {
     let mut paths = serde_json::Map::new();
     for (path, methods, scope, description) in [
         (
+            "/attention",
+            vec!["get"],
+            "observe",
+            "Bounded attention event counts and uncertainty review queue. No transcript text or credentials. Offers are not admissions; admissions are not model-request counts.",
+        ),
+        (
+            "/attention/review",
+            vec!["post"],
+            "admin",
+            "Label an event using id and verdict (should_engage, should_hold, insufficient_evidence). Evaluation evidence only; labels do not automatically tune policy.",
+        ),
+        (
             "/identity",
             vec!["get"],
             "observe",

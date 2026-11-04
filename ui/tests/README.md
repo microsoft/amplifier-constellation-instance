@@ -44,3 +44,12 @@ This starts a disposable Agent Instance and a fake local OAuth callback. Browser
 navigation to the authorization page is intercepted with a fixture; no real
 account is signed in or copied. It checks local/remote setup, reload, explicit
 model activation, cancellation/revocation, CLI/view parity and narrow layout.
+
+`attention.mjs` exercises the real service's attention review, uncertainty denominator,
+semantic review controls, reload/mobile state, and optional configuration save/disable.
+Its decision records are synthetic and its provider URL is unreachable loopback;
+it performs no provider calls or game actions.
+
+```sh
+PLAYWRIGHT_MODULE=/tmp/agent-instance-browser-tests/node_modules/playwright/index.mjs node ui/tests/attention.mjs
+```

@@ -160,3 +160,11 @@ Background execution uses the Responsibilities route. `scheduler.open/save/advan
 The Memory route provides attributed statements, alternative accounts, source inspection and revision-checked resolution/archive. Its selection, archive disclosure and `memory.*` drafts use the same view-state interface. The optional native engine editor uses `native.*` drafts, modal and disclosure state, while its mutations require the separate administrative API. Both screens expose their actions through `window.agentInstanceControl.perform`; see [memory.md](memory.md) and [native-configuration.md](native-configuration.md) for their action names and API paths.
 
 `navigate` accepts an optional `work_id` when `route` is `work`, allowing an embedding experience to select the responsibility atomically with navigation. This changes view state only. Acceptance forms are also exposed through the semantic controls documented in [completion contracts](completion-contract.md).
+
+## Attention review
+
+Activity → Attention review uses `attention.open`; labels use
+`attention.review {id,verdict}`. Modal/view state is remotely controllable.
+Configuration → Advanced settings edits the optional `attention` config using
+the existing revisioned config API. Secret values remain in the secret store.
+See [attention](attention.md) for API payloads and confidence/admission semantics.

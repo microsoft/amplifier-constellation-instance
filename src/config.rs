@@ -13,6 +13,9 @@ pub struct ConfigDocument {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceConfig {
+    /// Optional shared attention for any installed ACP engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<crate::attention::Config>,
     pub schema_version: u32,
     pub instance_id: String,
     pub name: String,
@@ -69,6 +72,7 @@ impl InstanceConfig {
     pub fn blank(name: String, owner: String) -> Self {
         Self {
             schema_version: 1,
+            attention: None,
             instance_id: uuid::Uuid::new_v4().to_string(),
             name,
             purpose: String::new(),
@@ -105,6 +109,9 @@ impl InstanceConfig {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.schema_version == 1, "Unsupported configuration schema");
         crate::tool_connections::validate(&self.tool_connections)?;
+        if let Some(config) = &self.attention {
+            config.validate()?;
+        }
         uuid::Uuid::parse_str(&self.instance_id)?;
         ensure!(
             !self.name.trim().is_empty() && self.name.len() <= 200,

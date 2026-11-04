@@ -17,6 +17,7 @@ sharing transcripts, accepting work, or choosing who speaks.
 
 | Profile | Owner and boundary | Without it |
 | --- | --- | --- |
+| `com.microsoft.amplifier.attention` version 1 | Instance-owned optional ambient event assessment and one-use prompt admission; see [attention](attention.md) | Ordinary ACP prompts continue; no pre-turn decision-model savings assumed. |
 | `agent-instance.wss/1` | Attach helper/service; one JSON-RPC object per WebSocket text message, a custom transport profile | Use standard stdio through an ordinary ACP client. |
 | `agent-instance.management/1` | Separate authenticated descriptor/API | ACP works; installation/configuration/UI control cannot be assumed. |
 | `agent-instance.context/1` | Authorized conversation-provider HTTP query | Use current session and explicitly supplied context; assume no cross-room access. |
@@ -26,9 +27,9 @@ sharing transcripts, accepting work, or choosing who speaks.
 
 These suffixes version product profiles independently of ACP's
 `protocolVersion`. Unknown versions must not be treated as compatible version 1.
-Current integrations select contracts through configuration and management
-descriptors; there is no universal ACP negotiation for these application
-features.
+Attention additionally advertises its version and enabled state in ACP initialization
+metadata. This is explicit optional discovery, not universal ACP negotiation for
+application features.
 
 ## Context and identity
 

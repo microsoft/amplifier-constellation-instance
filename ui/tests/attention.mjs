@@ -1,0 +1,53 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import {spawn,spawnSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+import {fileURLToPath} from 'node:url';
+const {chromium,request}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
+const project=fileURLToPath(new URL('../../',import.meta.url)),binary=process.env.AGENT_INSTANCE_BINARY||path.join(project,'target/debug/agent-instance');
+const home=await fs.mkdtemp(path.join(os.tmpdir(),'agent-instance-background-ui-')),artifacts=process.env.UI_TEST_ARTIFACTS||await fs.mkdtemp(path.join(os.tmpdir(),'agent-instance-background-results-'));
+await fs.mkdir(artifacts,{recursive:true});
+const init=spawnSync(binary,['--home',home,'init','--name','Background fixture','--bind','127.0.0.1','--port','0'],{encoding:'utf8'});assert.equal(init.status,0,init.stderr);
+const installed=JSON.parse(await fs.readFile(home+'/config.json','utf8'));installed.config.enabled=true;installed.config.setup_complete=true;installed.config.backend={command:'/usr/bin/python3',args:[path.join(project,'tests/fixtures/scheduler_backend.py'),'${AGENT_HOME}/workspace'],env:{},secret_env:{},working_directory:'${AGENT_HOME}/workspace',allowed_working_roots:['${AGENT_HOME}/workspace']};await fs.writeFile(home+'/config.json',JSON.stringify(installed),{mode:0o600});
+const service=spawn(binary,['--home',home,'serve'],{stdio:['ignore','ignore','pipe']});let logs='';service.stderr.on('data',b=>logs+=b);
+let browser,context,api,page;
+const report={checks:[],execution:'real Rust service; synthetic decision journal; no model requests',auth:'synthetic browser session only in temporary installation'};
+try{
+ let endpoints;for(let n=0;n<100;n++){try{endpoints=JSON.parse(await fs.readFile(home+'/endpoints.json','utf8'));break;}catch{await new Promise(r=>setTimeout(r,100));}}assert(endpoints,logs);const origin=endpoints.base_url;
+ const seed=spawnSync('python3',['-c',`import sqlite3,hashlib,time,sys\ndb=sqlite3.connect(sys.argv[1]);db.execute('INSERT INTO browser_sessions(hash,owner,csrf,expires_at) VALUES(?,?,?,?)',(hashlib.sha256(b'background-browser-fixture').hexdigest(),sys.argv[2],'background-csrf-fixture',int(time.time()*1000)+3600000));db.commit()`,home+'/state.sqlite3',installed.config.owner],{encoding:'utf8'});assert.equal(seed.status,0,seed.stderr);
+ api=await request.newContext({ignoreHTTPSErrors:true,baseURL:origin,extraHTTPHeaders:{Authorization:'Bearer '+(await fs.readFile(home+'/secrets/control-token','utf8')).trim()}});
+ const call=async(method,p,data)=>{const r=await api.fetch('/api/v1/'+p,{method,data});assert(r.ok(),await r.text());return r.json();};
+ const get=p=>call('GET',p),post=(p,data)=>call('POST',p,data);
+ browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),args:['--no-sandbox']});context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1440,height:1050}});await context.addCookies([{name:'ai_'+installed.config.instance_id.replaceAll('-',''),value:'background-browser-fixture',url:origin,secure:true,httpOnly:true,sameSite:'Strict'}]);
+ const errors=[];
+ const open=async()=>{page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(origin);await page.locator('[data-control="nav.activity"]').click();};await open();
+
+ const seedAttention=spawnSync('python3',['-c',`import sqlite3,time,json,sys\ndb=sqlite3.connect(sys.argv[1]);row={'id':'fixture-event','event_id':'room-message-1','session_id':'fixture-session','status':'admitted','judgment':'uncertain','reason':'semantic_uncertainty','investigate':True,'review':'unreviewed'};db.execute('INSERT INTO records(collection,id,value,updated_at) VALUES(?,?,?,?)',('attention_events',row['id'],json.dumps(row),int(time.time()*1000)));db.commit()`,home+'/state.sqlite3'],{encoding:'utf8'});assert.equal(seedAttention.status,0,seedAttention.stderr);
+ await page.locator('[data-action="attention.open"]').click();
+ await page.getByText('Not enough conversational evidence',{exact:true}).waitFor();
+ assert.match(await page.locator('.modal').innerText(),/1 of 1 \(100.0%\)/);
+ await page.locator('[data-action="attention.review"][data-verdict="should_engage"]').click();
+ await page.getByText('Session fixture-session · review: Should Engage',{exact:true}).waitFor();
+ assert.equal((await get('attention')).reviews[0].review.verdict,'should_engage');
+ report.checks.push('uncertainty denominator, reason and saved judgment shown by the real service');
+ await page.reload();await page.getByText('Not enough conversational evidence',{exact:true}).waitFor();
+ assert.match(await page.locator('.modal').innerText(),/Should Engage/);
+ await page.evaluate(async()=>{await window.agentInstanceControl.perform('attention.review',{id:'fixture-event',verdict:'should_hold'});});
+ assert.equal((await get('attention')).reviews[0].review.verdict,'should_hold');
+ await page.setViewportSize({width:390,height:844});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+ await page.screenshot({path:path.join(artifacts,'attention-mobile.png'),fullPage:true});
+ report.checks.push('review view survives reload; programmatic review and narrow display work');
+ await page.evaluate(async()=>{await window.agentInstanceControl.perform('modal.close');await window.agentInstanceControl.command({type:'navigate',route:'configuration'});await window.agentInstanceControl.perform('advanced.toggle');});
+ const cfg={endpoint:'http://127.0.0.1:9/decision',model:'fixture',protocol:'system_one',auth:'bearer',credential_secret:'attention-key',decisions_per_hour:50,turns_per_hour:10,uncertain_turns_per_hour:3};
+ await page.locator('[data-draft="config.attention"]').fill(JSON.stringify(cfg));
+ await page.locator('[data-action="config.save"]').first().click();
+ for(let n=0;n<50;n++){if((await get('config')).config.attention?.model==='fixture')break;await new Promise(r=>setTimeout(r,100));}
+ assert.deepEqual((await get('config')).config.attention,cfg);
+ await page.reload();await page.locator('[data-draft="config.attention"]').waitFor();
+ assert.deepEqual(JSON.parse(await page.locator('[data-draft="config.attention"]').inputValue()),cfg);
+ await page.evaluate(async()=>{await window.agentInstanceControl.setDraft('config.attention','null');await window.agentInstanceControl.perform('config.save');});
+ assert.equal((await get('config')).config.attention??null,null);
+ report.checks.push('optional service configuration persists and can be disabled from the same UI/API controls');
+ assert.equal(errors.length,0,JSON.stringify(errors));report.passed=true;await fs.writeFile(path.join(artifacts,'result.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+}catch(error){if(page){console.error(await page.locator("[role=alert]").allTextContents());await page.screenshot({path:path.join(artifacts,"failure.png"),fullPage:true});console.error("Failure screenshot: "+path.join(artifacts,"failure.png"));}throw error;}finally{await context?.close();await browser?.close();await api?.dispose();service.kill('SIGTERM');await new Promise(resolve=>{if(service.exitCode!==null)return resolve();const timer=setTimeout(()=>{service.kill('SIGKILL');resolve();},10000);service.once('exit',()=>{clearTimeout(timer);resolve();});});await fs.rm(home,{recursive:true,force:true});}

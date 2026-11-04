@@ -44,6 +44,7 @@ impl Drop for ConnectionGuard {
             connections.remove(&self.id);
         }
         context::revoke_connection(&self.state, &self.id);
+        crate::attention::cancel(&self.state, &self.id, None);
         let _ = self
             .state
             .event("acp.disconnected", json!({"connection_id": self.id}));
@@ -340,6 +341,9 @@ async fn relay_connection(
     let mut pending_context = BTreeMap::<String, context::Prepared>::new();
     let mut session_context = BTreeMap::<String, context::Prepared>::new();
     let mut pending = BTreeMap::<String, Pending>::new();
+    let mut attention_jobs = tokio::task::JoinSet::new();
+    let mut attention_ids = BTreeSet::<String>::new();
+    let mut loaded_sessions = BTreeSet::<String>::new();
     let mut update_admissions = BTreeMap::new();
     let mut tool_guard: Option<tool_connections::Guard> = None;
     let mut pending_tools = BTreeSet::<String>::new();
@@ -351,6 +355,12 @@ async fn relay_connection(
     let run: Result<()> = async {
         loop {
             tokio::select! {
+                result = attention_jobs.join_next(), if !attention_jobs.is_empty() => {
+                    let (id, result): (Value, Result<Value>) = result.context("Missing attention result")??;
+                    attention_ids.remove(&id.to_string());
+                    let response=match result {Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(_)=>rpc_error(id,-32602,"Attention event could not be evaluated; inspect installation activity")};
+                    send_frontend(&outgoing,response).await?;
+                },
                 _ = tool_recheck.tick(), if tool_guard.is_some() => {
                     if tool_guard.as_ref().unwrap().check(&state, auth_headers.as_ref()).is_err() { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                 },
@@ -362,6 +372,7 @@ async fn relay_connection(
                     if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                     let mut supplied_profile: Option<(String, String, u64, Value)> = None;
                     let mut starting_work: Option<Pending> = None;
+                    let mut attention_admission: Option<String> = None;
                     idle_deadline = Instant::now() + idle_duration;
                     if !is_rpc_message(&value) {
                         send_frontend(&outgoing, rpc_error(value.get("id").cloned().unwrap_or(Value::Null), -32600, "Expected one ACP JSON-RPC message")).await?;
@@ -369,7 +380,7 @@ async fn relay_connection(
                     }
                     ensure!(serde_json::to_vec(&value)?.len() <= max_frame, "Client ACP frame exceeds configured limit");
                     if let Some(method) = value["method"].as_str().map(str::to_owned) {
-                        if value.get("id").is_some_and(|id| pending.contains_key(&id.to_string())) {
+                        if value.get("id").is_some_and(|id| pending.contains_key(&id.to_string()) || attention_ids.contains(&id.to_string())) {
                             reject_request(&outgoing, &value, -32600, "Duplicate in-flight JSON-RPC request ID").await?;
                             continue;
                         }
@@ -380,6 +391,38 @@ async fn relay_connection(
                         if !initialized && method != "initialize" {
                             reject_request(&outgoing, &value, -32600, "Initialize this ACP connection before making other requests").await?;
                             continue;
+                        }
+                        if method == crate::attention::METHOD {
+                            let Some(id)=value.get("id").cloned() else {continue;};
+                            let prepared=(|| -> Result<_> {
+                                ensure!(attention_ids.len()<8,"Too many attention evaluations");
+                                let event:crate::attention::Event=serde_json::from_value(value["params"].clone())?;
+                                ensure!(loaded_sessions.contains(&event.session_id),"Load this session before submitting events");
+                                let binding=session_context.get(&event.session_id).map(|p|&p.binding);
+                                let row=crate::attention::reserve(&state,&principal,&connection_id,&event,binding)?;
+                                Ok((row,event))
+                            })();
+                            match prepared {
+                                Ok((row,event))=>{
+                                    attention_ids.insert(id.to_string());
+                                    let state=state.clone();
+                                    let source=session_context.get(&event.session_id).map(|p|p.hash.clone());
+                                    let connection_id=connection_id.clone();
+                                    attention_jobs.spawn(async move {
+                                        if let Some(hash)=source && let Err(error)=context::revalidate(&state,&hash).await {
+                                            crate::attention::cancel(&state,&connection_id,Some(&event.session_id));
+                                            return (id,Err(error));
+                                        }
+                                        (id,crate::attention::evaluate(state,row,event).await)
+                                    });
+                                },
+                                Err(_)=>{send_frontend(&outgoing,rpc_error(id,-32602,"Invalid, unauthorized, or unavailable attention event")).await?;}
+                            }
+                            continue;
+                        }
+                        if matches!(method.as_str(),"session/cancel"|"session/close")
+                            && let Some(sid)=value["params"]["sessionId"].as_str() {
+                            crate::attention::cancel(&state,&connection_id,Some(sid));
                         }
                         if method == crate::identity::METHOD {
                             if let Some(id) = value.get("id") {
@@ -457,6 +500,10 @@ async fn relay_connection(
                                 }
                             }
                         }
+                        if method=="session/prompt" && value["params"]["_meta"].get(crate::attention::META).is_none()
+                            && let Some(sid)=value["params"]["sessionId"].as_str(){
+                            crate::attention::cancel(&state,&connection_id,Some(sid));
+                        }
                         if method == "session/prompt" && value["params"]["prompt"].is_array() {
                             let (current, prompt_revision) = {
                                 let document = state.config.read().unwrap();
@@ -507,9 +554,21 @@ async fn relay_connection(
                         observe(&state, &connection_id, "client_to_agent", &method, &value)?;
                     }
                     if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
+                    if value["method"]=="session/prompt" && let Some(metadata)=value["params"]["_meta"].as_object_mut().and_then(|m|m.remove(crate::attention::META)) {
+                        let sid=value["params"]["sessionId"].as_str().unwrap_or("");
+                        match crate::attention::consume(&state,&principal,&connection_id,sid,&metadata) {
+                            Ok(id)=>attention_admission=Some(id),
+                            Err(_)=>{
+                                if let Some(id)=value.get("id") {pending.remove(&id.to_string());update_admissions.remove(&id.to_string());}
+                                reject_request(&outgoing,&value,-32002,"Attention offer expired, cancelled, superseded, used, or over budget; no prompt was forwarded").await?;
+                                continue;
+                            }
+                        }
+                    }
                     let encoded = format!("{}\n", value);
                     tokio::time::timeout(Duration::from_secs(10), input.write_all(encoded.as_bytes())).await.context("ACP backend stopped accepting input")??;
                     input.flush().await?;
+                    if let Some(id)=attention_admission {crate::attention::forwarded(&state,&id)?;}
                     if let Some(request) = starting_work {
                         let event = state.event("acp.prompt.started", work_metadata(&connection_id, &request))?;
                         if let (Some(work_id), Some((sid,hash,_,package))) = (request.work_id.as_deref(), supplied_profile.as_ref()) {
@@ -564,6 +623,7 @@ async fn relay_connection(
                                 value["result"]["agentInfo"] = json!({"name":"agent-instance","title":config.name,"version":env!("CARGO_PKG_VERSION")});
                                 if !value["result"]["_meta"].is_object() { value["result"]["_meta"] = json!({}); }
                                 value["result"]["_meta"][crate::identity::NAMESPACE] = crate::identity::capability(false);
+                                value["result"]["_meta"][crate::attention::META] = crate::attention::capability(&state);
                                 value["result"]["_meta"][META_NAMESPACE] = json!({"instanceId":config.instance_id,"configRevision":config_revision,"backendAgentInfo":backend_info,"managementApi":"v1","remoteTransportProfile":"agent-instance.wss/1"});
                                 value["result"]["_meta"][META_NAMESPACE]["continuity"] = json!({
                                     "profile":"agent-instance.context/1",
@@ -579,6 +639,8 @@ async fn relay_connection(
                                 update_connection(&state, &connection_id, "backend_info", safe_info(&backend_info));
                                 update_connection(&state, &connection_id, "protocol_version", value["result"]["protocolVersion"].clone());
                             }
+                            if matches!(request.method.as_str(),"session/new"|"session/load"|"session/resume") && let Some(sid)=value["result"]["sessionId"].as_str().or(request.session_id.as_deref()) {loaded_sessions.insert(sid.to_owned());}
+                            if request.method=="session/close" && let Some(sid)=&request.session_id {loaded_sessions.remove(sid);}
                             record_response(&state, &connection_id, &request, &value["result"])?;
                             if request.method == "session/new"
                                 && let Some(sid) = value["result"]["sessionId"].as_str().filter(|sid|sid.len() <= 512) {
