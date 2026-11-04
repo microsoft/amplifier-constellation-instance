@@ -75,7 +75,25 @@ enum Command {
         #[command(subcommand)]
         command: NativeAccountCommand,
     },
+    /// Configure and verify development tools for this installation.
+    Development {
+        #[command(subcommand)]
+        command: DevelopmentCommand,
+    },
     Schema,
+}
+#[derive(Subcommand)]
+enum DevelopmentCommand {
+    Status,
+    CheckGithub,
+    ConnectGithub {
+        #[arg(long)]
+        enable_local_clients: bool,
+        /// Private file containing a GitHub token; omit to reuse gh's account.
+        #[arg(long)]
+        credential_file: Option<PathBuf>,
+    },
+    DisconnectGithub,
 }
 #[derive(Subcommand)]
 enum NativeAccountCommand {
@@ -276,6 +294,39 @@ async fn main() -> Result<()> {
                 )
             }
         },
+        Command::Development { command } => {
+            let (method, path, body) = match command {
+                DevelopmentCommand::Status => ("GET", "development", None),
+                DevelopmentCommand::CheckGithub => {
+                    ("POST", "development/github/check", Some(json!({})))
+                }
+                DevelopmentCommand::ConnectGithub {
+                    enable_local_clients,
+                    credential_file,
+                } => {
+                    let status = host::api(&cli.home, "GET", "development", None).await?;
+                    let credential = credential_file
+                        .map(|p| agent_instance::acp::read_token_file(&p))
+                        .transpose()?;
+                    (
+                        "POST",
+                        "development/github",
+                        Some(
+                            json!({"expected_revision":status["config_revision"],"enable_local_clients":enable_local_clients,"credential":credential}),
+                        ),
+                    )
+                }
+                DevelopmentCommand::DisconnectGithub => {
+                    let status = host::api(&cli.home, "GET", "development", None).await?;
+                    (
+                        "DELETE",
+                        "development/github",
+                        Some(json!({"expected_revision":status["config_revision"]})),
+                    )
+                }
+            };
+            print(host::api(&cli.home, method, path, body).await?)
+        }
         Command::Schema => print(json!(schemars::schema_for!(InstanceConfig))),
         Command::Status { .. } => print(host::api(&cli.home, "GET", "status", None).await?),
         Command::Config { command } => match command {
