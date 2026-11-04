@@ -40,6 +40,26 @@ class UpdateTests(unittest.TestCase):
   obj=self.worker();plan=self.plan(obj);(self.home/'conversation.json').write_text('keep new messages')
   obj.apply(plan,obj.policy,True);self.assertEqual(self.binary.read_bytes(),b'new-binary');self.assertEqual(obj.state['state'],'succeeded')
   obj.apply(plan,obj.policy,True,True);self.assertEqual(self.binary.read_bytes(),b'old-binary');self.assertEqual(obj.state['state'],'rolled_back');self.assertEqual((self.home/'conversation.json').read_text(),'keep new messages')
+ def test_verified_inventory_tracks_install_and_rollback_without_mutating_plan(self):
+  obj=self.worker();plan=self.plan(obj)
+  plan['components'][0].update(version='agent-instance 1.0.0',target_version='agent-instance 1.1.0')
+  image={'id':'image','provider':'command','available':True,'version':'image-old','target_version':'image-new'}
+  plan['components'].append(image)
+  obj.save(components=json.loads(json.dumps(plan['components'])))
+  original=json.loads(json.dumps(plan['components']))
+  obj.apply(plan,obj.policy)
+  installed=obj.state['components']
+  self.assertEqual(installed[0]['version'],'agent-instance 1.1.0')
+  self.assertEqual(installed[0]['installed_sha256'],w.digest(self.binary))
+  self.assertFalse(installed[0]['available'])
+  self.assertEqual(installed[1]['version'],'image-new');self.assertFalse(installed[1]['available'])
+  self.assertEqual(plan['components'],original)
+  obj.apply(plan,obj.policy,rollback=True)
+  self.assertEqual(obj.state['components'][0]['version'],'agent-instance 1.0.0')
+  self.assertEqual(obj.state['components'][0]['installed_sha256'],w.digest(self.binary))
+  self.assertTrue(obj.state['components'][0]['available'])
+  self.assertEqual(obj.state['components'][1]['version'],'image-old')
+  self.assertEqual(plan['components'],original)
  def test_health_failure_restores_previous_binary(self):
   obj=self.worker();plan=self.plan(obj);calls=[]
   def health(expected,scope=None):

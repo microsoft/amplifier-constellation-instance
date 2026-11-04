@@ -300,6 +300,19 @@ class Worker:
         shutil.copyfile(source,temp);temp.chmod(0o755)
         with temp.open('r+b') as f:os.fsync(f.fileno())
         os.replace(temp,dest)
+    @staticmethod
+    def installed_inventory(plan,rolled_back=False):
+        # The plan is an immutable before/after receipt used for rollback. The
+        # live status must describe the installation AFTER successful verification.
+        parts=json.loads(json.dumps(plan['components']))
+        if not rolled_back:
+            for part in parts:
+                if not part['available']:continue
+                part['version']=part.get('target_version',part.get('version','unknown'))
+                if 'sha256' in part:part['installed_sha256']=part['sha256']
+                part['available']=False
+                part['reason']='installed_and_verified'
+        return parts
     def rollback(self,plan):
         # Old interrupted plans actually stopped every registered service.
         scope=plan.get('restart_scope') or self.full_restart_scope()
@@ -313,7 +326,7 @@ class Worker:
                 part=next(x for x in plan['components'] if x['id']==p['id'])
                 if part['available'] or 'restart_scope' not in plan:self.replace(backup,p['binary'])
             elif p['id'] in plan.get('provider_attempts',[x['id'] for x in plan['components'] if x['available']]):self.provider_call(p,'rollback',folder)
-        self.control('start',scope);self.provider_verify(plan);self.health(expected,scope);self.save(state='rolled_back',rollback_plan_id=None);self.report()
+        self.control('start',scope);self.provider_verify(plan);self.health(expected,scope);self.save(state='rolled_back',rollback_plan_id=None,components=self.installed_inventory(plan,rolled_back=True));self.report()
     def validate_provider_plans(self,plan):
         folder=self.root/'plans'/plan['id']
         for p in self.c['components']:
@@ -363,7 +376,7 @@ class Worker:
                             plan.setdefault('provider_attempts',[]).append(p['id']);write(folder/'plan.json',plan)
                             self.provider_call(p,'apply',folder)
                 self.control('start',scope);self.save(state='verifying');self.provider_verify(plan);self.health(expected,scope)
-                self.save(state='succeeded',rollback_plan_id=plan['id'],installed_at=int(time.time()*1000));self.report()
+                self.save(state='succeeded',rollback_plan_id=plan['id'],installed_at=int(time.time()*1000),components=self.installed_inventory(plan));self.report()
             except BaseException:
                 try:self.rollback(plan)
                 except BaseException:self.save(state='recovery_required');raise
