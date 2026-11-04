@@ -123,9 +123,10 @@ class UpdateTests(unittest.TestCase):
    identity=str(uuid.uuid4());name='acp-slack-adapter-'+identity+'.service'
    w.write(home/'adapter.json',{'id':identity,'enabled':True,'server':{'port':19000+i}})
    (home/'secrets').mkdir();(home/'secrets/control-token').write_text('fixture-only')
-   with sqlite3.connect(home/'state.sqlite3') as db:
+   with contextlib.closing(sqlite3.connect(home/'state.sqlite3')) as db:
     db.executescript('CREATE TABLE jobs(status TEXT); CREATE TABLE outbox(status TEXT);')
     if i:db.execute("INSERT INTO jobs VALUES ('running')")
+    db.commit()
    self.registration['components'].append({'id':'slack-'+str(i),'kind':'slack','binary':str(binary)})
    self.registration['services'].append({'kind':'systemd-user','name':name})
    self.registration['slack_homes'].append(str(home))

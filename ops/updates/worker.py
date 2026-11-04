@@ -272,7 +272,7 @@ class Worker:
                 self.allowed(policy,agent);status=self.report(drain=scope['instance']);busy=status['active_prompts'] if scope['instance'] else 0
                 for path in scope['slack_homes']:
                     h=Path(path);write(h/'updates/drain.json',{'expires_at':int(time.time()*1000)+60000,'plan_id':self.state['plan_id']})
-                    with sqlite3.connect('file:'+str(h/'state.sqlite3')+'?mode=ro',uri=True) as db:
+                    with contextlib.closing(sqlite3.connect('file:'+str(h/'state.sqlite3')+'?mode=ro',uri=True)) as db:
                         busy+=db.execute("SELECT (SELECT count(*) FROM jobs WHERE status='running')+(SELECT count(*) FROM outbox WHERE status IN ('ready','sending','uncertain'))").fetchone()[0]
                 if not busy:
                     if os.name!='nt':
@@ -284,7 +284,7 @@ class Worker:
                     if self.report(drain=scope['instance'])['active_prompts']==0 or not scope['instance']:
                         pending=0
                         for path in scope['slack_homes']:
-                            with sqlite3.connect('file:'+str(Path(path)/'state.sqlite3')+'?mode=ro',uri=True) as db:
+                            with contextlib.closing(sqlite3.connect('file:'+str(Path(path)/'state.sqlite3')+'?mode=ro',uri=True)) as db:
                                 pending+=db.execute("SELECT (SELECT count(*) FROM jobs WHERE status='running')+(SELECT count(*) FROM outbox WHERE status IN ('ready','sending','uncertain'))").fetchone()[0]
                         if not pending:break
                     for f in locks:f.close()
