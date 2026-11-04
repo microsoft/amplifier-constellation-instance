@@ -1013,3 +1013,43 @@ async fn unknown_legacy_audience_and_native_owner_history_cannot_be_loaded_by_a_
     assert!(native.request(6, "session/load", params).await.0["error"].is_null());
     native.close().await;
 }
+
+#[tokio::test]
+async fn global_update_switch_allows_non_owner_conversation_and_revokes_immediately() {
+    let f = Fixture::new().await;
+    f.state
+        .set_record(
+            "updates",
+            "helper",
+            json!({"observed_at":agent_instance::state::now_ms()}),
+        )
+        .unwrap();
+    let mut group = f.client(false);
+    group.init().await;
+    let sid = group
+        .new_session(f.params(Some("group-robin-grant-canary")))
+        .await;
+    let command = json!({"name":"installation_updates","arguments":{"action":"check"}});
+    let disabled = group.prompt(&sid, command.clone()).await;
+    assert_eq!(disabled["call"]["result"]["isError"], true, "{disabled}");
+    let mut policy = agent_instance::updates::Policy {
+        agent_initiated: true,
+        ..Default::default()
+    };
+    f.state
+        .set_record("updates", "policy", json!(policy))
+        .unwrap();
+    let enabled = group.prompt(&sid, command.clone()).await;
+    assert_eq!(enabled["call"]["result"]["isError"], false, "{enabled}");
+    assert_eq!(
+        enabled["call"]["result"]["structuredContent"]["pending"], true,
+        "{enabled}"
+    );
+    policy.agent_initiated = false;
+    f.state
+        .set_record("updates", "policy", json!(policy))
+        .unwrap();
+    let revoked = group.prompt(&sid, command).await;
+    assert_eq!(revoked["call"]["result"]["isError"], true, "{revoked}");
+    group.close().await;
+}

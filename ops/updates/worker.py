@@ -241,7 +241,7 @@ class Worker:
     def replace(self,source,dest):
         dest=Path(dest);temp=dest.with_name(dest.name+'.update-'+uuid.uuid4().hex)
         shutil.copyfile(source,temp);temp.chmod(0o755)
-        with temp.open('rb') as f:os.fsync(f.fileno())
+        with temp.open('r+b') as f:os.fsync(f.fileno())
         os.replace(temp,dest)
     def rollback(self,plan):
         folder=self.root/'plans'/plan['id'];self.save(state='rolling_back');self.control('stop')
