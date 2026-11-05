@@ -967,6 +967,16 @@ async fn awareness_rejects_malformed_input_and_cancelled_string_prompt() {
     assert_eq!(client.response(200).await.0["error"]["code"], -32602);
     client.tx.send(json!({"jsonrpc":"2.0","id":"active-prompt","method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}})).await.unwrap();
     let permission = client.recv().await;
+    // A second prompt is not a stop. Its busy rejection must not close the
+    // original prompt's awareness window.
+    client
+        .send(
+            205,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"Second ordinary prompt"}]}),
+        )
+        .await;
+    assert_eq!(client.response(205).await.0["error"]["code"], -32000);
     client
         .send(
             201,

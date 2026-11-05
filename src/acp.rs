@@ -568,7 +568,6 @@ async fn relay_connection(
                             && let Some(sid)=value["params"]["sessionId"].as_str(){
                             crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
                             pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
-                            for request in pending.values_mut().filter(|request| request.method == "session/prompt" && request.session_id.as_deref() == Some(sid)) { request.cancelled = true; }
                         }
                         if is_turn_input(&method) && value["params"]["prompt"].is_array() {
                             let (current, prompt_revision) = {

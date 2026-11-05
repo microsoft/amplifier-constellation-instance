@@ -164,6 +164,8 @@ for line in sys.stdin:
         elif method == "session/prompt":
             if params["sessionId"] not in active:
                 fail(req, -32002, "Session is not active on this connection")
+            elif params["sessionId"] in running:
+                fail(req, -32000, "Session is busy")
             else:
                 with LOCK:
                     running[params["sessionId"]] = req["id"]
