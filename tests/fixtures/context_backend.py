@@ -35,7 +35,8 @@ for line in sys.stdin:
         caps = {"loadSession": True, "sessionCapabilities": {"list": {}, "resume": {}, "close": {}}}
         if os.getenv("FIXTURE_NO_HTTP") != "1":
             caps["mcpCapabilities"] = {"http": True}
-        answer(req, {"protocolVersion": 1, "agentCapabilities": caps, "agentInfo": {"name": "context-fixture", "version": "1"}})
+        answer(req, {"protocolVersion": 1, "agentCapabilities": caps, "agentInfo": {"name": "context-fixture", "version": "1"},
+                     "_meta": {"steering": {"supported": True, "version": 1, "idleBehavior": ["promptRequired"]}}})
     elif method in ("session/new", "session/load", "session/resume"):
         sid = params.get("sessionId", uuid.uuid4().hex)
         sessions[sid] = params
@@ -46,7 +47,7 @@ for line in sys.stdin:
     elif method == "session/close":
         sessions.pop(params["sessionId"], None)
         answer(req, {})
-    elif method == "session/prompt":
+    elif method in ("session/prompt", "_session/steering"):
         sid = params["sessionId"]
         settings = sessions[sid]
         detail = {"mcp_names": [s["name"] for s in settings["mcpServers"]], "metadata": settings.get("_meta", {}),
@@ -58,6 +59,6 @@ for line in sys.stdin:
             detail["tools"] = mcp(server, "tools/list", {})
             detail["call"] = mcp(server, "tools/call", json.loads(content[13:]))
         emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": json.dumps(detail)}}}})
-        answer(req, {"stopReason": "end_turn"})
+        answer(req, {"outcome": "promptRequired"} if method == "_session/steering" else {"stopReason": "end_turn"})
     else:
         emit({"jsonrpc": "2.0", "id": req.get("id"), "error": {"code": -32601, "message": "Unknown fixture method"}})

@@ -474,6 +474,61 @@ impl Client {
         );
     }
 }
+
+#[tokio::test]
+async fn steering_revalidates_context_and_cannot_borrow_another_connections_audience() {
+    let f = Fixture::new().await;
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let params = json!({"sessionId":sid,"prompt":[{"type":"text","text":"An ordinary follow-up"}],"_meta":{"steering":{"inputId":"context-update-1","idleBehavior":"promptRequired"}}});
+    let (response, updates) = client
+        .request(20, "_session/steering", params.clone())
+        .await;
+    assert_eq!(
+        response["result"]["outcome"], "promptRequired",
+        "{response}"
+    );
+    let detail: Value = serde_json::from_str(
+        updates.last().unwrap()["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let orientation = detail["orientation"].as_str().unwrap();
+    assert!(orientation.contains("Name: One Helper"));
+    assert!(orientation.contains("Parent conversation says keep the chosen blue design"));
+    assert!(orientation.contains("team-room"));
+    assert!(!orientation.contains("other-room"));
+    let mut other = f.client(false);
+    other.init().await;
+    let denied = other
+        .request(20, "_session/steering", params.clone())
+        .await
+        .0;
+    assert_eq!(denied["error"]["code"], -32602);
+    let mut wrong_load = f.params(Some("other-grant-canary"));
+    wrong_load["sessionId"] = json!(sid);
+    assert!(other.request(21, "session/load", wrong_load).await.0["error"].is_object());
+    assert!(
+        other
+            .request(22, "_session/steering", params.clone())
+            .await
+            .0["error"]
+            .is_object()
+    );
+    f.source.revoked.store(true, Ordering::SeqCst);
+    let (denied, updates) = client.request(21, "_session/steering", params).await;
+    assert_eq!(denied["error"]["code"], -32002);
+    assert!(
+        updates.is_empty(),
+        "Revoked context must never reach the backend"
+    );
+    other.close().await;
+    client.close().await;
+}
 #[tokio::test]
 async fn owner_native_clients_get_merged_mcp_and_cross_surface_context_without_custom_client_tools()
 {

@@ -350,7 +350,7 @@ pub fn forwarded(state: &AppState, id: &str) -> Result<()> {
         row["admitted_at"] = json!(now_ms());
         save(state, &row)?;
     }
-    state.event("attention.admitted",json!({"id":id,"meaning":"ACP prompt forwarded; not a model request count or publication receipt"}))?;
+    state.event("attention.admitted",json!({"id":id,"meaning":"ACP input forwarded; not a model request count or publication receipt"}))?;
     Ok(())
 }
 pub fn cancel(state: &AppState, connection: &str, sid: Option<&str>) {

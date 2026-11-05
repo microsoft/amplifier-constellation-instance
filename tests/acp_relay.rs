@@ -842,3 +842,260 @@ async fn optional_attention_is_intercepted_but_plain_acp_and_streaming_still_wor
     );
     c.disconnect().await;
 }
+
+fn steering(sid: &str, input_id: &str) -> Value {
+    json!({"sessionId":sid,"prompt":[{"type":"text","text":"New participant input private-steering-canary","_meta":{"com.microsoft.amplifier.context-snapshot":{"version":1,"key":"source:room:revision-2","retainedText":"Earlier source"},"source":{"conversation":"room","revision":2,"trigger":"message-2"}}}],"_meta":{"steering":{"inputId":input_id,"idleBehavior":"promptRequired"},"client-preserved":true}})
+}
+
+#[tokio::test]
+async fn steering_preserves_approval_context_receipts_and_one_work_lifecycle() {
+    let i = Installation::new();
+    let mut c = i.connect();
+    let init = c.initialize().await;
+    assert_eq!(
+        init["result"]["_meta"]["steering"],
+        json!({"supported":true,"version":1,"idleBehavior":["promptRequired"]})
+    );
+    let sid = c.new_session(&i.work).await;
+    c.send(
+        200,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}),
+    )
+    .await;
+    let callback = c.recv().await;
+    assert_eq!(callback["method"], "session/request_permission");
+    let params = steering(&sid, "durable-input-1");
+    c.send(201, "_session/steering", params.clone()).await;
+    let (r, updates) = c.response(201).await;
+    assert_eq!(r["result"]["outcome"], "injected", "{r}");
+    let forwarded = &r["result"]["fixtureParams"];
+    assert_eq!(forwarded["_meta"], params["_meta"]);
+    assert_eq!(forwarded["prompt"][1], params["prompt"][0]);
+    assert!(
+        forwarded["prompt"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Name: Fixture individual")
+    );
+    assert_eq!(
+        forwarded["prompt"][0]["_meta"]["com.microsoft.amplifier.context-snapshot"]["version"],
+        1
+    );
+    let receipt =
+        json!({"inputId":"durable-input-1","state":"incorporated","turnId":"fixture-turn-200"});
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["params"]["sessionId"], sid);
+    assert_eq!(updates[0]["params"]["update"]["content"]["text"], "");
+    assert_eq!(
+        updates[0]["params"]["update"]["_meta"]["io.github.bkrabach.agent-runtime"]["inputReceipt"],
+        receipt
+    );
+    assert_eq!(
+        agent_instance::updates::status(&i.state).unwrap()["active_prompts"],
+        1
+    );
+    c.tx.send(json!({"jsonrpc":"2.0","id":callback["id"],"result":{"outcome":{"outcome":"selected","optionId":"permit"}}})).await.unwrap();
+    let (done, updates) = c.response(200).await;
+    assert_eq!(done["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        done["result"]["_meta"]["io.github.bkrabach.agent-runtime"]["inputReceipts"],
+        json!([receipt])
+    );
+    assert_eq!(
+        detail(&updates)["permission"]["outcome"]["optionId"],
+        "permit"
+    );
+    assert_eq!(
+        agent_instance::updates::status(&i.state).unwrap()["active_prompts"],
+        0
+    );
+    {
+        let db = i.state.db.lock().unwrap();
+        let started: i64 = db
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind='acp.prompt.started'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(started, 1);
+        let events: String = db
+            .query_row("SELECT group_concat(data) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert!(!events.contains("private-steering-canary"));
+    }
+    c.disconnect().await;
+}
+
+#[tokio::test]
+async fn idle_steering_does_not_start_fallback_work_or_accept_unloaded_sessions() {
+    let i = Installation::new();
+    let mut c = i.connect();
+    c.initialize().await;
+    let sid = c.new_session(&i.work).await;
+    c.send(200, "_session/steering", steering(&sid, "idle-input"))
+        .await;
+    assert_eq!(
+        c.response(200).await.0["result"]["outcome"],
+        "promptRequired"
+    );
+    assert_eq!(
+        agent_instance::updates::status(&i.state).unwrap()["active_prompts"],
+        0
+    );
+    for (id, params) in [
+        (201, steering("unloaded-session", "wrong-session")),
+        (202, {
+            let mut p = steering(&sid, "unsafe-idle");
+            p["_meta"]["steering"]["idleBehavior"] = json!("startNewTurn");
+            p
+        }),
+    ] {
+        c.send(id, "_session/steering", params).await;
+        assert_eq!(c.response(id).await.0["error"]["code"], -32602);
+    }
+    let started: i64 = i
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='acp.prompt.started'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(started, 0);
+    c.disconnect().await;
+}
+
+#[tokio::test]
+async fn steering_is_not_manufactured_for_backends_without_the_capability() {
+    let i = Installation::new();
+    i.state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .backend
+        .as_mut()
+        .unwrap()
+        .env
+        .insert("FIXTURE_NO_STEERING".into(), "1".into());
+    let mut c = i.connect();
+    assert_eq!(
+        c.initialize().await["result"]["_meta"]["steering"]["supported"],
+        false
+    );
+    let sid = c.new_session(&i.work).await;
+    c.send(200, "_session/steering", steering(&sid, "unsupported"))
+        .await;
+    assert_eq!(c.response(200).await.0["error"]["code"], -32601);
+    c.disconnect().await;
+}
+
+#[tokio::test]
+async fn steering_requires_the_same_session_tool_authority_as_prompts() {
+    let i = Installation::new();
+    let mut c = i.connect();
+    c.initialize().await;
+    let sid = c.new_session(&i.work).await;
+    i.state
+        .set_record("session_tool_access", &sid, json!({"tools_required":true}))
+        .unwrap();
+    c.send(200, "_session/steering", steering(&sid, "tools-denied"))
+        .await;
+    assert_eq!(c.response(200).await.0["error"]["code"], -32002);
+    c.disconnect().await;
+}
+
+#[tokio::test]
+async fn busy_steering_consumes_attention_only_for_the_bound_session_and_current_ticket() {
+    use agent_instance::{attention, state::now_ms};
+    let i = Installation::new();
+    i.state.config.write().unwrap().config.attention = Some(attention::Config {
+        endpoint: "http://127.0.0.1:9/".into(),
+        model: "fixture".into(),
+        protocol: "system_one".into(),
+        auth: "bearer".into(),
+        credential_secret: "provider-test".into(),
+        decisions_per_hour: 20,
+        turns_per_hour: 5,
+        uncertain_turns_per_hour: 5,
+    });
+    let mut c = i.connect();
+    c.initialize().await;
+    let sid = c.new_session(&i.work).await;
+    let other = c.new_session(&i.work).await;
+    c.send(
+        200,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}),
+    )
+    .await;
+    let callback = c.recv().await;
+    assert_eq!(callback["method"], "session/request_permission");
+    for (offset, case) in ["wrong-session", "expired", "revoked"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = 210 + (offset as u32) * 10;
+        let event = json!({"sessionId":sid,"occurredAt":now_ms(),"context":{"conversation_id":"room","agent":{"id":"a","name":"Agent"},"participants":[{"id":"a","name":"Agent"},{"id":"b","name":"Human"}],"messages":[{"id":case,"sender":"b","text":"An updated request"}],"trigger_id":case}});
+        c.send(id, attention::METHOD, event).await;
+        let offer = c.response(id).await.0["result"].clone();
+        assert_eq!(offer["action"], "engage", "{offer}");
+        let mut params = steering(
+            if case == "wrong-session" {
+                &other
+            } else {
+                &sid
+            },
+            case,
+        );
+        params["_meta"][attention::META] = json!({"id":offer["id"],"ticket":offer["ticket"]});
+        if case == "expired" {
+            let key = offer["id"].as_str().unwrap();
+            let mut row = i
+                .state
+                .get_record("attention_events", key)
+                .unwrap()
+                .unwrap();
+            row["expires_at"] = json!(0);
+            i.state.set_record("attention_events", key, row).unwrap();
+        } else if case == "revoked" {
+            i.state.config.write().unwrap().config.purpose = "New attention policy identity".into();
+        }
+        c.send(id + 1, "_session/steering", params.clone()).await;
+        assert_eq!(
+            c.response(id + 1).await.0["error"]["code"],
+            -32002,
+            "{case}"
+        );
+        if case == "wrong-session" {
+            params["sessionId"] = json!(sid);
+            c.send(id + 2, "_session/steering", params.clone()).await;
+            let (r, updates) = c.response(id + 2).await;
+            assert_eq!(r["result"]["outcome"], "injected");
+            assert!(
+                r["result"]["fixtureParams"]["_meta"]
+                    .get(attention::META)
+                    .is_none()
+            );
+            assert_eq!(updates[0]["params"]["sessionId"], sid);
+            c.send(id + 3, "_session/steering", params).await;
+            assert_eq!(c.response(id + 3).await.0["error"]["code"], -32002);
+        }
+    }
+    assert_eq!(
+        attention::report(&i.state).unwrap()["counts"]["status:admitted"],
+        1
+    );
+    assert_eq!(
+        agent_instance::updates::status(&i.state).unwrap()["active_prompts"],
+        1
+    );
+    c.tx.send(json!({"jsonrpc":"2.0","id":callback["id"],"result":{"outcome":{"outcome":"selected","optionId":"permit"}}})).await.unwrap();
+    assert_eq!(c.response(200).await.0["result"]["stopReason"], "end_turn");
+    c.disconnect().await;
+}
