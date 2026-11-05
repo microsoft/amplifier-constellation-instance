@@ -29,13 +29,22 @@ Optional input-receipt reads and recovery acknowledgments require a loaded
 session and current conversation/tool authorization. They cannot bypass a grant
 revoked after session load and never start an additional work lifecycle.
 
+The native model editor uses the installed engine's support catalog for model
+suggestions and ChatGPT account choices. Provider defaults stage a compatible
+current model only when explicitly selected; loading the page never migrates a
+saved provider, model or authentication route. Engines that return validation
+details during inspection allow retired settings to remain visible and repairable
+while execution stays disabled until a valid configuration is explicitly saved.
+Empty or malformed account/support intersections cannot choose an unsupported
+model. Existing sessions and their original provider bindings stay intact.
+
 The native runtime pin in this candidate remains Constellation 0.9.0 pending its
 separate coordinated release. That engine does not implement the new native
 steering path. A steering-capable backend and a client that preserves ordered
 input are required to exercise this feature. Each installation continues to own
 its runtime files, credentials, history and updates independently.
 
-Validation includes 133 Rust tests, with one existing opt-in native-runtime
+Validation includes 134 Rust tests, with one existing opt-in native-runtime
 history test excluded from the default suite. Real-subprocess fixtures exercise
 pending approval continuity, source/audience checks, receipt forwarding, prompt
 completion races, real two-transport and concurrent reconnects, ticket
@@ -44,6 +53,9 @@ Clippy with warnings denied and formatting checks pass. Five new relay
 regressions fail against the previous boundary; the completion-race regression
 also fails before the negative-acknowledgment repair. These are protocol-fixture
 results, not live-provider or fleet-deployment claims.
+Native-account API and real-browser fixtures additionally cover retired-setting
+repair, explicit provider defaults, supported-account filtering and unchanged
+saved settings until an owner saves.
 
 See [ACP boundary](acp-boundary.md), [attention](attention.md), and the family
 [input continuity contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/input-continuity.v1-candidate.md).

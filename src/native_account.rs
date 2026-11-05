@@ -326,11 +326,19 @@ pub async fn models(
 ) -> ApiResult<Json<Value>> {
     auth::check(&state, &headers, "admin", true)?;
     let value = native_config::invoke(&state, "chatgpt-models", None).await?;
+    let schema = native_config::invoke(&state, "config-schema", None).await?;
+    let catalog = schema["x-agent-runtime"].get("model_catalog");
+    let supported = catalog.and_then(|value| value.get("openai"));
+    if catalog.is_some() && supported.is_none_or(|value| !value.is_array()) {
+        return Err(ApiError::bad(
+            "The engine returned an unsupported model support catalog",
+        ));
+    }
     let models = value["models"]
         .as_array()
         .ok_or_else(|| ApiError::bad("The engine returned an unsupported model catalog"))?;
     Ok(Json(
-        json!({"models":models.iter().take(200).filter_map(|m|{let slug=m["slug"].as_str()?;let label=m["display_name"].as_str().unwrap_or(slug);(slug.len()<=256&&label.len()<=256).then(||json!({"slug":slug,"display_name":label}))}).collect::<Vec<_>>()}),
+        json!({"runtime_catalog_available":supported.is_some(),"models":models.iter().take(200).filter_map(|m|{let slug=m["slug"].as_str()?;let label=m["display_name"].as_str().unwrap_or(slug);let allowed=supported.is_none_or(|rows|rows.as_array().unwrap().iter().any(|row|row["model"]==slug));(allowed&&slug.len()<=256&&label.len()<=256).then(||json!({"slug":slug,"display_name":label}))}).collect::<Vec<_>>()}),
     ))
 }
 pub async fn disconnect(

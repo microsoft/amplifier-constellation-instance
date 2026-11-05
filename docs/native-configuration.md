@@ -4,6 +4,19 @@ The host's Model & capabilities card appears for an explicitly configured `agent
 
 The editor discovers the installed engine's schema and calls its versioned local configuration commands. Provider/model/endpoint settings, image/audio input, provider-hosted tools, and named decision services have dedicated controls. Complete configuration opens an editor for every field supported by that engine version, including context compaction, execution limits, permissions and account settings. Provider defaults come from the installed engine, not a duplicated host catalog. Unsupported combinations fail validation without a silent fallback.
 
+When the engine publishes a model catalog, the model field offers its current
+supported classes. **Use provider defaults** stages the engine's current default
+model and connection settings; it does not save, change authentication routes or
+rewrite existing sessions. Gateways and custom deployments without a published
+default keep their owner-selected model name. Loading settings never migrates a
+model automatically.
+
+An engine that reports configuration validation separately from inspection can
+keep retired settings visible and editable. The editor shows the validation
+problem while retaining the original file and revision. The owner can select a
+supported model, validate and explicitly save. Invalid configurations remain
+ineligible for execution; inspection is not execution approval.
+
 - `GET /api/v1/native-config`: config, content revision, engine capabilities, host backend fingerprint and named-secret mapping.
 - `GET /api/v1/native-config/schema`: the installed engine's JSON Schema and UI hints.
 - `POST /api/v1/native-config/validate`: validate without changing files.
@@ -22,10 +35,16 @@ A successful validation establishes configuration correctness, not provider acce
 
 The separate ChatGPT account card uses the native engine's authorization flow. It
 never reads or copies a Codex account cache. Completing sign-in leaves the current
-provider configuration unchanged. **Use this account** queries the account's
-model catalog and selects an available model; **Save engine settings** applies
+provider configuration unchanged. **Use this account** intersects the account's
+models with the installed runtime's support catalog, preserving the selected
+model when available or staging the supported runtime default. **Save engine settings** applies
 that explicit choice. Existing sessions and background approvals retain the
 configuration rules above.
+
+An empty intersection shows a repair message instead of selecting an unsupported
+model. A malformed runtime support catalog fails closed. Engines that do not
+publish a catalog retain their earlier account-list behavior; the engine's own
+configuration validation remains authoritative in either case.
 
 A browser on the agent machine can open the sign-in link directly. For a browser
 on another machine, the card first shows a loopback-only SSH forwarding command
@@ -43,7 +62,7 @@ All account routes require administration:
 | `native-account/login` | POST | `{expected_backend_sha256,callback_port:0}`. Start one asynchronous job; repeated requests return the pending job. Port 0 chooses an available port. |
 | `native-account/login` | GET | `starting`, `pending`, `connected`, `cancelling`, `cancelled`, `expired`, `interrupted` or `failed`. Pending includes the ephemeral authorization link, loopback callback, deadline and optional SSH command. |
 | `native-account/login` | DELETE | `{job_id}`. Cancel that exact attempt; stale IDs fail instead of cancelling a newer attempt. |
-| `native-account/models` | POST | Fetch the account's available model identifiers/display names; this may refresh the account authorization but does not make an inference request. |
+| `native-account/models` | POST | Fetch account model identifiers/display names intersected with the installed engine's support catalog when available; includes `runtime_catalog_available`. This may refresh account authorization but does not make an inference request. |
 | `native-account` | DELETE | `{confirm:true}`. Revoke saved account access through the native engine. Engine configuration/history and account binding remain. |
 
 The job owns a bounded subprocess independently of an HTTP request or browser.

@@ -8,7 +8,7 @@ def revision(): return hashlib.sha256(config.read_bytes()).hexdigest()
 def public():
     return {'connected':credentials.exists(),'sharing':credentials.exists(),'email':'fixture@example.invalid','access_token':'must-never-leave-engine'}
 if action=='chatgpt-status': print(json.dumps(public()))
-elif action=='chatgpt-models': print(json.dumps({'models':[{'slug':'fixture-account-model','display_name':'Fixture account model','private':'do not forward'}]}))
+elif action=='chatgpt-models': print(json.dumps({'models':[{'slug':'retired-account-model','display_name':'Retired model'},{'slug':'fixture-account-model','display_name':'Fixture account model','private':'do not forward'}]}))
 elif action=='chatgpt-sign-out':
     credentials.unlink(missing_ok=True); print(json.dumps({'connected':False,'revoked':True,'registration_preserved':True}))
 elif action=='chatgpt-sign-in':
@@ -29,8 +29,17 @@ elif action=='chatgpt-sign-in':
     server.handle_request()
     credentials.parent.mkdir(parents=True,exist_ok=True);credentials.write_text('fake-secret-fixture-only');credentials.chmod(0o600)
     print(json.dumps({**public(),'credentials_file':str(credentials)}))
-elif action=='config-schema': print(json.dumps({'type':'object','x-agent-runtime':{'contract_version':1,'provider_presets':[{'kind':'openai','endpoint':'https://api.openai.com/v1/responses','api_key_env':'OPENAI_API_KEY'}]}}))
-elif action=='config-inspect': print(json.dumps({'schema_version':1,'revision':revision(),'config':json.loads(config.read_text()),'capabilities':{},'restart_required':True}))
+elif action=='config-schema':
+    metadata={'contract_version':1,'provider_presets':[{'kind':'openai','model':'fixture-account-model','endpoint':'https://api.openai.com/v1/responses','api_key_env':'OPENAI_API_KEY'},{'kind':'anthropic','model':'fixture-anthropic-model','endpoint':'https://api.anthropic.com/v1/messages','api_key_env':'ANTHROPIC_API_KEY'}],'model_catalog':{'openai':[{'class':'standard','model':'fixture-account-model'}],'anthropic':[{'class':'standard','model':'fixture-anthropic-model'}]}}
+    mode=(home/'catalog-mode').read_text().strip() if (home/'catalog-mode').exists() else 'normal'
+    if mode=='legacy': metadata.pop('model_catalog')
+    elif mode=='empty': metadata['model_catalog']['openai']=[]
+    elif mode=='malformed': metadata['model_catalog']['openai']='invalid'
+    elif mode=='missing': metadata['model_catalog'].pop('openai')
+    print(json.dumps({'type':'object','x-agent-runtime':metadata}))
+elif action=='config-inspect':
+    value=json.loads(config.read_text());valid=value['provider']['model']!='previous-model'
+    print(json.dumps({'schema_version':1,'revision':revision(),'config':value,'validation':{'valid':valid,'error':None if valid else 'This model is outside the current supported classes'},'capabilities':{} if valid else None,'restart_required':True}))
 elif action in ('config-validate','configure'):
     candidate=json.loads(pathlib.Path(args[3]).read_text())
     if not candidate.get('provider',{}).get('model'):sys.stderr.write('Model is required');sys.exit(1)
