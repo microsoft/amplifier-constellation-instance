@@ -34,7 +34,7 @@ Account readiness indicates configured credential metadata. It does not claim th
 
 ## Default runtime and account recovery
 
-Agent Instance **0.16.0** pins Constellation **0.9.0**. Its platform archives and binary hashes are recorded in `scripts/native-runtime-lock.json` and embedded in the instance executable. Provisioning verifies both the downloaded archive and selected binary before use. The default runtime is downloaded directly without GitHub sign-in. Authenticated GitHub CLI remains a fallback for explicitly configured private releases. Use `--runtime-binary /path/to/agent-runtime` for a verified local build. Every installation owns its runtime files, provider state and history; updating one agent does not update another.
+Agent Instance **0.16.0** pins Constellation **0.10.0**. Its platform archives and binary hashes are recorded in `scripts/native-runtime-lock.json` and embedded in the instance executable. Provisioning verifies both the downloaded archive and selected binary before use. The default runtime is downloaded directly without GitHub sign-in. Authenticated GitHub CLI remains a fallback for explicitly configured private releases. Use `--runtime-binary /path/to/agent-runtime` for a verified local build. Every installation owns its runtime files, provider state and history; updating one agent does not update another.
 
 For an initialized instance that lacks the default backend:
 

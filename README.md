@@ -18,13 +18,13 @@ git clone https://github.com/microsoft/amplifier-constellation-instance.git "$AG
 bash "$AGENT_INSTALL_SOURCE/source/install.sh" --name "My agent"
 ```
 
-Agent Instance **0.16.0** installs **Constellation 0.9.0**, the independent Rust ACP runtime, by default. The installer adds missing build prerequisites, creates the instance, starts its user service, and opens connection help when possible. It prints LAN welcome/HTTPS URLs and certificate fingerprints for headless installation. Sign in with the installing user's machine account, name the agent, and configure its provider in Model & capabilities. Native setup does not install Codex or Node or copy an existing provider account. Use a provider key or connect this agent's own ChatGPT account. Free ports are selected once and saved; `--port` overrides HTTPS.
+Agent Instance **0.16.0** installs **Constellation 0.10.0**, the independent Rust ACP runtime, by default. The installer adds missing build prerequisites, creates the instance, starts its user service, and opens connection help when possible. It prints LAN welcome/HTTPS URLs and certificate fingerprints for headless installation. Sign in with the installing user's machine account, name the agent, and configure its provider in Model & capabilities. Native setup does not install Codex or Node or copy an existing provider account. Use a provider key or connect this agent's own ChatGPT account. Free ports are selected once and saved; `--port` overrides HTTPS.
 
 Custom ACP engines remain supported. The Linux installer's `--backend codex` explicitly selects the optional Codex package; `--backend none` leaves the engine unconfigured. A verified local Constellation binary can be supplied with `--runtime-binary`. [Native platforms](docs/native-platforms.md) describes the equivalent Mac and Windows options and the available release architectures.
 
 See [installation](docs/install.md) for the complete bootstrap command, version selection, service persistence, certificate trust, and removal. The running service does not depend on the source checkout or share its executable with another instance.
 
-The [0.16.0 candidate notes](docs/release-0.16.md) describe negotiated mid-turn input and its backend requirements. Publication and installation rollout are separate steps.
+The [0.16.0 release notes](docs/release-0.16.md) describe negotiated mid-turn input and its backend requirements. Publication and installation rollout are separate steps.
 
 ## What this version does
 

@@ -1,6 +1,6 @@
-# Agent Instance 0.16.0 candidate
+# Agent Instance 0.16.0
 
-This candidate keeps follow-up input inside the active agent session when the
+This release keeps follow-up input inside the active agent session when the
 connected backend advertises the pre-standard `_session/steering` extension.
 The Instance boundary applies the same identity/profile context, current
 conversation authorization, tool-access checks and optional attention admission
@@ -38,11 +38,14 @@ while execution stays disabled until a valid configuration is explicitly saved.
 Empty or malformed account/support intersections cannot choose an unsupported
 model. Existing sessions and their original provider bindings stay intact.
 
-The native runtime pin in this candidate remains Constellation 0.9.0 pending its
-separate coordinated release. That engine does not implement the new native
-steering path. A steering-capable backend and a client that preserves ordered
-input are required to exercise this feature. Each installation continues to own
-its runtime files, credentials, history and updates independently.
+The native runtime pin is [Constellation 0.10.0](https://github.com/microsoft/amplifier-constellation-runtime/releases/tag/v0.10.0),
+with verified archive and binary hashes for Linux x64/ARM64, macOS ARM64 and
+Windows x64. That engine implements a durable ordered input inbox, native
+OpenAI Responses WebSocket steering and legal next-call input for other native
+providers. A steering-capable client remains necessary. Slack 0.9.0 supports
+ordered input; current Conversations and Observatory Talk wait until active work
+finishes before accepting another browser message. Each installation continues
+to own its runtime files, credentials, history and updates independently.
 
 Validation includes 134 Rust tests, with one existing opt-in native-runtime
 history test excluded from the default suite. Real-subprocess fixtures exercise

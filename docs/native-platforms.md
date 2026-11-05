@@ -5,7 +5,7 @@ dashboard, setup, management API, and ACP attach command ship in the same binary
 Multiple instances can run under one account, each with its own folder, ports,
 identity, credentials, retained releases, and startup job. Adapters remain separate.
 
-Version 0.16.0 installs the independent **Constellation 0.9.0** Rust engine by
+Version 0.16.0 installs the independent **Constellation 0.10.0** Rust engine by
 default. Native model execution requires neither Codex nor Node. Connect a
 provider key or this agent's own ChatGPT account after installation; no existing
 provider account is copied by the native path. Choosing another ACP executable
@@ -188,7 +188,7 @@ macOS, and Windows. [Validation](validation.md) gives reproducible commands and
 links to results for the published source. Real account sign-in, startup jobs,
 and provider access also need an installation check on the target machine.
 
-The pinned Constellation 0.9.0 runtime supports Linux x64/ARM64, Mac ARM64,
+The pinned Constellation 0.10.0 runtime supports Linux x64/ARM64, Mac ARM64,
 and Windows x64 release assets. Other architectures need an explicitly supplied
 native build. Intel Mac and Windows ARM64 runtime assets are not supplied.
 Mac binaries are not signed or notarized for distribution. CI fixture success
