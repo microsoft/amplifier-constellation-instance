@@ -427,7 +427,8 @@ async fn relay_connection(
                                 || value["params"]["_meta"]["steering"]["idleBehavior"] != "promptRequired" {
                                 reject_request(&outgoing, &value, -32602, "Steering needs a loaded session, nonempty prompt, request ID and idleBehavior promptRequired").await?;
                                 continue;
-                            }                            if value["params"]["_meta"]["steering"]["intent"] == "awareness" {
+                            }
+                            if value["params"]["_meta"]["steering"]["intent"] == "awareness" {
                                 let prompt_id = &value["params"]["_meta"]["steering"]["activePromptId"];
                                 if !(prompt_id.is_string() || prompt_id.is_number())
                                     || value["params"]["_meta"].get(crate::attention::META).is_some() {
