@@ -95,9 +95,30 @@ Instance removes that metadata before forwarding to the engine. Only a
 successful host validation can consume the offer. Existing permissions and
 source delivery checks still apply after admission.
 
+For a backend that negotiates `_session/steering`, the same metadata and checks
+apply to input submitted during the active prompt. A forward consumes admission
+without creating another work allowance. If that exact steering request instead
+returns a definite `promptRequired`, Instance may restore the original ticket
+and report `_meta["com.microsoft.amplifier.attention"]` in the result as
+`{id, ticketState:"restored", expiresAt}`. The client can use that same ticket
+for its deferred normal prompt while the original expiry is valid. The source
+timestamp, policy, audience and claimed budget slot are unchanged; repeated
+negative acknowledgments do not renew them or grant extra capacity. Explicit
+cancellation, changed/superseded source, expiry and changed policy prevent
+restoration. Failed or ambiguous results and lost replies never restore a ticket.
+Only `ticketState:"restored"` authorizes this retry; missing metadata is not a
+restoration receipt. No model-incorporation claim follows from admission alone.
+
 Tickets are bound to the authenticated principal, ACP connection, loaded
-session, audience, original event, installed name/purpose and policy configuration. Another connection
-cannot reuse them. The journal deduplicates the original event across reconnects;
+session, audience, original event, installed name/purpose and policy configuration.
+Ordinary tickets cannot move to another connection. A proven-unapplied restored
+ticket is the sole exception: after the original transport closes, a client can
+reload that same saved session under the same authenticated principal and a
+fresh grant proving the same source provider and audience. Owner-private sources
+also retain their actor binding. Instance atomically rebinds and consumes the
+original ticket once, within its original expiry and budget slot. Unverified
+bindings, explicit cancellation, changed authority and uncertain delivery fail
+closed; unused ordinary offers still expire on disconnect. The journal deduplicates the original event across reconnects;
 it does not promise to replay an event lost during a crash. Stale events,
 superseded evidence, edited duplicate events, cancellation, configuration changes
 and spent tickets cannot admit a turn. A newer event in the audience invalidates

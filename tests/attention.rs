@@ -114,16 +114,16 @@ async fn uncertain_offer_needs_separate_single_use_bounded_admission() {
     let one = offer(s.clone(), "one").await;
     assert_eq!(one["action"], "engage");
     assert!(attention::report(&s).unwrap()["counts"]["status:admitted"].is_null());
-    assert!(attention::consume(&s, "other", "c", "session", &one).is_err());
-    assert!(attention::consume(&s, "p", "other", "session", &one).is_err());
-    assert!(attention::consume(&s, "p", "c", "other", &one).is_err());
-    let id = attention::consume(&s, "p", "c", "session", &one).unwrap();
+    assert!(attention::consume(&s, "other", "c", "session", &one, None).is_err());
+    assert!(attention::consume(&s, "p", "other", "session", &one, None).is_err());
+    assert!(attention::consume(&s, "p", "c", "other", &one, None).is_err());
+    let id = attention::consume(&s, "p", "c", "session", &one, None).unwrap();
     attention::forwarded(&s, &id).unwrap();
-    assert!(attention::consume(&s, "p", "c", "session", &one).is_err());
+    assert!(attention::consume(&s, "p", "c", "session", &one, None).is_err());
     assert_eq!(offer(s.clone(), "one").await["reason"], "duplicate");
     assert_eq!(count.load(Ordering::SeqCst), 1);
     let two = offer(s.clone(), "two").await;
-    assert!(attention::consume(&s, "p", "c", "session", &two).is_err());
+    assert!(attention::consume(&s, "p", "c", "session", &two, None).is_err());
     assert_eq!(
         attention::report(&s).unwrap()["counts"]["status:admitted"],
         1
@@ -168,12 +168,12 @@ async fn supersession_cancellation_and_config_change_revoke_offers() {
         "offered"
     );
     let b = offer(s.clone(), "b").await;
-    assert!(attention::consume(&s, "p", "c", "session", &a).is_err());
+    assert!(attention::consume(&s, "p", "c", "session", &a, None).is_err());
     attention::cancel(&s, "c", Some("session"));
-    assert!(attention::consume(&s, "p", "c", "session", &b).is_err());
+    assert!(attention::consume(&s, "p", "c", "session", &b, None).is_err());
     let changed_role = offer(s.clone(), "changed-role").await;
     s.config.write().unwrap().config.purpose = "A different responsibility".into();
-    assert!(attention::consume(&s, "p", "c", "session", &changed_role).is_err());
+    assert!(attention::consume(&s, "p", "c", "session", &changed_role, None).is_err());
     let c = offer(s.clone(), "c").await;
     s.config
         .write()
@@ -183,7 +183,7 @@ async fn supersession_cancellation_and_config_change_revoke_offers() {
         .as_mut()
         .unwrap()
         .model = "changed".into();
-    assert!(attention::consume(&s, "p", "c", "session", &c).is_err());
+    assert!(attention::consume(&s, "p", "c", "session", &c, None).is_err());
     server.abort();
 }
 #[tokio::test]

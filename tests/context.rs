@@ -474,6 +474,116 @@ impl Client {
         );
     }
 }
+
+#[tokio::test]
+async fn steering_revalidates_context_and_cannot_borrow_another_connections_audience() {
+    let f = Fixture::new().await;
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let params = json!({"sessionId":sid,"prompt":[{"type":"text","text":"An ordinary follow-up"}],"_meta":{"steering":{"inputId":"context-update-1","idleBehavior":"promptRequired"}}});
+    let (response, updates) = client
+        .request(20, "_session/steering", params.clone())
+        .await;
+    assert_eq!(
+        response["result"]["outcome"], "promptRequired",
+        "{response}"
+    );
+    let detail: Value = serde_json::from_str(
+        updates.last().unwrap()["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let orientation = detail["orientation"].as_str().unwrap();
+    assert!(orientation.contains("Name: One Helper"));
+    assert!(orientation.contains("Parent conversation says keep the chosen blue design"));
+    assert!(orientation.contains("team-room"));
+    assert!(!orientation.contains("other-room"));
+    let mut other = f.client(false);
+    other.init().await;
+    let denied = other
+        .request(20, "_session/steering", params.clone())
+        .await
+        .0;
+    assert_eq!(denied["error"]["code"], -32602);
+    let mut wrong_load = f.params(Some("other-grant-canary"));
+    wrong_load["sessionId"] = json!(sid);
+    assert!(other.request(21, "session/load", wrong_load).await.0["error"].is_object());
+    assert!(
+        other
+            .request(22, "_session/steering", params.clone())
+            .await
+            .0["error"]
+            .is_object()
+    );
+    f.source.revoked.store(true, Ordering::SeqCst);
+    let (denied, updates) = client.request(21, "_session/steering", params).await;
+    assert_eq!(denied["error"]["code"], -32002);
+    assert!(
+        updates.is_empty(),
+        "Revoked context must never reach the backend"
+    );
+    other.close().await;
+    client.close().await;
+}
+#[tokio::test]
+async fn input_recovery_requires_loaded_current_authority_and_never_starts_work() {
+    let f = Fixture::new().await;
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let mut other = f.client(false);
+    other.init().await;
+    for method in ["_session/input_receipts", "_session/acknowledge_inputs"] {
+        let params = json!({"sessionId":sid,"inputIds":["fixture-input"]});
+        let (allowed, updates) = client.request(30, method, params.clone()).await;
+        assert_eq!(allowed["result"]["recoveryFixture"], method, "{allowed}");
+        assert!(updates.is_empty());
+        let denied = other.request(30, method, params.clone()).await.0;
+        assert_eq!(denied["error"]["code"], -32602, "{denied}");
+        f.source.revoked.store(true, Ordering::SeqCst);
+        let denied = client.request(31, method, params.clone()).await.0;
+        assert_eq!(denied["error"]["code"], -32002, "{denied}");
+        f.source.revoked.store(false, Ordering::SeqCst);
+        f.state
+            .set_record("session_tool_access", &sid, json!({"required":true}))
+            .unwrap();
+        let denied = client.request(32, method, params).await.0;
+        assert_eq!(denied["error"]["code"], -32002, "{denied}");
+        f.state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM records WHERE collection='session_tool_access' AND id=?1",
+                [&sid],
+            )
+            .unwrap();
+    }
+    let work: i64 = f
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='acp.prompt.started'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        work, 0,
+        "Receipt controls must not admit a new work lifecycle"
+    );
+    client.close().await;
+    other.close().await;
+}
+
 #[tokio::test]
 async fn owner_native_clients_get_merged_mcp_and_cross_surface_context_without_custom_client_tools()
 {
@@ -1052,4 +1162,356 @@ async fn global_update_switch_allows_non_owner_conversation_and_revokes_immediat
     let revoked = group.prompt(&sid, command).await;
     assert_eq!(revoked["call"]["result"]["isError"], true, "{revoked}");
     group.close().await;
+}
+
+fn enable_rebind_attention(f: &Fixture) {
+    f.state.config.write().unwrap().config.attention = Some(agent_instance::attention::Config {
+        endpoint: "http://127.0.0.1:9/".into(),
+        model: "fixture".into(),
+        protocol: "system_one".into(),
+        auth: "bearer".into(),
+        credential_secret: "context-source".into(),
+        decisions_per_hour: 40,
+        turns_per_hour: 1,
+        uncertain_turns_per_hour: 1,
+    });
+}
+fn rebind_event(sid: &str, id: &str) -> Value {
+    json!({"sessionId":sid,"occurredAt":agent_instance::state::now_ms(),"context":{"conversation_id":"team-room","agent":{"id":"a","name":"Agent"},"participants":[{"id":"a","name":"Agent"},{"id":"b","name":"Human"}],"messages":[{"id":id,"sender":"b","text":"Updated request"}],"trigger_id":id}})
+}
+async fn restored_offer(f: &Fixture, c: &mut Client, sid: &str, id: &str) -> (Value, Value) {
+    use agent_instance::attention;
+    let offer = c
+        .request(80, attention::METHOD, rebind_event(sid, id))
+        .await
+        .0["result"]
+        .clone();
+    assert_eq!(offer["action"], "engage");
+    let input = json!({"sessionId":sid,"prompt":[{"type":"text","text":"Update"}],"_meta":{"steering":{"inputId":id,"idleBehavior":"promptRequired"},attention::META:{"id":offer["id"],"ticket":offer["ticket"]}}});
+    let response = c.request(81, "_session/steering", input.clone()).await.0;
+    assert_eq!(response["result"]["outcome"], "promptRequired");
+    assert_eq!(
+        response["result"]["_meta"][attention::META]["ticketState"],
+        "restored"
+    );
+    assert!(
+        f.state
+            .get_record("context_bindings", sid)
+            .unwrap()
+            .is_some()
+    );
+    (offer, input)
+}
+
+#[tokio::test]
+async fn restored_offer_survives_real_transport_handoff_once_with_unchanged_budget() {
+    use agent_instance::attention;
+    let f = Fixture::new().await;
+    enable_rebind_attention(&f);
+    let mut first = f.client(false);
+    first.init().await;
+    let sid = first
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let (offer, input) = restored_offer(&f, &mut first, &sid, "cross-transport").await;
+    let key = offer["id"].as_str().unwrap();
+    let before = f
+        .state
+        .get_record("attention_events", key)
+        .unwrap()
+        .unwrap();
+    first.close().await;
+    let detached = f
+        .state
+        .get_record("attention_events", key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detached["status"], "offered");
+    assert_eq!(detached["disconnected_unapplied"], true);
+    // Knowing a session ID on an unbound connection cannot revoke its handoff.
+    let mut unbound = f.client(false);
+    unbound.init().await;
+    assert!(
+        unbound
+            .request(82, "session/cancel", json!({"sessionId":sid}))
+            .await
+            .0["error"]
+            .is_object()
+    );
+    unbound.close().await;
+    assert_eq!(
+        f.state
+            .get_record("attention_events", key)
+            .unwrap()
+            .unwrap()["status"],
+        "offered"
+    );
+    let mut second = f.client(false);
+    second.init().await;
+    // A different speaker in the same verified group does not change audience.
+    let mut load = f.params(Some("group-robin-grant-canary"));
+    load["sessionId"] = json!(sid);
+    assert!(second.request(82, "session/load", load).await.0["error"].is_null());
+    assert_eq!(
+        second.request(83, "session/prompt", input.clone()).await.0["result"]["stopReason"],
+        "end_turn"
+    );
+    let admitted = f
+        .state
+        .get_record("attention_events", key)
+        .unwrap()
+        .unwrap();
+    assert_ne!(admitted["connection"], before["connection"]);
+    for field in [
+        "claimed_at",
+        "expires_at",
+        "occurred_at",
+        "requested_at",
+        "ticket_hash",
+        "binding_sha256",
+        "evidence_sha256",
+    ] {
+        assert_eq!(admitted[field], before[field], "{field}");
+    }
+    assert_eq!(admitted["disconnected_unapplied"], false);
+    assert_eq!(
+        second.request(84, "session/prompt", input.clone()).await.0["error"]["code"],
+        -32002
+    );
+    let other = second
+        .request(85, attention::METHOD, rebind_event(&sid, "another-event"))
+        .await
+        .0["result"]
+        .clone();
+    let mut next = input;
+    next["_meta"][attention::META] = json!({"id":other["id"],"ticket":other["ticket"]});
+    assert_eq!(
+        second.request(86, "session/prompt", next).await.0["error"]["code"],
+        -32002,
+        "Rebind must not renew capacity"
+    );
+    second.close().await;
+}
+
+#[tokio::test]
+async fn restored_handoff_rejects_changed_identity_source_expiry_policy_and_cancellation() {
+    use agent_instance::attention;
+    for case in [
+        "principal",
+        "session",
+        "provider",
+        "audience",
+        "missing-grant",
+        "revoked-grant",
+        "expired",
+        "policy",
+        "source-edit",
+        "cancel-before",
+        "cancel-after",
+    ] {
+        let f = Fixture::new().await;
+        enable_rebind_attention(&f);
+        let mut first = f.client(false);
+        first.init().await;
+        let sid = first
+            .new_session(f.params(Some("group-grant-canary")))
+            .await;
+        let (offer, mut input) = restored_offer(&f, &mut first, &sid, case).await;
+        let key = offer["id"].as_str().unwrap();
+        let before = f
+            .state
+            .get_record("attention_events", key)
+            .unwrap()
+            .unwrap();
+        if case == "cancel-before" {
+            first
+                .request(82, "session/cancel", json!({"sessionId":sid}))
+                .await;
+        }
+        if case == "source-edit" {
+            let mut event = rebind_event(&sid, case);
+            event["context"]["messages"][0]["text"] = json!("Changed source");
+            assert_eq!(
+                first.request(83, attention::METHOD, event).await.0["result"]["reason"],
+                "duplicate"
+            );
+        }
+        first.close().await;
+        if case == "expired" {
+            let mut row = f
+                .state
+                .get_record("attention_events", key)
+                .unwrap()
+                .unwrap();
+            row["expires_at"] = json!(0);
+            f.state.set_record("attention_events", key, row).unwrap();
+        }
+        if case == "policy" {
+            f.state.config.write().unwrap().config.purpose = "Changed purpose".into();
+        }
+        if case == "revoked-grant" {
+            f.source.revoked.store(true, Ordering::SeqCst);
+        }
+        let mut second = if case == "principal" {
+            let (tx, rx_in) = mpsc::channel(32);
+            let (tx_out, rx) = mpsc::channel(32);
+            let state = f.state.clone();
+            let headers = f.headers(false);
+            let task = tokio::spawn(async move {
+                acp::relay_authenticated(
+                    state,
+                    "different-principal".into(),
+                    headers,
+                    rx_in,
+                    tx_out,
+                )
+                .await
+            });
+            Client { tx, rx, task }
+        } else {
+            f.client(false)
+        };
+        second.init().await;
+        let mut load = f.params(if case == "missing-grant" {
+            None
+        } else if case == "audience" {
+            Some("other-grant-canary")
+        } else {
+            Some("group-grant-canary")
+        });
+        if case == "provider" {
+            load["_meta"][context::META]["provider_id"] = json!("slack:fixture");
+        }
+        load["sessionId"] = json!(sid);
+        let loaded = if case == "session" {
+            input["sessionId"] = json!(
+                second
+                    .new_session(f.params(Some("group-grant-canary")))
+                    .await
+            );
+            true
+        } else {
+            second.request(84, "session/load", load).await.0["error"].is_null()
+        };
+        if loaded {
+            if case == "cancel-after" {
+                second
+                    .request(85, "session/cancel", json!({"sessionId":sid}))
+                    .await;
+            }
+            assert!(
+                second.request(86, "session/prompt", input).await.0["error"].is_object(),
+                "{case}"
+            );
+        } else {
+            assert!(
+                ["provider", "audience", "missing-grant", "revoked-grant"].contains(&case),
+                "{case}"
+            );
+        }
+        let after = f
+            .state
+            .get_record("attention_events", key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after["connection"], before["connection"], "{case}");
+        assert_eq!(after["claimed_at"], before["claimed_at"], "{case}");
+        second.close().await;
+    }
+}
+
+#[tokio::test]
+async fn ordinary_unused_offer_is_still_cancelled_on_transport_disconnect() {
+    use agent_instance::attention;
+    let f = Fixture::new().await;
+    enable_rebind_attention(&f);
+    let mut first = f.client(false);
+    first.init().await;
+    let sid = first
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let offer = first
+        .request(80, attention::METHOD, rebind_event(&sid, "ordinary"))
+        .await
+        .0["result"]
+        .clone();
+    assert_eq!(offer["action"], "engage");
+    first.close().await;
+    let row = f
+        .state
+        .get_record("attention_events", offer["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["status"], "cancelled");
+    assert_ne!(row["disconnected_unapplied"], true);
+}
+
+#[tokio::test]
+async fn restored_ticket_can_be_rebound_to_only_one_concurrent_transport() {
+    let f = Fixture::new().await;
+    enable_rebind_attention(&f);
+    let mut first = f.client(false);
+    first.init().await;
+    let sid = first
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let (_, input) = restored_offer(&f, &mut first, &sid, "atomic-rebind").await;
+    first.close().await;
+    let mut second = f.client(false);
+    second.init().await;
+    let mut third = f.client(false);
+    third.init().await;
+    let mut load = f.params(Some("group-grant-canary"));
+    load["sessionId"] = json!(sid);
+    assert!(second.request(82, "session/load", load.clone()).await.0["error"].is_null());
+    assert!(third.request(82, "session/load", load).await.0["error"].is_null());
+    let (a, b) = tokio::join!(
+        second.request(83, "session/prompt", input.clone()),
+        third.request(83, "session/prompt", input)
+    );
+    assert_eq!(
+        [&a.0, &b.0]
+            .iter()
+            .filter(|v| v["result"]["stopReason"] == "end_turn")
+            .count(),
+        1
+    );
+    assert_eq!(
+        [&a.0, &b.0]
+            .iter()
+            .filter(|v| v["error"]["code"] == -32002)
+            .count(),
+        1
+    );
+    second.close().await;
+    third.close().await;
+}
+
+#[tokio::test]
+async fn restored_ticket_without_verified_source_cannot_survive_transport_close() {
+    use agent_instance::attention;
+    let f = Fixture::new().await;
+    enable_rebind_attention(&f);
+    let mut first = f.client(false);
+    first.init().await;
+    let sid = first.new_session(f.params(None)).await;
+    let offer = first
+        .request(80, attention::METHOD, rebind_event(&sid, "unbound"))
+        .await
+        .0["result"]
+        .clone();
+    let input = json!({"sessionId":sid,"prompt":[{"type":"text","text":"Update"}],"_meta":{"steering":{"inputId":"unbound","idleBehavior":"promptRequired"},attention::META:{"id":offer["id"],"ticket":offer["ticket"]}}});
+    let response = first.request(81, "_session/steering", input).await.0;
+    assert_eq!(
+        response["result"]["_meta"][attention::META]["ticketState"],
+        "restored"
+    );
+    first.close().await;
+    let row = f
+        .state
+        .get_record("attention_events", offer["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["status"], "cancelled");
+    assert_ne!(row["disconnected_unapplied"], true);
 }

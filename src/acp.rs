@@ -33,6 +33,22 @@ use tokio_tungstenite::{
 
 const META_NAMESPACE: &str = "io.github.bkrabach.agent-instance";
 const DEFAULT_FRAME_LIMIT: usize = 4 * 1024 * 1024;
+const STEERING_METHOD: &str = "_session/steering";
+
+fn is_turn_input(method: &str) -> bool {
+    matches!(method, "session/prompt" | STEERING_METHOD)
+}
+
+fn is_session_method(method: &str) -> bool {
+    method.starts_with("session/") || method == STEERING_METHOD || is_input_recovery(method)
+}
+
+fn is_input_recovery(method: &str) -> bool {
+    matches!(
+        method,
+        "_session/input_receipts" | "_session/acknowledge_inputs"
+    )
+}
 
 struct ConnectionGuard {
     state: Arc<AppState>,
@@ -44,7 +60,7 @@ impl Drop for ConnectionGuard {
             connections.remove(&self.id);
         }
         context::revoke_connection(&self.state, &self.id);
-        crate::attention::cancel(&self.state, &self.id, None);
+        crate::attention::disconnect(&self.state, &self.id);
         let _ = self
             .state
             .event("acp.disconnected", json!({"connection_id": self.id}));
@@ -337,10 +353,12 @@ async fn relay_connection(
     let mut initialized = false;
     let mut http_mcp_supported = false;
     let mut context_snapshots_supported = false;
+    let mut steering_supported = false;
     let mut native_history = Value::Null;
     let mut pending_context = BTreeMap::<String, context::Prepared>::new();
     let mut session_context = BTreeMap::<String, context::Prepared>::new();
     let mut pending = BTreeMap::<String, Pending>::new();
+    let mut pending_steering_attention = BTreeMap::<String, (String, String)>::new();
     let mut attention_jobs = tokio::task::JoinSet::new();
     let mut attention_ids = BTreeSet::<String>::new();
     let mut loaded_sessions = BTreeSet::<String>::new();
@@ -392,6 +410,24 @@ async fn relay_connection(
                             reject_request(&outgoing, &value, -32600, "Initialize this ACP connection before making other requests").await?;
                             continue;
                         }
+                        if method == STEERING_METHOD {
+                            if !steering_supported {
+                                reject_request(&outgoing, &value, -32601, "This backend does not advertise steering; queue input for its next prompt").await?;
+                                continue;
+                            }
+                            if value.get("id").is_none()
+                                || !value["params"]["sessionId"].as_str().is_some_and(|sid| loaded_sessions.contains(sid))
+                                || value["params"]["prompt"].as_array().is_none_or(|blocks| blocks.is_empty())
+                                || value["params"]["_meta"]["steering"]["idleBehavior"] != "promptRequired" {
+                                reject_request(&outgoing, &value, -32602, "Steering needs a loaded session, nonempty prompt, request ID and idleBehavior promptRequired").await?;
+                                continue;
+                            }
+                        }
+                        if is_input_recovery(&method) && (value.get("id").is_none()
+                            || !value["params"]["sessionId"].as_str().is_some_and(|sid| loaded_sessions.contains(sid))) {
+                            reject_request(&outgoing, &value, -32602, "Input recovery needs a request ID and a session loaded on this connection").await?;
+                            continue;
+                        }
                         if method == crate::attention::METHOD {
                             let Some(id)=value.get("id").cloned() else {continue;};
                             let prepared=(|| -> Result<_> {
@@ -422,7 +458,8 @@ async fn relay_connection(
                         }
                         if matches!(method.as_str(),"session/cancel"|"session/close")
                             && let Some(sid)=value["params"]["sessionId"].as_str() {
-                            crate::attention::cancel(&state,&connection_id,Some(sid));
+                            crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
+                            pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                         }
                         if method == crate::identity::METHOD {
                             if let Some(id) = value.get("id") {
@@ -431,7 +468,7 @@ async fn relay_connection(
                             }
                             continue;
                         }
-                        if method.starts_with("session/") && let Some(sid) = value["params"]["sessionId"].as_str()
+                        if is_session_method(&method) && let Some(sid) = value["params"]["sessionId"].as_str()
                             && state.get_record("session_tool_access", sid)?.is_some()
                             && !tool_connections::allowed(&state, auth_headers.as_ref()) {
                             reject_request(&outgoing, &value, -32002, "This session requires explicit tools:use access").await?;
@@ -474,12 +511,18 @@ async fn relay_connection(
                                     continue;
                                 }
                             }
-                        } else if method.starts_with("session/")
+                        } else if is_session_method(&method)
                             && let Some(sid) = value["params"]["sessionId"].as_str()
                                 && state.get_record("context_bindings", sid)?.is_some() && !session_context.contains_key(sid) {
                                     reject_request(&outgoing, &value, -32002, "Load this session with its verified conversation grant before using it").await?;
                                     continue;
                                 }
+                        if is_input_recovery(&method)
+                            && let Some(prepared)=value["params"]["sessionId"].as_str().and_then(|sid|session_context.get(sid))
+                            && context::revalidate(&state,&prepared.hash).await.is_err() {
+                            reject_request(&outgoing,&value,-32002,"Conversation access changed; reload with a current verified grant").await?;
+                            continue;
+                        }
                         if matches!(method.as_str(), "session/new" | "session/load" | "session/resume") {
                             let requires_tools = value["params"]["sessionId"].as_str().map(|sid| state.get_record("session_tool_access", sid)).transpose()?.flatten().is_some();
                             match tool_connections::prepare(&state, auth_headers.as_ref(), &mut value["params"], http_mcp_supported, requires_tools) {
@@ -502,9 +545,10 @@ async fn relay_connection(
                         }
                         if method=="session/prompt" && value["params"]["_meta"].get(crate::attention::META).is_none()
                             && let Some(sid)=value["params"]["sessionId"].as_str(){
-                            crate::attention::cancel(&state,&connection_id,Some(sid));
+                            crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
+                            pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                         }
-                        if method == "session/prompt" && value["params"]["prompt"].is_array() {
+                        if is_turn_input(&method) && value["params"]["prompt"].is_array() {
                             let (current, prompt_revision) = {
                                 let document = state.config.read().unwrap();
                                 (document.config.clone(), document.revision)
@@ -554,13 +598,18 @@ async fn relay_connection(
                         observe(&state, &connection_id, "client_to_agent", &method, &value)?;
                     }
                     if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
-                    if value["method"]=="session/prompt" && let Some(metadata)=value["params"]["_meta"].as_object_mut().and_then(|m|m.remove(crate::attention::META)) {
+                    if value["method"].as_str().is_some_and(is_turn_input) && let Some(metadata)=value["params"]["_meta"].as_object_mut().and_then(|m|m.remove(crate::attention::META)) {
                         let sid=value["params"]["sessionId"].as_str().unwrap_or("");
-                        match crate::attention::consume(&state,&principal,&connection_id,sid,&metadata) {
-                            Ok(id)=>attention_admission=Some(id),
+                        match crate::attention::consume(&state,&principal,&connection_id,sid,&metadata,session_context.get(sid).map(|p|&p.binding)) {
+                            Ok(id)=>{
+                                if value["method"]==STEERING_METHOD && let Some(request_id)=value.get("id") {
+                                    pending_steering_attention.insert(request_id.to_string(),(id.clone(),sid.to_owned()));
+                                }
+                                attention_admission=Some(id);
+                            },
                             Err(_)=>{
                                 if let Some(id)=value.get("id") {pending.remove(&id.to_string());update_admissions.remove(&id.to_string());}
-                                reject_request(&outgoing,&value,-32002,"Attention offer expired, cancelled, superseded, used, or over budget; no prompt was forwarded").await?;
+                                reject_request(&outgoing,&value,-32002,"Attention offer expired, cancelled, superseded, used, or over budget; no input was forwarded").await?;
                                 continue;
                             }
                         }
@@ -605,6 +654,12 @@ async fn relay_connection(
                             continue;
                         }
                     } else if let Some(request) = value.get("id").and_then(|id| pending.remove(&id.to_string())) {
+                        if let Some((admission,_))=pending_steering_attention.remove(&request.id.to_string())
+                            && request.method==STEERING_METHOD && value.get("error").is_none() && value["result"]["outcome"]=="promptRequired" {
+                            let restored=crate::attention::restore_unapplied(&state,&admission)?;
+                            if !value["result"]["_meta"].is_object(){value["result"]["_meta"]=json!({});}
+                            value["result"]["_meta"][crate::attention::META]=json!({"id":admission,"ticketState":if restored.is_some(){"restored"}else{"consumed"},"expiresAt":restored});
+                        }
                         if request.method == "session/load" && let Some(sid) = &request.session_id {
                             for frame in replay.finish(sid) { send_frontend(&outgoing, frame).await?; }
                         }
@@ -617,6 +672,7 @@ async fn relay_connection(
                                 initialized = true;
                                 http_mcp_supported = value["result"]["agentCapabilities"]["mcpCapabilities"]["http"] == true;
                                 context_snapshots_supported = value["result"]["_meta"]["com.microsoft.amplifier.context-snapshot"]["version"] == 1;
+                                steering_supported = value["result"]["_meta"]["steering"]["supported"] == true;
                                 native_history = value["result"]["_meta"]["io.github.bkrabach.agent-runtime"]["history"].clone();
                                 let backend_info = value["result"].get("agentInfo").cloned().unwrap_or(Value::Null);
                                 ensure!(value["result"].is_object(), "ACP backend returned malformed initialization");

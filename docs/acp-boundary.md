@@ -18,6 +18,53 @@ Permission, filesystem and terminal callbacks travel back to the actual ACP clie
 
 Instance name, purpose, instructions, and configured profile documents are prepended as a separate text block to each prompt. This supplies ordinary ACP context, **not a privileged system-message channel**. Clients still submit normal ACP content, and backends may replay that configured text as part of the saved conversation. Do not put credentials in those profiles. Provider credentials belong in named secret references supplied to the backend environment.
 
+## Optional in-turn input
+
+The pre-standard `_session/steering` extension is available only when the backend
+advertises `_meta.steering.supported` during initialization. Instance preserves
+that capability and the backend's outcomes; it does not add steering to a plain
+ACP engine. Requests require an already loaded session, a nonempty `prompt`
+array, and `_meta.steering.idleBehavior: "promptRequired"`. This prevents an idle
+request from silently starting an untracked second turn.
+
+Steering receives the same configured identity/profile block, fresh authorized
+context, tool-access checks, and optional attention-ticket validation and
+consumption as a prompt. The existing audience binding remains authoritative.
+Input IDs, client metadata and block-local source/snapshot metadata are preserved;
+attention credentials are consumed and stripped before reaching the backend.
+An admitted attention event is an input admission, not a fresh task allowance.
+
+The active prompt keeps its work ID and update-admission guard. Ordinary steering
+neither cancels that prompt nor dismisses a pending permission callback. Backend
+input receipts, including empty text updates carrying metadata and the final
+prompt's receipt list, pass through unchanged. `promptRequired`, failed or
+unacknowledged input does not cause Instance to issue a fallback prompt. The
+client owns its durable queue and must reconcile receipt state before retrying;
+the backend's acceptance outcome alone is not proof of model incorporation.
+
+The optional `_session/input_receipts` and `_session/acknowledge_inputs` recovery
+controls require a session loaded on this connection, the same tool-access scope,
+and a current verified conversation grant. They neither create a work lifecycle
+nor renew input authority; revoked access also blocks recovery. Acknowledgment
+records an explicit recovery decision, not permission to replay uncertain work.
+
+There is one explicit negative-acknowledgment path for ambient input: when the
+matching backend steering response is definitely `promptRequired`, Instance can
+restore that same attention ticket for the client's deferred ordinary prompt.
+The response includes `_meta["com.microsoft.amplifier.attention"]` with `id`,
+`ticketState: "restored"`, and the original `expiresAt`. Source, policy, session
+and cancellation checks still apply. Original timestamps and the claimed budget
+slot are retained; neither expiry nor authority is renewed. Expired/revoked
+offers, `failed`, lost replies and unknown outcomes never gain a retry ticket.
+
+That proven-unapplied ticket may survive the transport closing only when its
+source-issued audience is bound to a saved session. A reconnect must use the
+same authenticated principal, saved session and freshly authorized source
+binding. Instance atomically rebinds and consumes the original ticket once;
+there is no fresh evaluation, expiry extension or extra budget slot. Missing
+source proof fails closed. Ordinary unused offers are still cancelled on
+transport close, and explicit cancellation invalidates this handoff too.
+
 ## Optional conversation continuity
 
 Version 0.4 can merge an agent-owned HTTP MCP server into the standard session MCP configuration when the backend advertises HTTP support. Native owner clients need no custom methods. Adapters may supply an optional namespaced conversation grant; the wrapper validates and strips it before forwarding, binds the audience to the session, and keeps credentials out of prompts and observations. Original client MCP entries remain intact. [Provider, authorization and migration contract](conversation-continuity.md).
@@ -63,8 +110,8 @@ The fixture tests transport and lifecycle mechanics; they do not prove an arbitr
 
 ## Optional host attention
 
-[Attention](attention.md) is consumed by Instance before a prompt reaches the
-backend. Advertised backend capabilities, authentication, permissions, streaming
+[Attention](attention.md) is consumed by Instance before a prompt or steering input
+reaches the backend. Advertised backend capabilities, authentication, permissions, streaming
 and session state remain backend-owned. Plain clients need not adopt the
 extension; plain engines do not implement it. Engine-family changes require a
 new installation; this boundary does not promise portable session files.

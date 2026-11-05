@@ -21,6 +21,9 @@ sessions = {}
 active = set()
 cancel = {}
 callbacks = {}
+running = {}
+steering_receipts = {}
+held_steering = {}
 initialized = False
 
 
@@ -68,7 +71,7 @@ def prompt(req):
     if "WAIT_FOR_CANCEL" in text or "SPAWN_CHILD" in text:
         update(sid, "Working")
         event.wait(30)
-        answer(req, {"stopReason": "cancelled" if event.is_set() else "end_turn"})
+        complete_prompt(req, {"stopReason": "cancelled" if event.is_set() else "end_turn"})
         return
     detail = {"cwd": sessions[sid]["cwd"], "types": [v["type"] for v in values],
               "configured_context": values[0].get("text", "").startswith("[Configured agent instance context]"),
@@ -96,7 +99,17 @@ def prompt(req):
         sessions[sid]["history"].append({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": text}, "messageId": uuid.uuid4().hex})
         sessions[sid]["history"].append(update(sid, result))
         persist(sid)
-    answer(req, {"stopReason": "end_turn"})
+    complete_prompt(req, {"stopReason": "end_turn"})
+
+
+def complete_prompt(req, result):
+    sid = req["params"]["sessionId"]
+    with LOCK:
+        receipts = steering_receipts.pop(sid, [])
+        running.pop(sid, None)
+    if receipts:
+        result["_meta"] = {"io.github.bkrabach.agent-runtime": {"inputReceipts": receipts}}
+    answer(req, result)
 
 
 for line in sys.stdin:
@@ -115,7 +128,8 @@ for line in sys.stdin:
             answer(req, {"protocolVersion": 1, "agentInfo": {"name": "independent-python-fixture", "version": "1.0"},
                          "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"list": {}, "resume": {}, "close": {}}},
                          "authMethods": [{"id": "fixture-login", "name": "Fixture login"}],
-                         "_meta": {"fixture-preserved": True, "com.microsoft.amplifier.context-snapshot": {"version":1}}})
+                         "_meta": {"fixture-preserved": True, "com.microsoft.amplifier.context-snapshot": {"version":1},
+                                   "steering": {"supported": os.getenv("FIXTURE_NO_STEERING") != "1", "version": 1, "idleBehavior": ["promptRequired"]}}})
             continue
         if not initialized:
             fail(req, -32600, "Initialize first")
@@ -151,7 +165,30 @@ for line in sys.stdin:
             if params["sessionId"] not in active:
                 fail(req, -32002, "Session is not active on this connection")
             else:
+                with LOCK:
+                    running[params["sessionId"]] = req["id"]
                 threading.Thread(target=prompt, args=(req,), daemon=True).start()
+        elif method == "_session/steering":
+            sid = params["sessionId"]
+            with LOCK:
+                if any("DEFER_STEERING_REPLY" in p.get("text", "") for p in params["prompt"]):
+                    held_steering[sid] = req
+                    update(sid, "Steering request held by fixture", "agent_thought_chunk")
+                    continue
+                if sid not in running:
+                    answer(req, {"outcome": "promptRequired", "fixtureParams": params})
+                    continue
+                receipt = {"inputId": params.get("_meta", {}).get("steering", {}).get("inputId"),
+                           "state": "incorporated", "turnId": "fixture-turn-" + str(running[sid])}
+                steering_receipts.setdefault(sid, []).append(receipt)
+                emit({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ""},
+                    "_meta": {"io.github.bkrabach.agent-runtime": {"inputReceipt": receipt}}}}})
+                answer(req, {"outcome": "injected", "fixtureParams": params})
+        elif method == "_fixture/release_steering":
+            held = held_steering.pop(params["sessionId"])
+            answer(held, {"outcome": params.get("outcome", "promptRequired")})
+            answer(req, {})
         elif method == "session/cancel":
             if params["sessionId"] in cancel:
                 cancel[params["sessionId"]].set()

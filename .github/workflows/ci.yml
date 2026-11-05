@@ -66,6 +66,11 @@ jobs:
         env:
           AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
         run: node ui/tests/attention.mjs
+      - name: Check native account and model migration controls
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
+        run: node ui/tests/native-account.mjs
       - name: Check model-free identity events across TLS and stdio
         run: python3 tests/identity_wss_live.py --binary target/release/agent-instance
       - name: Check real PAM with a disposable account

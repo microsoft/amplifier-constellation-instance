@@ -94,6 +94,8 @@ async fn native_oauth_keeps_pending_link_ephemeral_and_configuration_unchanged()
         initial["revision"]
     );
     let catalog = f.api("POST", "native-account/models", json!({})).await;
+    assert_eq!(catalog["runtime_catalog_available"], true);
+    assert_eq!(catalog["models"].as_array().unwrap().len(), 1);
     assert_eq!(catalog["models"][0]["slug"], "fixture-account-model");
     assert!(catalog["models"][0].get("private").is_none());
     let events = f.api("GET", "events", Value::Null).await.to_string();
@@ -106,6 +108,31 @@ async fn native_oauth_keeps_pending_link_ephemeral_and_configuration_unchanged()
         f.api("GET", "native-account", Value::Null).await["account"]["connected"],
         false
     );
+}
+#[tokio::test]
+async fn account_models_follow_installed_runtime_support_without_migrating_saved_settings() {
+    let f = Fixture::new();
+    let path = f.dir.path().join("engine/runtime.json");
+    let original = std::fs::read(&path).unwrap();
+    for (mode, count, present) in [
+        ("normal", 1, true),
+        ("empty", 0, true),
+        ("legacy", 2, false),
+    ] {
+        std::fs::write(f.dir.path().join("engine/catalog-mode"), mode).unwrap();
+        let value = f.api("POST", "native-account/models", json!({})).await;
+        assert_eq!(value["models"].as_array().unwrap().len(), count, "{mode}");
+        assert_eq!(value["runtime_catalog_available"], present, "{mode}");
+        assert!(!value.to_string().contains("do not forward"));
+    }
+    for mode in ["missing", "malformed"] {
+        std::fs::write(f.dir.path().join("engine/catalog-mode"), mode).unwrap();
+        let (status, _) = f
+            .request("POST", "native-account/models", json!({}), &f.token)
+            .await;
+        assert_eq!(status, 400, "{mode}");
+    }
+    assert_eq!(std::fs::read(path).unwrap(), original);
 }
 #[tokio::test]
 async fn cancellation_expiry_and_stale_jobs_reap_the_callback_process() {
