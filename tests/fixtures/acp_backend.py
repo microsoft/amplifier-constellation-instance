@@ -61,7 +61,7 @@ def prompt(req):
     values = params["prompt"]
     text = "\n".join(v.get("text", "") for v in values)
     if "OVERSIZE_BACKEND_FRAME" in text:
-        update(sid, "x" * 4096)
+        update(sid, "x" * 16384)
         return
     event = threading.Event()
     cancel[sid] = event

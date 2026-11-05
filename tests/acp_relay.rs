@@ -716,7 +716,7 @@ async fn oversized_backend_output_closes_connection_without_unbounded_buffering(
         .unwrap()
         .config
         .limits
-        .max_frame_bytes = 1024;
+        .max_frame_bytes = 4096;
     let mut client = install.connect();
     client.initialize().await;
     let sid = client.new_session(&install.work).await;
@@ -845,6 +845,193 @@ async fn optional_attention_is_intercepted_but_plain_acp_and_streaming_still_wor
 
 fn steering(sid: &str, input_id: &str) -> Value {
     json!({"sessionId":sid,"prompt":[{"type":"text","text":"New participant input private-steering-canary","_meta":{"com.microsoft.amplifier.context-snapshot":{"version":1,"key":"source:room:revision-2","retainedText":"Earlier source"},"source":{"conversation":"room","revision":2,"trigger":"message-2"}}}],"_meta":{"steering":{"inputId":input_id,"idleBehavior":"promptRequired"},"client-preserved":true}})
+}
+
+fn awareness(sid: &str, prompt_id: Value) -> Value {
+    let mut input = steering(sid, "peer-awareness");
+    input["_meta"]["steering"]["intent"] = json!("awareness");
+    input["_meta"]["steering"]["activePromptId"] = prompt_id;
+    input
+}
+
+#[tokio::test]
+async fn awareness_is_bound_to_the_active_prompt_and_preserves_approval() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    let initialized = client.initialize().await;
+    assert_eq!(
+        initialized["result"]["_meta"]["io.github.bkrabach.agent-instance"]["inputContinuity"]["awareness"],
+        json!({"version":1,"activeOnly":true,"promptIdRequired":true})
+    );
+    let sid = client.new_session(&install.work).await;
+    client
+        .send(
+            200,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}),
+        )
+        .await;
+    let permission = client.recv().await;
+    assert_eq!(permission["method"], "session/request_permission");
+
+    // Even with a turn running, stale/wrong prompt references are not forwarded.
+    client
+        .send(201, STEERING_METHOD, awareness(&sid, json!(199)))
+        .await;
+    let rejected = client.response(201).await.0;
+    assert_eq!(rejected["result"]["outcome"], "promptRequired");
+    assert!(rejected["result"]["fixtureParams"].is_null());
+
+    client
+        .send(202, STEERING_METHOD, awareness(&sid, json!(200)))
+        .await;
+    let accepted = client.response(202).await.0;
+    assert_eq!(accepted["result"]["outcome"], "injected");
+    assert_eq!(
+        accepted["result"]["fixtureParams"]["_meta"]["steering"]["intent"],
+        "awareness"
+    );
+    client.tx.send(json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"permit"}}})).await.unwrap();
+    let (done, updates) = client.response(200).await;
+    assert_eq!(done["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        detail(&updates)["permission"]["outcome"]["optionId"],
+        "permit"
+    );
+
+    client
+        .send(203, STEERING_METHOD, awareness(&sid, json!(200)))
+        .await;
+    let idle = client.response(203).await.0;
+    assert_eq!(idle["result"]["outcome"], "promptRequired");
+    assert!(idle["result"]["fixtureParams"].is_null());
+    let starts: i64 = install
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='acp.prompt.started'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(starts, 1);
+    client.disconnect().await;
+}
+
+const STEERING_METHOD: &str = "_session/steering";
+
+#[tokio::test]
+async fn awareness_cannot_start_work_or_carry_a_new_social_offer() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    client
+        .send(200, "session/prompt", awareness(&sid, json!(199)))
+        .await;
+    assert_eq!(client.response(200).await.0["error"]["code"], -32602);
+    let mut input = awareness(&sid, Value::Null);
+    client.send(201, STEERING_METHOD, input.clone()).await;
+    assert_eq!(client.response(201).await.0["error"]["code"], -32602);
+    input["_meta"]["steering"]["activePromptId"] = json!(199);
+    input["_meta"]["com.microsoft.amplifier.attention"] =
+        json!({"id":"unconsumed-offer","ticket":"private-ticket-canary"});
+    client.send(202, STEERING_METHOD, input).await;
+    assert_eq!(client.response(202).await.0["error"]["code"], -32602);
+    let starts: i64 = install
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind='acp.prompt.started'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(starts, 0);
+    client.disconnect().await;
+}
+
+#[tokio::test]
+async fn awareness_rejects_malformed_input_and_cancelled_string_prompt() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    let mut malformed = awareness(&sid, json!("active-prompt"));
+    malformed["prompt"] = json!([]);
+    client.send(200, STEERING_METHOD, malformed).await;
+    assert_eq!(client.response(200).await.0["error"]["code"], -32602);
+    client.tx.send(json!({"jsonrpc":"2.0","id":"active-prompt","method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}})).await.unwrap();
+    let permission = client.recv().await;
+    client
+        .send(
+            201,
+            STEERING_METHOD,
+            awareness(&sid, json!("active-prompt")),
+        )
+        .await;
+    assert_eq!(
+        client.response(201).await.0["result"]["outcome"],
+        "injected"
+    );
+    client
+        .tx
+        .send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
+        .await
+        .unwrap();
+    // The fixture deliberately retains the pending callback. Cancel closes the
+    // awareness window before the backend's final response can arrive.
+    client
+        .send(
+            202,
+            STEERING_METHOD,
+            awareness(&sid, json!("active-prompt")),
+        )
+        .await;
+    let rejected = client.response(202).await.0;
+    assert_eq!(rejected["result"]["outcome"], "promptRequired");
+    assert!(rejected["result"]["fixtureParams"].is_null());
+    client.tx.send(json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"reject"}}})).await.unwrap();
+    loop {
+        let value = client.recv().await;
+        if value["id"] == "active-prompt" {
+            break;
+        }
+    }
+    client.disconnect().await;
+}
+
+#[tokio::test]
+async fn awareness_cannot_target_a_different_loaded_session() {
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    let other = client.new_session(&install.work).await;
+    client
+        .send(
+            200,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}),
+        )
+        .await;
+    let permission = client.recv().await;
+    client
+        .send(201, STEERING_METHOD, awareness(&other, json!(200)))
+        .await;
+    let response = client.response(201).await.0;
+    assert_eq!(response["result"]["outcome"], "promptRequired");
+    assert!(response["result"]["fixtureParams"].is_null());
+    client.tx.send(json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"permit"}}})).await.unwrap();
+    assert_eq!(
+        client.response(200).await.0["result"]["stopReason"],
+        "end_turn"
+    );
+    client.disconnect().await;
 }
 
 #[tokio::test]

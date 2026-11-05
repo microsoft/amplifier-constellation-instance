@@ -5,7 +5,7 @@ dashboard, setup, management API, and ACP attach command ship in the same binary
 Multiple instances can run under one account, each with its own folder, ports,
 identity, credentials, retained releases, and startup job. Adapters remain separate.
 
-Version 0.16.0 installs the independent **Constellation 0.10.0** Rust engine by
+Version 0.16.1 installs the independent **Constellation 0.10.0** Rust engine by
 default. Native model execution requires neither Codex nor Node. Connect a
 provider key or this agent's own ChatGPT account after installation; no existing
 provider account is copied by the native path. Choosing another ACP executable
