@@ -38,7 +38,11 @@ def finish(request):
         disposition = "blocked" if "REPORT_BLOCKER" in scenario else "continue" if "ALWAYS_CONTINUE" in scenario or saved["turn"] < 2 else "review"
         text += "\nAGENT_WORK_STATUS " + json.dumps({"status":disposition,"summary": "Need an input file" if disposition=="blocked" else "Finished step " + str(saved["turn"])})
     (root / "result.txt").write_bytes(b"actual fixture artifact\n")
-    send({"method":"session/update", "params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})
+    if "REVISED" in scenario:
+        send({"method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","messageId":"old","content":{"type":"text","text":"OBSOLETE DRAFT"}}}})
+    send({"method":"session/update", "params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","messageId":"final","content":{"type":"text","text":text}}}})
+    if "REVISED" in scenario:
+        send({"method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","messageId":"old","content":{"type":"text","text":" LATE OLD CHUNK"}}}})
     send({"id":request["id"],"result":{"stopReason":"end_turn"}})
 for line in sys.stdin:
     r=json.loads(line); m=r.get("method")

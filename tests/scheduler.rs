@@ -167,7 +167,7 @@ fn budget() -> Value {
 async fn detached_acp_execution_persists_report_and_requests_review_not_completion() {
     let f = Fixture::new();
     f.enable(false);
-    let w = f.create("Write and check a local fixture artifact", true);
+    let w = f.create("REVISED write and check a local fixture artifact", true);
     // Authorize through HTTP then drop the response/client. The service loop owns execution.
     let r=f.api("POST",&format!("work/{}/execution",w["id"].as_str().unwrap()),json!({"type":"queue","request_id":"detached","expected_work_revision":w["revision"],"budget":budget()})).await;
     let (stop, task) = scheduler::start(f.state.clone()).unwrap();
@@ -184,6 +184,9 @@ async fn detached_acp_execution_persists_report_and_requests_review_not_completi
             .unwrap()
             .contains("Created result.txt")
     );
+    assert!(!done["report"].as_str().unwrap().contains("OBSOLETE"));
+    assert!(!done["report"].as_str().unwrap().contains("LATE OLD"));
+    assert!(done["output_bytes"].as_u64().unwrap() > done["report"].as_str().unwrap().len() as u64);
     assert_eq!(done["report_trust"], "agent_report_unverified");
     let work = work::get_work(&f.state, w["id"].as_str().unwrap(), None).unwrap();
     assert_eq!(work["state"], "review");
