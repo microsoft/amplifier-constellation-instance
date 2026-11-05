@@ -146,3 +146,41 @@ status questions should consult this index and available presence/context tools
 before declaring the agent idle. The index contains source references, not a
 claim that every session is currently executing. Shared rooms retain their existing
 audience-scoped orientation and do not receive the owner's private activity index.
+
+## Peer awareness during active work
+
+Instance 0.16.1 advertises
+`_meta["io.github.bkrabach.agent-instance"].inputContinuity.awareness` with
+`version: 1`, `activeOnly: true`, and `promptIdRequired: true` when its backend
+negotiates steering. A connector may deliver peer evidence to existing work via
+`_session/steering`, setting `_meta.steering.intent` to `awareness` and
+`activePromptId` to the original `session/prompt` JSON-RPC ID on that connection.
+Normal input IDs, nonempty prompt blocks and `idleBehavior: "promptRequired"`
+are still required.
+
+Instance verifies that the referenced prompt is pending for the same loaded
+session and applies the normal current conversation and tool authorization. A
+stale or different prompt receives definite `promptRequired` without forwarding.
+Missing/malformed prompt IDs, an awareness `session/prompt`, and awareness carrying
+a new social-attention offer are rejected. The connector must never convert an
+awareness rejection into a new prompt. The original request, authority, budget and
+pending approvals remain in effect. Ordinary human follow-ups retain their
+existing negotiated steering behavior.
+
+Connectors keep peer author/source/revision separate from the original trigger.
+Unsupported hosts and late updates remain in authorized source history; unknown
+transport delivery is not replayed blindly. This optional Instance guard is not
+standard ACP, a new social evaluator, or a guarantee of atomic context freshness
+across a room. A transport acknowledgment does not prove model incorporation.
+
+Installed context also supplies general collaboration guidance: agree who will
+report a group result, distinguish nomination, acceptance and delivery, keep
+source-linked commitments in existing scoped notes/tools, and close the loop with
+a self-contained outcome. Peer evidence need not provoke another reply. This
+is guidance to evaluate with real conversations, not a shared leader-election
+service or automatic commitment extractor.
+
+The coordinated contract is the family's
+[collaboration candidate](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/collaboration.v1-candidate.md).
+`tests/acp_relay.rs` covers active-only admission, stale/wrong-session references,
+preserved approvals and rejection of new attention offers.
