@@ -42,6 +42,15 @@ unacknowledged input does not cause Instance to issue a fallback prompt. The
 client owns its durable queue and must reconcile receipt state before retrying;
 the backend's acceptance outcome alone is not proof of model incorporation.
 
+There is one explicit negative-acknowledgment path for ambient input: when the
+matching backend steering response is definitely `promptRequired`, Instance can
+restore that same attention ticket for the client's deferred ordinary prompt.
+The response includes `_meta["com.microsoft.amplifier.attention"]` with `id`,
+`ticketState: "restored"`, and the original `expiresAt`. Source, policy, session
+and cancellation checks still apply. Original timestamps and the claimed budget
+slot are retained; neither expiry nor authority is renewed. Expired/revoked
+offers, `failed`, lost replies and unknown outcomes never gain a retry ticket.
+
 ## Optional conversation continuity
 
 Version 0.4 can merge an agent-owned HTTP MCP server into the standard session MCP configuration when the backend advertises HTTP support. Native owner clients need no custom methods. Adapters may supply an optional namespaced conversation grant; the wrapper validates and strips it before forwarding, binds the audience to the session, and keeps credentials out of prompts and observations. Original client MCP entries remain intact. [Provider, authorization and migration contract](conversation-continuity.md).

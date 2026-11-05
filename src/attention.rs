@@ -148,10 +148,11 @@ pub fn reserve(
     ]));
     let id = key(json!([audience, event.context.trigger_id]));
     if let Some(mut prior) = state.get_record("attention_events", &id)? {
-        if prior["evidence_sha256"] != key(json!(event.context))
-            && matches!(prior["status"].as_str(), Some("evaluating" | "offered"))
-        {
-            prior["status"] = json!("invalidated");
+        if prior["evidence_sha256"] != key(json!(event.context)) {
+            if matches!(prior["status"].as_str(), Some("evaluating" | "offered")) {
+                prior["status"] = json!("invalidated");
+            }
+            prior["restoration_revoked"] = json!(true);
             save(state, &prior)?;
         }
         return Ok(json!({"action":"hold","reason":"duplicate","id":id}));
@@ -328,7 +329,9 @@ pub fn consume(
     );
     let recent: Vec<_> = rows(state)?
         .into_iter()
-        .filter(|r| r["claimed_at"].as_i64().unwrap_or(0) > now_ms() - 3600000)
+        .filter(|r| {
+            r["id"] != row["id"] && r["claimed_at"].as_i64().unwrap_or(0) > now_ms() - 3600000
+        })
         .collect();
     let uncertain = recent.iter().filter(|r| r["investigate"] == true).count();
     if recent.len() >= config.turns_per_hour
@@ -339,7 +342,11 @@ pub fn consume(
         anyhow::bail!("Attention turn budget reached");
     }
     row["status"] = json!("claimed");
-    row["claimed_at"] = json!(now_ms());
+    // A definite steering negative acknowledgment may restore this same offer.
+    // Preserve its original budget reservation rather than charging/renewing it.
+    if !row["claimed_at"].is_i64() {
+        row["claimed_at"] = json!(now_ms());
+    }
     save(state, &row)?;
     Ok(id.into())
 }
@@ -353,15 +360,43 @@ pub fn forwarded(state: &AppState, id: &str) -> Result<()> {
     state.event("attention.admitted",json!({"id":id,"meaning":"ACP input forwarded; not a model request count or publication receipt"}))?;
     Ok(())
 }
+
+/// Only the relay's matching, definite `promptRequired` response calls this.
+/// Unknown outcomes never restore admission; original deadlines/budgets remain.
+pub fn restore_unapplied(state: &AppState, id: &str) -> Result<Option<i64>> {
+    let _lock = state.attention_lock.lock().unwrap();
+    let Some(mut row) = state.get_record("attention_events", id)? else {
+        return Ok(None);
+    };
+    let expires = row["expires_at"].as_i64().unwrap_or(0);
+    if row["status"] != "admitted"
+        || row["restoration_revoked"] == true
+        || expires <= now_ms()
+        || !fresh(row["occurred_at"].as_i64().unwrap_or(0))
+        || !head(state, &row)?
+        || row["config_sha256"] != policy_key(&state.instance_config())
+    {
+        return Ok(None);
+    }
+    row["status"] = json!("offered");
+    row["steering_unapplied_at"] = json!(now_ms());
+    save(state, &row)?;
+    state.event("attention.steering_unapplied", json!({"id":id,"meaning":"Backend requires an ordinary prompt; original ticket, expiry and budget reservation retained"}))?;
+    Ok(Some(expires))
+}
 pub fn cancel(state: &AppState, connection: &str, sid: Option<&str>) {
     let _lock = state.attention_lock.lock().unwrap();
     if let Ok(rows) = rows(state) {
         for mut row in rows {
-            if row["connection"] == connection
-                && sid.is_none_or(|s| row["session_id"] == s)
-                && matches!(row["status"].as_str(), Some("evaluating" | "offered"))
-            {
-                row["status"] = json!("cancelled");
+            if row["connection"] == connection && sid.is_none_or(|s| row["session_id"] == s) {
+                if matches!(row["status"].as_str(), Some("evaluating" | "offered")) {
+                    row["status"] = json!("cancelled");
+                } else if !matches!(row["status"].as_str(), Some("claimed" | "admitted"))
+                    || row["restoration_revoked"] == true
+                {
+                    continue;
+                }
+                row["restoration_revoked"] = json!(true);
                 let _ = save(state, &row);
             }
         }

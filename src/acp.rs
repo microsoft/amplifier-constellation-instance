@@ -351,6 +351,7 @@ async fn relay_connection(
     let mut pending_context = BTreeMap::<String, context::Prepared>::new();
     let mut session_context = BTreeMap::<String, context::Prepared>::new();
     let mut pending = BTreeMap::<String, Pending>::new();
+    let mut pending_steering_attention = BTreeMap::<String, (String, String)>::new();
     let mut attention_jobs = tokio::task::JoinSet::new();
     let mut attention_ids = BTreeSet::<String>::new();
     let mut loaded_sessions = BTreeSet::<String>::new();
@@ -446,6 +447,7 @@ async fn relay_connection(
                         if matches!(method.as_str(),"session/cancel"|"session/close")
                             && let Some(sid)=value["params"]["sessionId"].as_str() {
                             crate::attention::cancel(&state,&connection_id,Some(sid));
+                            pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                         }
                         if method == crate::identity::METHOD {
                             if let Some(id) = value.get("id") {
@@ -526,6 +528,7 @@ async fn relay_connection(
                         if method=="session/prompt" && value["params"]["_meta"].get(crate::attention::META).is_none()
                             && let Some(sid)=value["params"]["sessionId"].as_str(){
                             crate::attention::cancel(&state,&connection_id,Some(sid));
+                            pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                         }
                         if is_turn_input(&method) && value["params"]["prompt"].is_array() {
                             let (current, prompt_revision) = {
@@ -580,7 +583,12 @@ async fn relay_connection(
                     if value["method"].as_str().is_some_and(is_turn_input) && let Some(metadata)=value["params"]["_meta"].as_object_mut().and_then(|m|m.remove(crate::attention::META)) {
                         let sid=value["params"]["sessionId"].as_str().unwrap_or("");
                         match crate::attention::consume(&state,&principal,&connection_id,sid,&metadata) {
-                            Ok(id)=>attention_admission=Some(id),
+                            Ok(id)=>{
+                                if value["method"]==STEERING_METHOD && let Some(request_id)=value.get("id") {
+                                    pending_steering_attention.insert(request_id.to_string(),(id.clone(),sid.to_owned()));
+                                }
+                                attention_admission=Some(id);
+                            },
                             Err(_)=>{
                                 if let Some(id)=value.get("id") {pending.remove(&id.to_string());update_admissions.remove(&id.to_string());}
                                 reject_request(&outgoing,&value,-32002,"Attention offer expired, cancelled, superseded, used, or over budget; no input was forwarded").await?;
@@ -628,6 +636,12 @@ async fn relay_connection(
                             continue;
                         }
                     } else if let Some(request) = value.get("id").and_then(|id| pending.remove(&id.to_string())) {
+                        if let Some((admission,_))=pending_steering_attention.remove(&request.id.to_string())
+                            && request.method==STEERING_METHOD && value.get("error").is_none() && value["result"]["outcome"]=="promptRequired" {
+                            let restored=crate::attention::restore_unapplied(&state,&admission)?;
+                            if !value["result"]["_meta"].is_object(){value["result"]["_meta"]=json!({});}
+                            value["result"]["_meta"][crate::attention::META]=json!({"id":admission,"ticketState":if restored.is_some(){"restored"}else{"consumed"},"expiresAt":restored});
+                        }
                         if request.method == "session/load" && let Some(sid) = &request.session_id {
                             for frame in replay.finish(sid) { send_frontend(&outgoing, frame).await?; }
                         }

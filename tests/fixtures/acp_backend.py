@@ -23,6 +23,7 @@ cancel = {}
 callbacks = {}
 running = {}
 steering_receipts = {}
+held_steering = {}
 initialized = False
 
 
@@ -170,6 +171,10 @@ for line in sys.stdin:
         elif method == "_session/steering":
             sid = params["sessionId"]
             with LOCK:
+                if any("DEFER_STEERING_REPLY" in p.get("text", "") for p in params["prompt"]):
+                    held_steering[sid] = req
+                    update(sid, "Steering request held by fixture", "agent_thought_chunk")
+                    continue
                 if sid not in running:
                     answer(req, {"outcome": "promptRequired", "fixtureParams": params})
                     continue
@@ -180,6 +185,10 @@ for line in sys.stdin:
                     "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": ""},
                     "_meta": {"io.github.bkrabach.agent-runtime": {"inputReceipt": receipt}}}}})
                 answer(req, {"outcome": "injected", "fixtureParams": params})
+        elif method == "_fixture/release_steering":
+            held = held_steering.pop(params["sessionId"])
+            answer(held, {"outcome": params.get("outcome", "promptRequired")})
+            answer(req, {})
         elif method == "session/cancel":
             if params["sessionId"] in cancel:
                 cancel[params["sessionId"]].set()

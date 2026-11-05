@@ -1099,3 +1099,209 @@ async fn busy_steering_consumes_attention_only_for_the_bound_session_and_current
     assert_eq!(c.response(200).await.0["result"]["stopReason"], "end_turn");
     c.disconnect().await;
 }
+
+fn attention_event(sid: &str, trigger: &str) -> Value {
+    json!({"sessionId":sid,"occurredAt":agent_instance::state::now_ms(),"context":{"conversation_id":"room","agent":{"id":"a","name":"Agent"},"participants":[{"id":"a","name":"Agent"},{"id":"b","name":"Human"}],"messages":[{"id":trigger,"sender":"b","text":"An updated request"}],"trigger_id":trigger}})
+}
+
+fn one_attention_slot(i: &Installation) {
+    i.state.config.write().unwrap().config.attention = Some(agent_instance::attention::Config {
+        endpoint: "http://127.0.0.1:9/".into(),
+        model: "fixture".into(),
+        protocol: "system_one".into(),
+        auth: "bearer".into(),
+        credential_secret: "provider-test".into(),
+        decisions_per_hour: 20,
+        turns_per_hour: 1,
+        uncertain_turns_per_hour: 1,
+    });
+}
+
+#[tokio::test]
+async fn prompt_completion_race_restores_same_attention_ticket_without_renewing_its_slot() {
+    use agent_instance::attention;
+    let i = Installation::new();
+    one_attention_slot(&i);
+    let mut c = i.connect();
+    c.initialize().await;
+    let sid = c.new_session(&i.work).await;
+    c.send(
+        200,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}),
+    )
+    .await;
+    let callback = c.recv().await;
+    assert_eq!(callback["method"], "session/request_permission");
+    let event = attention_event(&sid, "race-input");
+    c.send(201, attention::METHOD, event.clone()).await;
+    let offer = c.response(201).await.0["result"].clone();
+    assert_eq!(offer["action"], "engage");
+    let mut input = steering(&sid, "race-input");
+    input["prompt"][0]["text"] = json!("DEFER_STEERING_REPLY");
+    input["_meta"][attention::META] = json!({"id":offer["id"],"ticket":offer["ticket"]});
+    c.send(202, "_session/steering", input.clone()).await;
+    assert_eq!(
+        c.recv().await["params"]["update"]["content"]["text"],
+        "Steering request held by fixture"
+    );
+    let key = offer["id"].as_str().unwrap();
+    let before = i
+        .state
+        .get_record("attention_events", key)
+        .unwrap()
+        .unwrap();
+    // The existing prompt finishes before the queued steering request gets its
+    // definitive negative acknowledgment. No model input was incorporated.
+    c.tx.send(json!({"jsonrpc":"2.0","id":callback["id"],"result":{"outcome":{"outcome":"selected","optionId":"permit"}}})).await.unwrap();
+    assert_eq!(c.response(200).await.0["result"]["stopReason"], "end_turn");
+    c.send(203, "_fixture/release_steering", json!({"sessionId":sid}))
+        .await;
+    let result = c.response(202).await.0;
+    c.response(203).await;
+    assert_eq!(result["result"]["outcome"], "promptRequired");
+    assert_eq!(
+        result["result"]["_meta"][attention::META],
+        json!({"id":offer["id"],"ticketState":"restored","expiresAt":offer["expiresAt"]})
+    );
+    let restored = i
+        .state
+        .get_record("attention_events", key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored["status"], "offered");
+    for field in [
+        "occurred_at",
+        "expires_at",
+        "claimed_at",
+        "requested_at",
+        "ticket_hash",
+    ] {
+        assert_eq!(restored[field], before[field], "{field} must not renew");
+    }
+    assert_eq!(
+        agent_instance::updates::status(&i.state).unwrap()["active_prompts"],
+        0
+    );
+    input["prompt"][0]["text"] = json!("Deferred original input");
+    c.send(204, "session/prompt", input.clone()).await;
+    assert_eq!(c.response(204).await.0["result"]["stopReason"], "end_turn");
+    let admitted = i
+        .state
+        .get_record("attention_events", key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted["claimed_at"], before["claimed_at"]);
+    assert_eq!(admitted["expires_at"], before["expires_at"]);
+    c.send(205, "session/prompt", input).await;
+    assert_eq!(c.response(205).await.0["error"]["code"], -32002);
+    c.send(206, attention::METHOD, event).await;
+    assert_eq!(c.response(206).await.0["result"]["reason"], "duplicate");
+    c.send(
+        207,
+        attention::METHOD,
+        attention_event(&sid, "another-input"),
+    )
+    .await;
+    let next = c.response(207).await.0["result"].clone();
+    let mut next_input = steering(&sid, "another-input");
+    next_input["_meta"][attention::META] = json!({"id":next["id"],"ticket":next["ticket"]});
+    c.send(208, "session/prompt", next_input).await;
+    assert_eq!(
+        c.response(208).await.0["error"]["code"],
+        -32002,
+        "The first admission still occupies its one budget slot"
+    );
+    c.disconnect().await;
+}
+
+#[tokio::test]
+async fn steering_negative_ack_never_revives_expired_revoked_or_ambiguous_admissions() {
+    use agent_instance::attention;
+    for case in [
+        "expired",
+        "policy",
+        "source-edit",
+        "cancel",
+        "failed",
+        "lost-reply",
+    ] {
+        let i = Installation::new();
+        one_attention_slot(&i);
+        let mut c = i.connect();
+        c.initialize().await;
+        let sid = c.new_session(&i.work).await;
+        let event = attention_event(&sid, case);
+        c.send(200, attention::METHOD, event.clone()).await;
+        let offer = c.response(200).await.0["result"].clone();
+        assert_eq!(offer["action"], "engage");
+        let mut input = steering(&sid, case);
+        input["prompt"][0]["text"] = json!("DEFER_STEERING_REPLY");
+        input["_meta"][attention::META] = json!({"id":offer["id"],"ticket":offer["ticket"]});
+        c.send(201, "_session/steering", input.clone()).await;
+        assert_eq!(
+            c.recv().await["params"]["update"]["content"]["text"],
+            "Steering request held by fixture"
+        );
+        let key = offer["id"].as_str().unwrap();
+        let before = i
+            .state
+            .get_record("attention_events", key)
+            .unwrap()
+            .unwrap();
+        match case {
+            "expired" => {
+                let mut row = before.clone();
+                row["expires_at"] = json!(0);
+                i.state.set_record("attention_events", key, row).unwrap();
+            }
+            "policy" => i.state.config.write().unwrap().config.purpose = "Changed policy".into(),
+            "source-edit" => {
+                let mut changed = event;
+                changed["context"]["messages"][0]["text"] = json!("Edited input");
+                c.send(202, attention::METHOD, changed).await;
+                assert_eq!(c.response(202).await.0["result"]["reason"], "duplicate");
+            }
+            "cancel" => c
+                .tx
+                .send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
+                .await
+                .unwrap(),
+            "lost-reply" => {
+                c.disconnect().await;
+                let row = i
+                    .state
+                    .get_record("attention_events", key)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row["status"], "admitted");
+                assert_eq!(row["claimed_at"], before["claimed_at"]);
+                continue;
+            }
+            _ => (),
+        }
+        c.send(
+            203,
+            "_fixture/release_steering",
+            json!({"sessionId":sid,"outcome":if case=="failed"{"failed"}else{"promptRequired"}}),
+        )
+        .await;
+        let result = c.response(201).await.0;
+        c.response(203).await;
+        assert_ne!(
+            result["result"]["_meta"][attention::META]["ticketState"],
+            "restored",
+            "{case}"
+        );
+        let after = i
+            .state
+            .get_record("attention_events", key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after["status"], "admitted", "{case}");
+        assert_eq!(after["claimed_at"], before["claimed_at"]);
+        c.send(204, "session/prompt", input).await;
+        assert_eq!(c.response(204).await.0["error"]["code"], -32002, "{case}");
+        c.disconnect().await;
+    }
+}

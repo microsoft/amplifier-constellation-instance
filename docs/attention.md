@@ -95,6 +95,20 @@ Instance removes that metadata before forwarding to the engine. Only a
 successful host validation can consume the offer. Existing permissions and
 source delivery checks still apply after admission.
 
+For a backend that negotiates `_session/steering`, the same metadata and checks
+apply to input submitted during the active prompt. A forward consumes admission
+without creating another work allowance. If that exact steering request instead
+returns a definite `promptRequired`, Instance may restore the original ticket
+and report `_meta["com.microsoft.amplifier.attention"]` in the result as
+`{id, ticketState:"restored", expiresAt}`. The client can use that same ticket
+for its deferred normal prompt while the original expiry is valid. The source
+timestamp, policy, audience and claimed budget slot are unchanged; repeated
+negative acknowledgments do not renew them or grant extra capacity. Explicit
+cancellation, changed/superseded source, expiry and changed policy prevent
+restoration. Failed or ambiguous results and lost replies never restore a ticket.
+Only `ticketState:"restored"` authorizes this retry; missing metadata is not a
+restoration receipt. No model-incorporation claim follows from admission alone.
+
 Tickets are bound to the authenticated principal, ACP connection, loaded
 session, audience, original event, installed name/purpose and policy configuration. Another connection
 cannot reuse them. The journal deduplicates the original event across reconnects;
