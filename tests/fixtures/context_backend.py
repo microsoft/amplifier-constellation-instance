@@ -47,6 +47,8 @@ for line in sys.stdin:
     elif method == "session/close":
         sessions.pop(params["sessionId"], None)
         answer(req, {})
+    elif method in ("_session/input_receipts", "_session/acknowledge_inputs"):
+        answer(req, {"sessionId": params["sessionId"], "receipts": [], "recoveryFixture": method})
     elif method in ("session/prompt", "_session/steering"):
         sid = params["sessionId"]
         settings = sessions[sid]

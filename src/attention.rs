@@ -85,6 +85,30 @@ pub fn capability(state: &AppState) -> Value {
 fn key(parts: Value) -> String {
     format!("{:x}", Sha256::digest(parts.to_string().as_bytes()))
 }
+// A source-issued grant proves this audience across ACP transports. Labels,
+// timestamps and grant secrets are deliberately excluded. Group membership may
+// change the speaker; owner-private bindings retain their actor identity.
+fn binding_key(binding: Option<&Value>) -> Option<String> {
+    let b = binding?;
+    if b["provider_id"].as_str().is_none_or(|v| v.is_empty())
+        || b["conversation_id"].as_str().is_none_or(|v| v.is_empty())
+        || !b["owner"].is_boolean()
+    {
+        return None;
+    }
+    Some(key(json!([
+        b["provider_id"],
+        b["conversation_id"],
+        b["thread_id"],
+        b["owner"],
+        if b["owner"] == true {
+            b["actor_id"].clone()
+        } else {
+            Value::Null
+        }
+    ])))
+}
+
 fn policy_key(config: &crate::config::InstanceConfig) -> String {
     key(json!([config.attention, config.name, config.purpose]))
 }
@@ -178,7 +202,7 @@ pub fn reserve(
         return Ok(json!({"action":"hold","reason":"decision_budget","id":id}));
     }
     let status = "evaluating";
-    let row = json!({"id":id,"audience":audience,"connection":connection,"principal":principal,"session_id":event.session_id,"event_id":event.context.trigger_id,"occurred_at":event.occurred_at,"requested_at":now_ms(),"status":status,"reason":status,"evidence_sha256":key(json!(event.context)),"review":"unreviewed","config_sha256":policy_key(&installed)});
+    let row = json!({"id":id,"audience":audience,"connection":connection,"principal":principal,"session_id":event.session_id,"event_id":event.context.trigger_id,"occurred_at":event.occurred_at,"requested_at":now_ms(),"status":status,"reason":status,"evidence_sha256":key(json!(event.context)),"review":"unreviewed","config_sha256":policy_key(&installed),"binding_sha256":binding_key(binding)});
     save(state, &row)?;
     state.set_record(
         "attention_heads",
@@ -296,6 +320,7 @@ pub fn consume(
     connection: &str,
     sid: &str,
     metadata: &Value,
+    binding: Option<&Value>,
 ) -> Result<String> {
     let id = metadata["id"]
         .as_str()
@@ -309,9 +334,18 @@ pub fn consume(
     let mut row = state
         .get_record("attention_events", id)?
         .context("Unknown attention event")?;
+    let new_binding = binding_key(binding);
+    let saved_binding = state.get_record("context_bindings", sid)?;
+    let rebind = row["connection"] != connection
+        && row["disconnected_unapplied"] == true
+        && row["steering_unapplied_at"].is_i64()
+        && row["restoration_revoked"] != true
+        && new_binding.is_some()
+        && row["binding_sha256"].as_str() == new_binding.as_deref()
+        && binding_key(saved_binding.as_ref()) == new_binding;
     ensure!(
         row["principal"] == principal
-            && row["connection"] == connection
+            && (row["connection"] == connection || rebind)
             && row["session_id"] == sid
             && row["ticket_hash"] == key(json!(ticket)),
         "Attention ticket does not belong to this connection and session"
@@ -342,6 +376,11 @@ pub fn consume(
         anyhow::bail!("Attention turn budget reached");
     }
     row["status"] = json!("claimed");
+    if rebind {
+        row["connection"] = json!(connection);
+        row["disconnected_unapplied"] = json!(false);
+        row["rebound_at"] = json!(now_ms());
+    }
     // A definite steering negative acknowledgment may restore this same offer.
     // Preserve its original budget reservation rather than charging/renewing it.
     if !row["claimed_at"].is_i64() {
@@ -384,11 +423,66 @@ pub fn restore_unapplied(state: &AppState, id: &str) -> Result<Option<i64>> {
     state.event("attention.steering_unapplied", json!({"id":id,"meaning":"Backend requires an ordinary prompt; original ticket, expiry and budget reservation retained"}))?;
     Ok(Some(expires))
 }
+/// A transport close may retain only a proven-unapplied offer with a saved,
+/// source-verified audience. Explicit cancellation never uses this exception.
+pub fn disconnect(state: &AppState, connection: &str) {
+    cancel_inner(state, connection, None, None, None, true);
+}
 pub fn cancel(state: &AppState, connection: &str, sid: Option<&str>) {
+    cancel_inner(state, connection, sid, None, None, false);
+}
+pub fn cancel_session(
+    state: &AppState,
+    principal: &str,
+    connection: &str,
+    sid: &str,
+    binding: Option<&Value>,
+) {
+    cancel_inner(
+        state,
+        connection,
+        Some(sid),
+        Some(principal),
+        binding,
+        false,
+    );
+}
+fn cancel_inner(
+    state: &AppState,
+    connection: &str,
+    sid: Option<&str>,
+    principal: Option<&str>,
+    binding: Option<&Value>,
+    disconnected: bool,
+) {
     let _lock = state.attention_lock.lock().unwrap();
     if let Ok(rows) = rows(state) {
         for mut row in rows {
-            if row["connection"] == connection && sid.is_none_or(|s| row["session_id"] == s) {
+            let current_binding = binding_key(binding);
+            let rebound_candidate = row["disconnected_unapplied"] == true
+                && current_binding.is_some()
+                && row["binding_sha256"].as_str() == current_binding.as_deref()
+                && principal.is_some_and(|p| row["principal"] == p)
+                && sid.is_some_and(|s| row["session_id"] == s);
+            if (row["connection"] == connection || rebound_candidate)
+                && sid.is_none_or(|s| row["session_id"] == s)
+            {
+                let saved = row["session_id"]
+                    .as_str()
+                    .and_then(|s| state.get_record("context_bindings", s).ok().flatten());
+                let binding = binding_key(saved.as_ref());
+                if disconnected
+                    && row["status"] == "offered"
+                    && row["steering_unapplied_at"].is_i64()
+                    && row["restoration_revoked"] != true
+                    && row["expires_at"].as_i64().is_some_and(|t| t > now_ms())
+                    && binding.is_some()
+                    && row["binding_sha256"].as_str() == binding.as_deref()
+                {
+                    row["disconnected_unapplied"] = json!(true);
+                    let _ = save(state, &row);
+                    continue;
+                }
                 if matches!(row["status"].as_str(), Some("evaluating" | "offered")) {
                     row["status"] = json!("cancelled");
                 } else if !matches!(row["status"].as_str(), Some("claimed" | "admitted"))
@@ -402,6 +496,7 @@ pub fn cancel(state: &AppState, connection: &str, sid: Option<&str>) {
         }
     }
 }
+
 pub fn report(state: &AppState) -> Result<Value> {
     let rows = rows(state)?;
     let mut counts = std::collections::BTreeMap::<String, usize>::new();

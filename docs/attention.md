@@ -110,8 +110,15 @@ Only `ticketState:"restored"` authorizes this retry; missing metadata is not a
 restoration receipt. No model-incorporation claim follows from admission alone.
 
 Tickets are bound to the authenticated principal, ACP connection, loaded
-session, audience, original event, installed name/purpose and policy configuration. Another connection
-cannot reuse them. The journal deduplicates the original event across reconnects;
+session, audience, original event, installed name/purpose and policy configuration.
+Ordinary tickets cannot move to another connection. A proven-unapplied restored
+ticket is the sole exception: after the original transport closes, a client can
+reload that same saved session under the same authenticated principal and a
+fresh grant proving the same source provider and audience. Owner-private sources
+also retain their actor binding. Instance atomically rebinds and consumes the
+original ticket once, within its original expiry and budget slot. Unverified
+bindings, explicit cancellation, changed authority and uncertain delivery fail
+closed; unused ordinary offers still expire on disconnect. The journal deduplicates the original event across reconnects;
 it does not promise to replay an event lost during a crash. Stale events,
 superseded evidence, edited duplicate events, cancellation, configuration changes
 and spent tickets cannot admit a turn. A newer event in the audience invalidates

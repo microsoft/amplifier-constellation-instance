@@ -42,6 +42,12 @@ unacknowledged input does not cause Instance to issue a fallback prompt. The
 client owns its durable queue and must reconcile receipt state before retrying;
 the backend's acceptance outcome alone is not proof of model incorporation.
 
+The optional `_session/input_receipts` and `_session/acknowledge_inputs` recovery
+controls require a session loaded on this connection, the same tool-access scope,
+and a current verified conversation grant. They neither create a work lifecycle
+nor renew input authority; revoked access also blocks recovery. Acknowledgment
+records an explicit recovery decision, not permission to replay uncertain work.
+
 There is one explicit negative-acknowledgment path for ambient input: when the
 matching backend steering response is definitely `promptRequired`, Instance can
 restore that same attention ticket for the client's deferred ordinary prompt.
@@ -50,6 +56,14 @@ The response includes `_meta["com.microsoft.amplifier.attention"]` with `id`,
 and cancellation checks still apply. Original timestamps and the claimed budget
 slot are retained; neither expiry nor authority is renewed. Expired/revoked
 offers, `failed`, lost replies and unknown outcomes never gain a retry ticket.
+
+That proven-unapplied ticket may survive the transport closing only when its
+source-issued audience is bound to a saved session. A reconnect must use the
+same authenticated principal, saved session and freshly authorized source
+binding. Instance atomically rebinds and consumes the original ticket once;
+there is no fresh evaluation, expiry extension or extra budget slot. Missing
+source proof fails closed. Ordinary unused offers are still cancelled on
+transport close, and explicit cancellation invalidates this handoff too.
 
 ## Optional conversation continuity
 

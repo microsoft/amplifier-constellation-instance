@@ -40,7 +40,14 @@ fn is_turn_input(method: &str) -> bool {
 }
 
 fn is_session_method(method: &str) -> bool {
-    method.starts_with("session/") || method == STEERING_METHOD
+    method.starts_with("session/") || method == STEERING_METHOD || is_input_recovery(method)
+}
+
+fn is_input_recovery(method: &str) -> bool {
+    matches!(
+        method,
+        "_session/input_receipts" | "_session/acknowledge_inputs"
+    )
 }
 
 struct ConnectionGuard {
@@ -53,7 +60,7 @@ impl Drop for ConnectionGuard {
             connections.remove(&self.id);
         }
         context::revoke_connection(&self.state, &self.id);
-        crate::attention::cancel(&self.state, &self.id, None);
+        crate::attention::disconnect(&self.state, &self.id);
         let _ = self
             .state
             .event("acp.disconnected", json!({"connection_id": self.id}));
@@ -416,6 +423,11 @@ async fn relay_connection(
                                 continue;
                             }
                         }
+                        if is_input_recovery(&method) && (value.get("id").is_none()
+                            || !value["params"]["sessionId"].as_str().is_some_and(|sid| loaded_sessions.contains(sid))) {
+                            reject_request(&outgoing, &value, -32602, "Input recovery needs a request ID and a session loaded on this connection").await?;
+                            continue;
+                        }
                         if method == crate::attention::METHOD {
                             let Some(id)=value.get("id").cloned() else {continue;};
                             let prepared=(|| -> Result<_> {
@@ -446,7 +458,7 @@ async fn relay_connection(
                         }
                         if matches!(method.as_str(),"session/cancel"|"session/close")
                             && let Some(sid)=value["params"]["sessionId"].as_str() {
-                            crate::attention::cancel(&state,&connection_id,Some(sid));
+                            crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
                             pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                         }
                         if method == crate::identity::METHOD {
@@ -505,6 +517,12 @@ async fn relay_connection(
                                     reject_request(&outgoing, &value, -32002, "Load this session with its verified conversation grant before using it").await?;
                                     continue;
                                 }
+                        if is_input_recovery(&method)
+                            && let Some(prepared)=value["params"]["sessionId"].as_str().and_then(|sid|session_context.get(sid))
+                            && context::revalidate(&state,&prepared.hash).await.is_err() {
+                            reject_request(&outgoing,&value,-32002,"Conversation access changed; reload with a current verified grant").await?;
+                            continue;
+                        }
                         if matches!(method.as_str(), "session/new" | "session/load" | "session/resume") {
                             let requires_tools = value["params"]["sessionId"].as_str().map(|sid| state.get_record("session_tool_access", sid)).transpose()?.flatten().is_some();
                             match tool_connections::prepare(&state, auth_headers.as_ref(), &mut value["params"], http_mcp_supported, requires_tools) {
@@ -527,7 +545,7 @@ async fn relay_connection(
                         }
                         if method=="session/prompt" && value["params"]["_meta"].get(crate::attention::META).is_none()
                             && let Some(sid)=value["params"]["sessionId"].as_str(){
-                            crate::attention::cancel(&state,&connection_id,Some(sid));
+                            crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
                             pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                         }
                         if is_turn_input(&method) && value["params"]["prompt"].is_array() {
@@ -582,7 +600,7 @@ async fn relay_connection(
                     if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                     if value["method"].as_str().is_some_and(is_turn_input) && let Some(metadata)=value["params"]["_meta"].as_object_mut().and_then(|m|m.remove(crate::attention::META)) {
                         let sid=value["params"]["sessionId"].as_str().unwrap_or("");
-                        match crate::attention::consume(&state,&principal,&connection_id,sid,&metadata) {
+                        match crate::attention::consume(&state,&principal,&connection_id,sid,&metadata,session_context.get(sid).map(|p|&p.binding)) {
                             Ok(id)=>{
                                 if value["method"]==STEERING_METHOD && let Some(request_id)=value.get("id") {
                                     pending_steering_attention.insert(request_id.to_string(),(id.clone(),sid.to_owned()));

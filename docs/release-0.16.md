@@ -19,7 +19,15 @@ ticket for the client's deferred prompt. The source timestamp, original expiry,
 audience, policy and claimed budget slot stay unchanged. Expired or revoked
 offers, changed source evidence, explicit cancellation, failed responses and
 unknown delivery never receive a new retry authorization. Repeated delivery
-cannot consume the restored offer twice.
+cannot consume the restored offer twice. This includes the real connector's
+new-transport handoff: only a proven-unapplied ticket with a verified saved
+source binding can survive disconnect. Reloading the same session as the same
+principal with a fresh audience grant atomically consumes it once. Concurrent
+reconnects, changed source/authority and missing proof cannot reuse that ticket.
+
+Optional input-receipt reads and recovery acknowledgments require a loaded
+session and current conversation/tool authorization. They cannot bypass a grant
+revoked after session load and never start an additional work lifecycle.
 
 The native runtime pin in this candidate remains Constellation 0.9.0 pending its
 separate coordinated release. That engine does not implement the new native
@@ -27,10 +35,11 @@ steering path. A steering-capable backend and a client that preserves ordered
 input are required to exercise this feature. Each installation continues to own
 its runtime files, credentials, history and updates independently.
 
-Validation includes 127 Rust tests, with one existing opt-in native-runtime
+Validation includes 133 Rust tests, with one existing opt-in native-runtime
 history test excluded from the default suite. Real-subprocess fixtures exercise
 pending approval continuity, source/audience checks, receipt forwarding, prompt
-completion races, ticket expiry/revocation and unchanged admission budgets.
+completion races, real two-transport and concurrent reconnects, ticket
+expiry/revocation and unchanged admission budgets.
 Clippy with warnings denied and formatting checks pass. Five new relay
 regressions fail against the previous boundary; the completion-race regression
 also fails before the negative-acknowledgment repair. These are protocol-fixture
