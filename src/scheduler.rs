@@ -718,6 +718,8 @@ async fn response(
     deadline: tokio::time::Instant,
     tool_ids: &mut BTreeSet<String>,
 ) -> Result<Value, &'static str> {
+    let mut answer = crate::answer::Answer::default();
+    let mut prefix: Option<String> = None;
     loop {
         let r = current(state, run_id).map_err(|_| "state_unavailable")?;
         if let Some(reason) = interruption(state, &r) {
@@ -759,10 +761,11 @@ async fn response(
                     {
                         return Err("output_budget");
                     }
+                    let prefix =
+                        prefix.get_or_insert_with(|| r["report"].as_str().unwrap_or("").to_owned());
+                    answer.observe(u).map_err(|_| "output_budget")?;
                     update(state, run_id, |r| {
-                        let mut report = r["report"].as_str().unwrap_or("").to_owned();
-                        report.push_str(text);
-                        r["report"] = json!(report);
+                        r["report"] = json!(format!("{}{}", prefix, answer.text()));
                         r["output_bytes"] = json!(count + text.len());
                     })
                     .map_err(|_| "state_unavailable")?;
