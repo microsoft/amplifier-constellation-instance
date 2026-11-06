@@ -166,6 +166,55 @@ GitHub identities. Read/write tools require the appropriate ACP client scopes
 and repository authorization. Existing nested command/network restrictions
 continue to apply; containerization does not silently turn them off.
 
+## Optional administrator access inside one container
+
+Owners may let an agent install operating-system packages and change its own
+container with `sudo -n`. Build the optional image for the owner's UID/GID:
+
+```sh
+docker build -f ops/container/Dockerfile.admin \
+  --build-arg BASE_IMAGE=constellation-installation:local \
+  --build-arg AGENT_UID="$(id -u)" --build-arg AGENT_GID="$(id -g)" \
+  -t constellation-installation-admin:local ops/container
+```
+
+Set the private manifest's `image` to that image and `container_admin` to `true`.
+The installer checks the image's administrator/UID/GID labels before changing
+services. The default remains a read-only container with no privilege elevation.
+In administrator mode the agent still starts as its ordinary user. Its private
+OS layer is writable, sudo is passwordless, and nine explicit process/file
+capabilities support package installation. Mount administration, raw networking,
+host tracing and device creation remain excluded. AppArmor, seccomp, resource
+limits, the isolated network, and host firewall rules remain in force. Never
+add host homes, other installations, Docker sockets or host namespaces.
+
+This grants control over **all files and credentials mounted in this installation**,
+not just the current workspace. Containers share the host kernel; this is not a
+VM boundary. Choose a VM or stronger independent host boundary when that is
+required. See [Docker security](https://docs.docker.com/engine/security/).
+
+For the native runtime, explicitly configure `command_boundary: "container"`
+and `command_network: "inherit"` after installing the administrator image. Runtime
+requires the installer's read-only `/etc/constellation-container.json` marker;
+it will not fall back to unrestricted host commands. Command environment
+variables are still cleared and command time/output/cancellation limits remain.
+The image disables sudo's extra PTY so root children remain in the bounded
+command process group. Do not override that setting. Other ACP engines keep
+their own command/approval policy; check it independently.
+
+Package changes survive stop/start of the same container, but recreating a
+container from its base image discards its writable OS layer. Before replacement,
+stop at an idle handoff, retain the stopped previous container (and an image
+snapshot if installed packages must be retained), and preserve all installation
+mounts, route definitions and identities. Do not snapshot mounted secrets into
+a distributable image. Restoring the previous container plus its original
+manifest is the rollback path. No existing task/session should be renewed.
+
+The administrator image sets `AGENT_BROWSER_SOCKET_DIR=/tmp/ab` to avoid Unix
+socket paths exceeding their length limit. Browser executables and native
+libraries still need installation for the container's architecture; a browser
+available on the host is not automatically available inside the container.
+
 ## Tests
 
 ```sh

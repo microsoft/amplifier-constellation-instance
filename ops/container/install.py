@@ -5,8 +5,24 @@ Requires an owner-reviewed manifest; this is an admin tool, not an agent tool.
 """
 import argparse, ipaddress, json, os, pathlib, pwd, re, shutil, subprocess
 
+# Package installation needs these ordinary process/file capabilities. Never
+# include host administration, raw sockets, device creation or tracing caps.
+ADMIN_CAPABILITIES = ('CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'KILL',
+                      'SETGID', 'SETUID', 'SETFCAP', 'SYS_CHROOT')
+
+def isolation_arguments(container_admin=False):
+    args = ['--cap-drop', 'ALL']
+    if container_admin:
+        for capability in ADMIN_CAPABILITIES:
+            args.extend(['--cap-add', capability])
+    else:
+        args.extend(['--security-opt', 'no-new-privileges', '--read-only'])
+    return args
+
 def validate_manifest(manifest):
     """Fail before creating files or touching services; manifests are admin input."""
+    if not isinstance(manifest.get('container_admin', False), bool):
+        raise ValueError('container_admin must be an explicit boolean')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,62}', manifest['container']):
         raise ValueError('Invalid container name')
     state = pathlib.Path(manifest['state'])
@@ -42,6 +58,13 @@ def install(manifest):
     validate_manifest(manifest)
     if subprocess.run(['docker','inspect',manifest['container']],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode == 0:
         raise ValueError('Container already exists; stop and back it up before an explicit replacement')
+    admin = manifest.get('container_admin', False)
+    if admin:
+        labels = json.loads(run('docker', 'image', 'inspect', '--format', '{{json .Config.Labels}}', manifest['image'])) or {}
+        if (labels.get('com.microsoft.constellation.container-admin') != '1'
+                or labels.get('com.microsoft.constellation.owner-uid') != str(os.getuid())
+                or labels.get('com.microsoft.constellation.owner-gid') != str(os.getgid())):
+            raise ValueError('Build Dockerfile.admin for this owner before enabling container_admin')
     source=pathlib.Path(__file__).resolve().parent
     state=pathlib.Path(manifest['state']).resolve();state.mkdir(parents=True,mode=0o700,exist_ok=True)
     os.chmod(state,0o700)
@@ -56,22 +79,23 @@ def install(manifest):
     services=manifest['services']
     (state/'services.json').write_text(json.dumps({'container':name,'services':services},indent=2))
     (state/'bridge.json').write_text(json.dumps({'socket_directory':str(state/'sockets'),'routes':manifest.get('routes',[])},indent=2))
-    (state/'container.json').write_text(json.dumps({'services':[],'loopback_ports':[r['listen'] for r in manifest.get('routes',[])]}))
+    (state/'container.json').write_text(json.dumps({'services':[],'loopback_ports':[r['listen'] for r in manifest.get('routes',[])], 'container_admin': admin, 'command_boundary': 'container' if admin else 'workspace'}))
     # A private bridge; peer traffic is disabled and host firewall controls egress.
     network='constellation-isolated'
     if subprocess.run(['docker','network','inspect',network],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
         run('docker','network','create','--subnet','172.30.240.0/24','--opt','com.docker.network.bridge.name=br-constel','--opt','com.docker.network.bridge.enable_icc=false',network)
     args=['docker','create','--name',name,'--hostname',name,'--network',network,'--ip',manifest['ip'],'--user',f'{os.getuid()}:{os.getgid()}',
-          '--cap-drop','ALL','--security-opt','no-new-privileges','--security-opt','apparmor=constellation-installation',
+          *isolation_arguments(admin), '--security-opt','apparmor=constellation-installation',
           '--security-opt','seccomp='+str(state/'seccomp.json'),'--security-opt','systempaths=unconfined',
-          '--read-only','--pids-limit','512','--memory','6g','--memory-swap','6g','--cpus','4',
+          '--pids-limit','512','--memory','6g','--memory-swap','6g','--cpus','4',
           '--sysctl','net.ipv6.conf.all.disable_ipv6=1','--tmpfs','/tmp:rw,nosuid,nodev,size=1g',
           '--tmpfs','/run:rw,nosuid,nodev,size=16m',
           '--mount',f'type=bind,src={state}/sockets,dst=/run/constellation,readonly',
           '--mount',f'type=bind,src={state}/container.json,dst=/etc/constellation-container.json,readonly',
           '--mount',f'type=bind,src={state}/home,dst=/home/agent',
-          '--mount',f'type=bind,src={state}/passwd,dst=/etc/passwd,readonly',
           '--label','com.microsoft.constellation.isolation=installation']
+    if not admin:
+        args.extend(['--mount',f'type=bind,src={state}/passwd,dst=/etc/passwd,readonly'])
     for mount in manifest['mounts']:
         path=str(pathlib.Path(mount['path']).resolve())
         if path in ['/',str(pathlib.Path.home()),'/var/run/docker.sock','/run/docker.sock','/etc']:
