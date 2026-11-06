@@ -9,6 +9,9 @@ repository = "https://github.com/microsoft/amplifier-constellation-instance"
 description = "Independent installed agent identity, setup, profiles, authorized context, work, and observability."
 
 [dependencies]
+amplifier-acp-connection = { path = "../contracts/crates/acp-connection" }
+blocking = "1.6"
+tokio-util = { version = "0.7", features = ["compat"] }
 anyhow = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
