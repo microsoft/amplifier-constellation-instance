@@ -310,3 +310,12 @@ pub async fn save(
     )?;
     Ok(Json(result))
 }
+
+/// Content-free execution evidence, exposed independently of this UI.
+pub async fn observations(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    auth::check(&state, &headers, "observe", false)?;
+    Ok(Json(invoke(&state, "diagnostics", None).await?))
+}

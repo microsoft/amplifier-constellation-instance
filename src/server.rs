@@ -124,6 +124,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/native-config/schema", get(native_config::schema))
         .route(
+            "/api/v1/native-observations",
+            get(native_config::observations),
+        )
+        .route(
             "/api/v1/native-account",
             get(native_account::status).delete(native_account::disconnect),
         )
@@ -476,6 +480,7 @@ async fn descriptor(
             .unwrap()
             .push(json!("agent-instance.native-account/1"));
         document["operations"].as_array_mut().unwrap().extend([
+            json!({"path":"native-observations","methods":["GET"],"scope":"observe"}),
             json!({"path":"native-account","methods":["GET","DELETE"],"scope":"admin"}),
             json!({"path":"native-account/login","methods":["GET","POST","DELETE"],"scope":"admin"}),
             json!({"path":"native-account/models","methods":["POST"],"scope":"admin"})]);

@@ -1068,17 +1068,9 @@ async fn steering_preserves_approval_context_receipts_and_one_work_lifecycle() {
     assert_eq!(r["result"]["outcome"], "injected", "{r}");
     let forwarded = &r["result"]["fixtureParams"];
     assert_eq!(forwarded["_meta"], params["_meta"]);
-    assert_eq!(forwarded["prompt"][1], params["prompt"][0]);
-    assert!(
-        forwarded["prompt"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Name: Fixture individual")
-    );
-    assert_eq!(
-        forwarded["prompt"][0]["_meta"]["com.microsoft.amplifier.context-snapshot"]["version"],
-        1
-    );
+    // The same active turn already has the unchanged installation context.
+    // Steering preserves the source block without duplicating that context.
+    assert_eq!(forwarded["prompt"], params["prompt"]);
     let receipt =
         json!({"inputId":"durable-input-1","state":"incorporated","turnId":"fixture-turn-200"});
     assert_eq!(updates.len(), 1);
@@ -1501,4 +1493,204 @@ async fn steering_negative_ack_never_revives_expired_revoked_or_ambiguous_admiss
         assert_eq!(c.response(204).await.0["error"]["code"], -32002, "{case}");
         c.disconnect().await;
     }
+}
+
+#[tokio::test]
+async fn advertised_maintenance_is_undecorated_denies_callbacks_and_has_durable_terminal_receipt() {
+    let install = Installation::new();
+    install
+        .state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .backend
+        .as_mut()
+        .unwrap()
+        .env
+        .insert("FIXTURE_MAINTENANCE".into(), "1".into());
+    let mut c = install.connect();
+    let init = c.initialize().await;
+    assert_eq!(
+        init["result"]["_meta"]["io.github.bkrabach.agent-instance"]["maintenance"]["version"],
+        1
+    );
+    let sid = c.new_session(&install.work).await;
+    // Commands are asynchronous after session/new; synchronize on their update.
+    loop {
+        if c.recv().await["params"]["update"]["sessionUpdate"] == "available_commands_update" {
+            break;
+        }
+    }
+    let op = "fixture-maintenance";
+    let params = json!({"sessionId":sid,"prompt":[{"type":"text","text":"/compact"}],"_meta":{agent_instance::maintenance::META:{"version":1,"operation":"compact","operationId":op}}});
+    c.send(801, "session/prompt", params.clone()).await;
+    let (reply, updates) = c.response(801).await;
+    assert_eq!(reply["result"]["exactPrompt"], params["prompt"]);
+    assert_eq!(
+        reply["result"]["_meta"][agent_instance::maintenance::META]["status"],
+        "completed"
+    );
+    assert!(
+        !updates
+            .iter()
+            .any(|v| v["method"] == "session/request_permission"
+                || v["params"]["update"]["sessionUpdate"] == "compaction_summary_chunk")
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|v| v["params"]["update"]["sessionUpdate"] == "tool_call_update")
+    );
+    let callback: Value = serde_json::from_slice(
+        &std::fs::read(
+            install
+                ._dir
+                .path()
+                .join("fixture-state/maintenance-callback.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(callback["outcome"]["outcome"], "cancelled");
+    c.send(
+        802,
+        agent_instance::maintenance::METHOD,
+        json!({"sessionId":sid,"operationId":op}),
+    )
+    .await;
+    assert_eq!(c.response(802).await.0["result"]["status"], "completed");
+    c.send(803, "session/prompt", params).await;
+    assert!(c.response(803).await.0.get("error").is_some());
+    c.send(
+        804,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[{"type":"text","text":"Normal work"}]}),
+    )
+    .await;
+    assert_eq!(c.response(804).await.0["result"]["stopReason"], "end_turn");
+    c.task.abort();
+}
+
+#[test]
+fn maintenance_exclusion_spans_connections_and_releases_on_drop() {
+    let install = Installation::new();
+    let turn = agent_instance::maintenance::admit(&install.state, "s", false).unwrap();
+    assert!(agent_instance::maintenance::admit(&install.state, "s", true).is_err());
+    drop(turn);
+    let compact = agent_instance::maintenance::admit(&install.state, "s", true).unwrap();
+    assert!(agent_instance::maintenance::admit(&install.state, "s", false).is_err());
+    assert!(agent_instance::maintenance::admit(&install.state, "other", false).is_ok());
+    drop(compact);
+    assert!(agent_instance::maintenance::admit(&install.state, "s", false).is_ok());
+}
+
+#[test]
+fn source_delivery_is_a_private_revision_fact_not_completion_or_implicit_deduplication() {
+    use agent_instance::source_delivery as delivery;
+    let install = Installation::new();
+    let at = agent_instance::state::now_ms();
+    let source = json!({"id":"public-source","revision":"r1","occurredAt":at});
+    let params = json!({"sessionId":"s","_meta":{"steering":{"inputId":"one"},delivery::META:{"version":1,"sources":[source]}}});
+    delivery::register(&install.state, "room-a", &params).unwrap();
+    delivery::observe(&install.state, "room-a", "s", "one", "received").unwrap();
+    let query = json!({"sessionId":"s","sources":[source]});
+    let read = || delivery::query(&install.state, "room-a", &query).unwrap();
+    assert_eq!(read()["receipts"][0]["incorporated"], false);
+    delivery::observe(&install.state, "room-a", "s", "one", "incorporated").unwrap();
+    delivery::observe(&install.state, "room-a", "s", "one", "unknown").unwrap();
+    assert_eq!(read()["receipts"][0]["incorporated"], true);
+    assert_eq!(read()["receipts"][0]["completion"], "not_established");
+    assert_eq!(
+        delivery::query(&install.state, "room-b", &query).unwrap()["receipts"],
+        json!([])
+    );
+    let mut changed = query.clone();
+    changed["sources"][0]["revision"] = json!("r2");
+    assert_eq!(
+        delivery::query(&install.state, "room-a", &changed).unwrap()["receipts"],
+        json!([])
+    );
+    let mut duplicate = params.clone();
+    duplicate["_meta"][delivery::META]["sources"][0]["revision"] = json!("different");
+    assert!(delivery::register(&install.state, "room-a", &duplicate).is_err());
+    assert!(delivery::register(&install.state, "room-a", &params).is_ok());
+    let mut second = params.clone();
+    second["_meta"]["steering"]["inputId"] = json!("later-unknown");
+    delivery::register(&install.state, "room-a", &second).unwrap();
+    assert_eq!(read()["receipts"][0]["incorporated"], true);
+    let a = install.state.clone();
+    let b = install.state.clone();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for _ in 0..30 {
+                delivery::observe(&a, "room-a", "s", "later-unknown", "incorporated").unwrap();
+            }
+        });
+        scope.spawn(move || {
+            for _ in 0..30 {
+                delivery::observe(&b, "room-a", "s", "later-unknown", "received").unwrap();
+            }
+        });
+    });
+    let key = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(json!(["room-a", "s", "later-unknown"]).to_string())
+    );
+    assert_eq!(
+        install
+            .state
+            .get_record("source_delivery", &key)
+            .unwrap()
+            .unwrap()["incorporated"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn source_facts_follow_real_steering_envelopes_without_replaying_or_settling_work() {
+    use agent_instance::source_delivery as delivery;
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    client
+        .send(
+            200,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"REQUEST_PERMISSION"}]}),
+        )
+        .await;
+    let permission = client.recv().await;
+    let source = json!({"id":"public-event","revision":"original-revision","occurredAt":agent_instance::state::now_ms()});
+    let mut p = awareness(&sid, json!(200));
+    p["_meta"][delivery::META] = json!({"version":1,"sources":[source]});
+    client.send(201, STEERING_METHOD, p.clone()).await;
+    let (result, updates) = client.response(201).await;
+    assert_eq!(result["result"]["outcome"], "injected");
+    assert!(
+        updates.iter().any(
+            |v| v["params"]["update"]["_meta"]["io.github.bkrabach.agent-runtime"]["inputReceipt"]
+                ["state"]
+                == "incorporated"
+        )
+    );
+    client
+        .send(
+            202,
+            delivery::METHOD,
+            json!({"sessionId":sid,"sources":[source]}),
+        )
+        .await;
+    let r = client.response(202).await.0;
+    assert_eq!(r["result"]["receipts"][0]["incorporated"], true, "{r}");
+    assert_eq!(r["result"]["receipts"][0]["completion"], "not_established");
+    // Querying never releases the outstanding tool request or starts another turn.
+    assert!(!install.work.join("approved.txt").exists());
+    client.tx.send(json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"reject"}}})).await.unwrap();
+    assert_eq!(
+        client.response(200).await.0["result"]["stopReason"],
+        "end_turn"
+    );
+    client.disconnect().await;
 }

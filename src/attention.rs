@@ -217,8 +217,10 @@ async fn query(
     installed: &crate::config::InstanceConfig,
     config: &Config,
     context: &Context,
+    delivery: Value,
 ) -> Result<Value> {
     let mut evidence = json!(context);
+    evidence["prior_delivery"] = delivery;
     evidence["installed_purpose"] = json!(installed.purpose);
     let instructions = attention_policy::instructions();
     let choices = attention_policy::choices();
@@ -260,7 +262,25 @@ pub async fn evaluate(state: Arc<AppState>, mut row: Value, event: Event) -> Res
     let config = installed.attention.as_ref().context("Attention disabled")?;
     state.event("attention.requested", json!({"id":row["id"]}))?;
     let start = now_ms();
-    let result = query(&state, &installed, config, &event.context)
+    let sources: Vec<_> = event
+        .context
+        .messages
+        .iter()
+        .filter_map(|m| {
+            Some(crate::source_delivery::Source {
+                id: m.id.clone(),
+                revision: m.revision.clone()?,
+                occurred_at: m.occurred_at?,
+            })
+        })
+        .collect();
+    let delivery = crate::source_delivery::facts(
+        &state,
+        row["principal"].as_str().unwrap_or(""),
+        &event.session_id,
+        &sources,
+    )?;
+    let result = query(&state, &installed, config, &event.context, delivery.clone())
         .await
         .and_then(|v| {
             let answer = attention_policy::normalize(&v)?;
@@ -304,7 +324,7 @@ pub async fn evaluate(state: Arc<AppState>, mut row: Value, event: Event) -> Res
     state.event("attention.evaluated",json!({"id":row["id"],"judgment":row["judgment"],"reason":row["reason"],"status":row["status"],"investigate":investigate}))?;
     if row["status"] == "offered" {
         Ok(
-            json!({"action":"engage","reason":reason,"id":row["id"],"ticket":ticket,"expiresAt":row["expires_at"]}),
+            json!({"action":"engage","reason":reason,"id":row["id"],"ticket":ticket,"expiresAt":row["expires_at"],"_meta":{crate::source_delivery::META:{"priorDelivery":delivery}}}),
         )
     } else {
         Ok(
