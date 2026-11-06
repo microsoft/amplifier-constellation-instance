@@ -20,6 +20,7 @@ pub fn now_ms() -> i64 {
 }
 pub struct AppState {
     pub attention_lock: Mutex<()>,
+    pub maintenance_activity: Mutex<BTreeMap<String, (usize, bool)>>,
     pub home: PathBuf,
     pub profile_lock: Mutex<()>,
     pub config: RwLock<ConfigDocument>,
@@ -58,6 +59,7 @@ impl AppState {
             .unwrap_or(0);
         Ok(Self {
             attention_lock: Mutex::new(()),
+            maintenance_activity: Mutex::new(BTreeMap::new()),
             home,
             profile_lock: Mutex::new(()),
             config: RwLock::new(config),

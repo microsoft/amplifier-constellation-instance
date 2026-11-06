@@ -7,7 +7,8 @@ config=home/'runtime.json'; credentials=home/'accounts/chatgpt/credentials.json'
 def revision(): return hashlib.sha256(config.read_bytes()).hexdigest()
 def public():
     return {'connected':credentials.exists(),'sharing':credentials.exists(),'email':'fixture@example.invalid','access_token':'must-never-leave-engine'}
-if action=='chatgpt-status': print(json.dumps(public()))
+if action=='diagnostics': print(json.dumps({'profile':'agent-runtime.observability/1','counts':{'model.started':12},'model_step_latency_ms':{'p50':1200,'p95':4500},'latest_context':{'model_context_bytes':12345},'latest_stop':{'reason':'completed'},'reported_usage':{'measured_responses':11,'cache_read_tokens':800},'coverage':{'sampled_events':100,'complete_store_window':True}}))
+elif action=='chatgpt-status': print(json.dumps(public()))
 elif action=='chatgpt-models': print(json.dumps({'models':[{'slug':'retired-account-model','display_name':'Retired model'},{'slug':'fixture-account-model','display_name':'Fixture account model','private':'do not forward'}]}))
 elif action=='chatgpt-sign-out':
     credentials.unlink(missing_ok=True); print(json.dumps({'connected':False,'revoked':True,'registration_preserved':True}))

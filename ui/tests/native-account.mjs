@@ -14,7 +14,7 @@ try{
  cli('init','--name','Native account fixture','--bind','127.0.0.1');
  const doc=JSON.parse(await fs.readFile(home+'/config.json','utf8'));doc.config.setup_complete=true;
  await fs.mkdir(home+'/engine');await fs.copyFile(path.join(root,'tests/fixtures/native_account.py'),home+'/engine/agent-runtime');await fs.chmod(home+'/engine/agent-runtime',0o700);
- await fs.writeFile(home+'/engine/runtime.json',JSON.stringify({provider:{kind:'openai',model:'previous-model',endpoint:'https://api.openai.com/v1/responses',api_key_env:'OPENAI_API_KEY',auth:'auto',native:{}},mode:'ask',decisions:[]}));
+ await fs.writeFile(home+'/engine/runtime.json',JSON.stringify({provider:{kind:'openai',model:'previous-model',endpoint:'https://api.openai.com/v1/responses',api_key_env:'OPENAI_API_KEY',auth:'auto',native:{}},mode:'ask',decisions:[],limits:{turn_seconds:0,provider_idle_seconds:300},context:{provider_compaction:true,prompt_caching:true,compact_threshold_tokens:100000}}));
  doc.config.backend={command:'${AGENT_HOME}/engine/agent-runtime',args:['--home','${AGENT_HOME}/engine','acp'],env:{},secret_env:{},working_directory:'${AGENT_HOME}/workspace',allowed_working_roots:['${AGENT_HOME}/workspace']};await fs.writeFile(home+'/config.json',JSON.stringify(doc),{mode:0o600});
  service=spawn(binary,['--home',home,'serve'],{stdio:'ignore'});let origin;
  for(let i=0;i<100;i++){try{origin=JSON.parse(await fs.readFile(home+'/endpoints.json','utf8')).base_url;break;}catch{}await new Promise(r=>setTimeout(r,100));}assert(origin);
@@ -42,6 +42,22 @@ try{
  assert.equal((await call('GET','native-config')).config.provider.kind,'openai');
  await page.evaluate(()=>window.agentInstanceControl.perform('native.load'));
  pass('Retired settings remain editable; runtime model defaults are staged only on explicit request');
+ await page.evaluate(()=>window.agentInstanceControl.perform('native.details'));
+ await page.locator('[data-draft="native.turn_seconds"]').waitFor();
+ await page.evaluate(()=>window.agentInstanceControl.setDraft('native.turn_seconds',0));
+ await page.evaluate(()=>window.agentInstanceControl.setDraft('native.provider_idle_seconds',420));
+ await page.evaluate(()=>window.agentInstanceControl.perform('native.preset'));
+ await page.evaluate(()=>window.agentInstanceControl.perform('native.save'));
+ assert.equal((await call('GET','native-config')).config.limits.provider_idle_seconds,420);
+ await page.locator('[data-control="nav.dashboard"]').click();
+ await page.evaluate(()=>window.agentInstanceControl.perform('native.observations'));
+ await page.locator('[data-control="native.observations"]').waitFor();
+ const measurements=await page.locator('[data-control="native.observations"]').textContent();
+ assert(measurements.includes('12,345'));assert(measurements.includes('4.5 s'));assert(measurements.includes('800'));
+ await page.setViewportSize({width:390,height:844});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await page.setViewportSize({width:1400,height:1000});
+ await page.locator('[data-control="nav.configuration"]').click();
+ pass('Healthy-work settings and content-free execution measurements work through the same programmable UI and API');
+
  await page.locator('[data-draft="account.location"]').selectOption('remote');await page.locator('[data-action="native.account.connect"]').click();const pending=await wait('pending');
  await page.locator('[data-action="native.account.tunnel.ready"]').waitFor();assert.equal(await page.locator('[data-action="native.account.open"]').count(),0);assert(pending.tunnel_command.includes('127.0.0.1:'));
  let view=await page.evaluate(()=>window.agentInstanceControl.getState());assert.equal(view.state.draft.account.location,'remote');assert(!JSON.stringify(view).includes('ephemeral-fixture-state'));

@@ -63,6 +63,16 @@ def prompt(req):
     if "OVERSIZE_BACKEND_FRAME" in text:
         update(sid, "x" * 16384)
         return
+    if text == "/compact":
+        # A slash command is deterministic; decoration would bypass this branch.
+        done=threading.Event();callbacks["maintenance-permission"]={"event":done}
+        emit({"jsonrpc":"2.0","id":"maintenance-permission","method":"session/request_permission","params":{"sessionId":sid,"options":[{"optionId":"yes","kind":"allow_once","name":"Allow"}],"toolCall":{"toolCallId":"forbidden","title":"Write during maintenance"}}})
+        done.wait(4)
+        (HOME/"maintenance-callback.json").write_text(json.dumps(callbacks["maintenance-permission"].get("response")))
+        update(sid,"Do not turn this summary into a final answer","compaction_summary_chunk")
+        emit({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"compaction_update","compactionId":uuid.uuid4().hex,"status":"completed"}}})
+        complete_prompt(req,{"stopReason":"end_turn","exactPrompt":values})
+        return
     event = threading.Event()
     cancel[sid] = event
     if "SPAWN_CHILD" in text:
@@ -142,6 +152,8 @@ for line in sys.stdin:
             active.add(sid)
             persist(sid)
             answer(req, {"sessionId": sid, "configOptions": [{"id": "model", "name": "Model", "type": "select", "currentValue": "fixture", "options": [{"value": "fixture", "name": "Fixture"}]}]})
+            if os.getenv("FIXTURE_MAINTENANCE") == "1":
+                emit({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Compact conversation"}]}}})
         elif method == "session/list":
             answer(req, {"sessions": [{"sessionId": p.stem, "cwd": json.loads(p.read_text())["cwd"]} for p in HOME.glob("*.json")]})
         elif method in ("session/load", "session/resume"):

@@ -199,7 +199,10 @@ async fn detached_acp_execution_persists_report_and_requests_review_not_completi
     let init: Value =
         serde_json::from_slice(&std::fs::read(f.dir.path().join("work/initialize.json")).unwrap())
             .unwrap();
-    assert_eq!(init["clientCapabilities"], json!({}));
+    assert_eq!(
+        init["clientCapabilities"],
+        json!({"session":{"compaction":{}}})
+    );
     let session: Value =
         serde_json::from_slice(&std::fs::read(f.dir.path().join("work/session.json")).unwrap())
             .unwrap();

@@ -246,3 +246,44 @@ fn owner_scope_is_not_a_synthetic_room_and_zero_population_is_unknown() {
         "evaluating"
     );
 }
+
+#[tokio::test]
+async fn attention_receives_verified_source_facts_but_still_makes_its_own_judgment() {
+    use agent_instance::source_delivery as delivery;
+    let seen = Arc::new(std::sync::Mutex::new(Value::Null));
+    let capture = seen.clone();
+    let route = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |axum::Json(v): axum::Json<Value>| {
+            let capture = capture.clone();
+            async move {
+                *capture.lock().unwrap() = v;
+                axum::Json(answer("engage"))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, route).await.unwrap() });
+    let (_home, s) = install(format!("http://{addr}/"), 2);
+    let mut e = event("source");
+    let at = now_ms();
+    e.context.messages[0].revision = Some("r1".into());
+    e.context.messages[0].occurred_at = Some(at);
+    delivery::register(&s,"p",&json!({"sessionId":"session","_meta":{"steering":{"inputId":"prior"},delivery::META:{"version":1,"sources":[{"id":"source","revision":"r1","occurredAt":at}]}}})).unwrap();
+    delivery::observe(&s, "p", "session", "prior", "incorporated").unwrap();
+    let row = attention::reserve(&s, "p", "c", &e, None).unwrap();
+    let result = attention::evaluate(s.clone(), row, e).await.unwrap();
+    assert_eq!(
+        result["action"], "engage",
+        "Facts must not replace model judgment"
+    );
+    let wire = seen.lock().unwrap().to_string();
+    assert!(
+        wire.contains("not_established")
+            && wire.contains("prior_delivery")
+            && wire.contains("incorporated"),
+        "{wire}"
+    );
+    server.abort();
+}
