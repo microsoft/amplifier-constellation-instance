@@ -60,6 +60,18 @@ class ContainerContracts(unittest.TestCase):
                 install.install(self.manifest)
         self.assertEqual(list(pathlib.Path(self.temp.name).iterdir()), [])
 
+    def test_matching_uid_does_not_allow_a_different_service_owner_name(self):
+        self.manifest.update(container_admin=True, image='wrong-owner-name')
+        labels = {'com.microsoft.constellation.container-admin': '1',
+                  'com.microsoft.constellation.owner-uid': str(install.os.getuid()),
+                  'com.microsoft.constellation.owner-gid': str(install.os.getgid()),
+                  'com.microsoft.constellation.owner-name': 'different-service-owner'}
+        with patch.object(install.subprocess, 'run') as process, patch.object(install, 'run', return_value=json.dumps(labels)):
+            process.return_value.returncode = 1
+            with self.assertRaisesRegex(ValueError, 'Dockerfile.admin'):
+                install.install(self.manifest)
+        self.assertEqual(list(pathlib.Path(self.temp.name).iterdir()), [])
+
     def test_broad_and_control_mounts_are_rejected(self):
         for source in ['/', str(pathlib.Path.home()), '/etc', '/run/docker.sock', '/proc', '/sys', str(pathlib.Path.home()/'.ssh')]:
             with self.subTest(source=source):

@@ -63,7 +63,8 @@ def install(manifest):
         labels = json.loads(run('docker', 'image', 'inspect', '--format', '{{json .Config.Labels}}', manifest['image'])) or {}
         if (labels.get('com.microsoft.constellation.container-admin') != '1'
                 or labels.get('com.microsoft.constellation.owner-uid') != str(os.getuid())
-                or labels.get('com.microsoft.constellation.owner-gid') != str(os.getgid())):
+                or labels.get('com.microsoft.constellation.owner-gid') != str(os.getgid())
+                or labels.get('com.microsoft.constellation.owner-name') != pwd.getpwuid(os.getuid()).pw_name):
             raise ValueError('Build Dockerfile.admin for this owner before enabling container_admin')
     source=pathlib.Path(__file__).resolve().parent
     state=pathlib.Path(manifest['state']).resolve();state.mkdir(parents=True,mode=0o700,exist_ok=True)

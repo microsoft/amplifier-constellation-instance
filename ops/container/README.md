@@ -175,12 +175,14 @@ container with `sudo -n`. Build the optional image for the owner's UID/GID:
 docker build -f ops/container/Dockerfile.admin \
   --build-arg BASE_IMAGE=constellation-installation:local \
   --build-arg AGENT_UID="$(id -u)" --build-arg AGENT_GID="$(id -g)" \
+  --build-arg AGENT_NAME="$(id -un)" \
   -t constellation-installation-admin:local ops/container
 ```
 
 Set the private manifest's `image` to that image and `container_admin` to `true`.
-The installer checks the image's administrator/UID/GID labels before changing
+The installer checks the image's administrator/UID/GID/username labels before changing
 services. The default remains a read-only container with no privilege elevation.
+The username must match the configured service owner, not merely its numeric UID.
 In administrator mode the agent still starts as its ordinary user. Its private
 OS layer is writable, sudo is passwordless, and nine explicit process/file
 capabilities support package installation. Mount administration, raw networking,
