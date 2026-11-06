@@ -1,0 +1,23 @@
+# Optional writable installation image. The Docker daemon/socket and host home
+# must remain outside the container. See README.md before enabling this mode.
+ARG BASE_IMAGE=constellation-installation:local
+FROM ${BASE_IMAGE}
+USER root
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+ARG AGENT_NAME=agent
+RUN apt-get update && apt-get install -y --no-install-recommends sudo \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupmod -g ${AGENT_GID} agent \
+    && usermod -u ${AGENT_UID} -g ${AGENT_GID} agent \
+    && if [ "${AGENT_NAME}" != agent ]; then usermod -l "${AGENT_NAME}" agent; fi \
+    && printf 'Defaults:%s !use_pty\n%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "${AGENT_NAME}" "${AGENT_NAME}" > /etc/sudoers.d/constellation-agent \
+    && chmod 0440 /etc/sudoers.d/constellation-agent \
+    && visudo -cf /etc/sudoers.d/constellation-agent
+LABEL com.microsoft.constellation.container-admin="1" \
+      com.microsoft.constellation.owner-uid="${AGENT_UID}" \
+      com.microsoft.constellation.owner-gid="${AGENT_GID}" \
+      com.microsoft.constellation.owner-name="${AGENT_NAME}"
+# Keep Unix sockets short even when an agent's workspace path is long.
+ENV AGENT_BROWSER_SOCKET_DIR=/tmp/ab
+USER ${AGENT_UID}:${AGENT_GID}
