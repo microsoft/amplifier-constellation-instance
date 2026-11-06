@@ -1585,6 +1585,84 @@ fn maintenance_exclusion_spans_connections_and_releases_on_drop() {
     assert!(agent_instance::maintenance::admit(&install.state, "s", false).is_ok());
 }
 
+#[tokio::test]
+async fn compaction_fixture_summary_and_completion_share_a_fresh_identity() {
+    let install = Installation::new();
+    install
+        .state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .backend
+        .as_mut()
+        .unwrap()
+        .env
+        .insert("FIXTURE_MAINTENANCE".into(), "1".into());
+    let mut client = install.connect();
+    client
+        .send(
+            100,
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"session": {"compaction": {}}}
+            }),
+        )
+        .await;
+    assert!(client.response(100).await.0.get("result").is_some());
+    let sid = client.new_session(&install.work).await;
+    loop {
+        if client.recv().await["params"]["update"]["sessionUpdate"] == "available_commands_update" {
+            break;
+        }
+    }
+    let mut previous_id = None;
+    for id in [801, 802] {
+        client
+            .send(
+                id,
+                "session/prompt",
+                json!({
+                    "sessionId": sid,
+                    "prompt": [{"type": "text", "text": "/compact"}],
+                    "_meta": {agent_instance::maintenance::META: {
+                        "version": 1, "operation": "compact", "operationId": format!("fixture-{id}")
+                    }}
+                }),
+            )
+            .await;
+        let (reply, updates) = client.response(id).await;
+        let compaction: Vec<_> = updates
+            .iter()
+            .map(|v| &v["params"]["update"])
+            .filter(|u| {
+                matches!(
+                    u["sessionUpdate"].as_str(),
+                    Some("compaction_summary_chunk" | "compaction_update")
+                )
+            })
+            .collect();
+        assert_eq!(compaction.len(), 2);
+        assert_eq!(compaction[0]["sessionUpdate"], "compaction_summary_chunk");
+        let compaction_id = compaction[0]["compactionId"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .expect("summary requires a compaction ID");
+        assert_eq!(compaction[1]["sessionUpdate"], "compaction_update");
+        assert_eq!(compaction[1]["status"], "completed");
+        assert_eq!(compaction[1]["compactionId"], compaction_id);
+        assert_ne!(previous_id.as_deref(), Some(compaction_id));
+        assert_eq!(reply["result"]["stopReason"], "end_turn");
+        assert_eq!(
+            reply["result"]["_meta"][agent_instance::maintenance::META]["status"],
+            "completed"
+        );
+        previous_id = Some(compaction_id.to_owned());
+    }
+    client.disconnect().await;
+}
+
 #[test]
 fn source_delivery_is_a_private_revision_fact_not_completion_or_implicit_deduplication() {
     use agent_instance::source_delivery as delivery;
