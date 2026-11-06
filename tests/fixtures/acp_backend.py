@@ -69,8 +69,15 @@ def prompt(req):
         emit({"jsonrpc":"2.0","id":"maintenance-permission","method":"session/request_permission","params":{"sessionId":sid,"options":[{"optionId":"yes","kind":"allow_once","name":"Allow"}],"toolCall":{"toolCallId":"forbidden","title":"Write during maintenance"}}})
         done.wait(4)
         (HOME/"maintenance-callback.json").write_text(json.dumps(callbacks["maintenance-permission"].get("response")))
-        update(sid,"Do not turn this summary into a final answer","compaction_summary_chunk")
-        emit({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"compaction_update","compactionId":uuid.uuid4().hex,"status":"completed"}}})
+        compaction_id = uuid.uuid4().hex
+        for entry in [
+            {"sessionUpdate": "compaction_summary_chunk", "compactionId": compaction_id,
+             "content": {"type": "text", "text": "Do not turn this summary into a final answer"}},
+            {"sessionUpdate": "compaction_update", "compactionId": compaction_id,
+             "status": "completed"},
+        ]:
+            emit({"jsonrpc": "2.0", "method": "session/update",
+                  "params": {"sessionId": sid, "update": entry}})
         complete_prompt(req,{"stopReason":"end_turn","exactPrompt":values})
         return
     event = threading.Event()

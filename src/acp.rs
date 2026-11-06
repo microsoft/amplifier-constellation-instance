@@ -20,12 +20,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-    sync::mpsc,
-    time::Instant,
-};
+use tokio::{process::Command, sync::mpsc, time::Instant};
 use tokio_tungstenite::{
     Connector,
     tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
@@ -83,13 +78,6 @@ impl Drop for ProcessGroup {
                 libc::kill(-(self.pid as i32), libc::SIGKILL);
             }
         }
-    }
-}
-
-struct AbortTask(tokio::task::AbortHandle);
-impl Drop for AbortTask {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
@@ -319,7 +307,7 @@ async fn relay_connection(
             child.id().context("ACP backend exited during launch")?,
         )?,
     };
-    let mut input = child
+    let input = child
         .stdin
         .take()
         .context("ACP backend stdin unavailable")?;
@@ -329,25 +317,8 @@ async fn relay_connection(
         .context("ACP backend stdout unavailable")?;
     update_connection(&state, &connection_id, "backend_pid", json!(group.pid));
     let max_frame = config.limits.max_frame_bytes;
-    let (frames_tx, mut frames) = mpsc::channel(16);
-    let reader = tokio::spawn(async move {
-        let mut output = BufReader::new(output);
-        loop {
-            match read_json_frame(&mut output, max_frame).await {
-                Ok(Some(value)) => {
-                    if frames_tx.send(Ok(value)).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = frames_tx.send(Err(error)).await;
-                    break;
-                }
-            }
-        }
-    });
-    let _reader = AbortTask(reader.abort_handle());
+    let mut frames = amplifier_acp_connection::Relay::new(output, input, max_frame);
+    let input = frames.sender.clone();
     let startup_deadline =
         Instant::now() + Duration::from_secs(config.limits.backend_start_timeout_seconds);
     let idle_duration = Duration::from_secs(config.limits.idle_timeout_seconds);
@@ -691,9 +662,7 @@ async fn relay_connection(
                             Ok(None)=>(),Err(_)=>{pending.remove(&value["id"].to_string());reject_request(&outgoing,&value,-32602,"Invalid source delivery binding; no input forwarded").await?;continue;}
                         }
                     }
-                    let encoded = format!("{}\n", value);
-                    tokio::time::timeout(Duration::from_secs(10), input.write_all(encoded.as_bytes())).await.context("ACP backend stopped accepting input")??;
-                    input.flush().await?;
+                    tokio::time::timeout(Duration::from_secs(10), input.send(value)).await.context("ACP backend stopped accepting input")??;
                     if let Some(id)=attention_admission {crate::attention::forwarded(&state,&id)?;}
                     if let Some(request) = starting_work {
                         let event = state.event("acp.prompt.started", work_metadata(&connection_id, &request))?;
@@ -714,8 +683,7 @@ async fn relay_connection(
                     }
                 }
                 frame = frames.recv() => {
-                    let Some(frame) = frame else { bail!("ACP backend closed its output"); };
-                    let mut value = frame?;
+                    let Some(mut value) = frame? else { bail!("ACP backend closed its output"); };
                     if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                     ensure!(is_rpc_message(&value), "ACP backend emitted an invalid JSON-RPC message");
                     idle_deadline = Instant::now() + idle_duration;
@@ -729,7 +697,7 @@ async fn relay_connection(
                     if value["method"]=="session/update" { maintenance.update(&value); }
                     if maintenance.has_active() && value["method"].is_string() && value.get("id").is_some() {
                         let reply=if value["method"]=="session/request_permission" {json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":{"outcome":"cancelled"}}})} else {rpc_error(value["id"].clone(),-32002,"Client operations are unavailable during conversation maintenance")};
-                        input.write_all(format!("{}\n",reply).as_bytes()).await?; input.flush().await?;continue;
+                        input.send(reply).await?;continue;
                     }
                     if value.get("method").is_none() && let Some(receipt)=maintenance.finish(&mut value) {crate::maintenance::save(&state,&principal,&receipt)?;state.event("maintenance.finished",receipt)?;}
                     if value["params"]["update"]["sessionUpdate"]=="compaction_update" && !client_compaction {
@@ -1078,11 +1046,7 @@ fn validate_cwd(cwd: &str, roots: &[PathBuf]) -> Result<()> {
 }
 
 fn is_rpc_message(value: &Value) -> bool {
-    value.is_object()
-        && value["jsonrpc"] == "2.0"
-        && (value["method"].is_string()
-            || (value.get("id").is_some()
-                && (value.get("result").is_some() != value.get("error").is_some())))
+    amplifier_acp_connection::is_message(value)
 }
 
 fn rpc_error(id: Value, code: i32, message: &str) -> Value {
@@ -1106,36 +1070,6 @@ async fn send_frontend(outgoing: &mpsc::Sender<Value>, value: Value) -> Result<(
         .await
         .context("ACP client stopped accepting output")?
         .context("ACP client disconnected")
-}
-
-async fn read_json_frame<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    max: usize,
-) -> Result<Option<Value>> {
-    let mut frame = Vec::new();
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            ensure!(frame.is_empty(), "ACP stream ended in a partial frame");
-            return Ok(None);
-        }
-        let n = available
-            .iter()
-            .position(|b| *b == b'\n')
-            .map_or(available.len(), |i| i + 1);
-        ensure!(
-            frame.len() + n <= max + 1,
-            "ACP frame exceeds configured limit"
-        );
-        frame.extend_from_slice(&available[..n]);
-        reader.consume(n);
-        if frame.last() == Some(&b'\n') {
-            break;
-        }
-    }
-    Ok(Some(
-        serde_json::from_slice(&frame).context("ACP stream contained invalid JSON")?,
-    ))
 }
 
 /// Read an explicit credential without exposing it in process arguments.
@@ -1258,33 +1192,16 @@ pub async fn attach(home: PathBuf, url: Option<String>, token: Option<String>) -
         _ => anyhow::anyhow!("Agent WebSocket handshake failed"),
     })?;
     let (mut writer, mut reader) = socket.split();
-    let (input_tx, mut input_rx) = mpsc::channel(8);
-    // Tokio stdin uses an uncancellable blocking-pool read that can hold runtime
-    // shutdown open after a remote disconnect. A detached OS thread instead
-    // exits with this single-purpose attach process, even with stdin still open.
-    std::thread::spawn(move || {
-        let mut stdin = std::io::stdin().lock();
-        loop {
-            match read_json_frame_sync(&mut stdin, max) {
-                Ok(Some(value)) => {
-                    if input_tx.blocking_send(Ok(value)).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = input_tx.blocking_send(Err(error));
-                    break;
-                }
-            }
-        }
-    });
-    let mut stdout = tokio::io::stdout();
+    // Like the official SDK Stdio transport, use the independently managed
+    // blocking adapter so remote closure cannot strand Tokio's shutdown pool.
+    use tokio_util::compat::FuturesAsyncReadCompatExt;
+    let stdin = blocking::Unblock::new(std::io::stdin()).compat();
+    let mut stdio = amplifier_acp_connection::Relay::new(stdin, tokio::io::stdout(), max);
+    let stdout = stdio.sender.clone();
     loop {
         tokio::select! {
-            value = input_rx.recv() => {
-                let Some(value) = value else { let _ = writer.close().await; return Ok(()); };
-                let value = value?;
+            value = stdio.recv() => {
+                let Some(value) = value? else { let _ = writer.close().await; return Ok(()); };
                 ensure!(is_rpc_message(&value), "stdin contained an invalid ACP JSON-RPC message");
                 writer.send(Message::Text(value.to_string().into())).await?;
             }
@@ -1292,10 +1209,9 @@ pub async fn attach(home: PathBuf, url: Option<String>, token: Option<String>) -
                 let Some(value) = value else { return Ok(()); };
                 match value? {
                     Message::Text(text) => {
-                        let value: Value = serde_json::from_str(&text).context("Agent sent invalid ACP JSON")?;
+                        let value = amplifier_acp_connection::parse_message(&text)?;
                         ensure!(is_rpc_message(&value), "Agent sent an invalid ACP JSON-RPC message");
-                        stdout.write_all(format!("{value}\n").as_bytes()).await?;
-                        stdout.flush().await?;
+                        stdout.send(value).await?;
                     }
                     Message::Ping(bytes) => writer.send(Message::Pong(bytes)).await?,
                     Message::Close(_) => return Ok(()),
@@ -1305,33 +1221,6 @@ pub async fn attach(home: PathBuf, url: Option<String>, token: Option<String>) -
             }
         }
     }
-}
-
-fn read_json_frame_sync<R: std::io::BufRead>(reader: &mut R, max: usize) -> Result<Option<Value>> {
-    let mut frame = Vec::new();
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            ensure!(frame.is_empty(), "ACP stdin ended in a partial frame");
-            return Ok(None);
-        }
-        let n = available
-            .iter()
-            .position(|b| *b == b'\n')
-            .map_or(available.len(), |i| i + 1);
-        ensure!(
-            frame.len() + n <= max + 1,
-            "ACP stdin frame exceeds configured limit"
-        );
-        frame.extend_from_slice(&available[..n]);
-        reader.consume(n);
-        if frame.last() == Some(&b'\n') {
-            break;
-        }
-    }
-    Ok(Some(
-        serde_json::from_slice(&frame).context("ACP stdin contained invalid JSON")?,
-    ))
 }
 
 fn attach_url(home: &Path, explicit: Option<String>) -> Result<reqwest::Url> {
@@ -1372,16 +1261,6 @@ fn attach_url(home: &Path, explicit: Option<String>) -> Result<reqwest::Url> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    #[tokio::test]
-    async fn bounded_framing_and_partial_eof() {
-        let mut reader = BufReader::new(&b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n"[..]);
-        assert!(read_json_frame(&mut reader, 128).await.unwrap().is_some());
-        assert!(read_json_frame(&mut reader, 128).await.unwrap().is_none());
-        let mut oversized = BufReader::new(&b"abcdefghijklmnopqrstuvwxyz\n"[..]);
-        assert!(read_json_frame(&mut oversized, 8).await.is_err());
-        let mut partial = BufReader::new(&b"{}"[..]);
-        assert!(read_json_frame(&mut partial, 8).await.is_err());
-    }
     #[test]
     fn remote_urls_require_encryption() {
         assert!(attach_url(Path::new("/tmp"), Some("http://host:1234".into())).is_err());

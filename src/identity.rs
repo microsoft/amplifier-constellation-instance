@@ -46,11 +46,8 @@ impl Drop for ObserverGuard {
     }
 }
 
-async fn send(out: &tokio::sync::mpsc::Sender<Value>, value: Value) -> anyhow::Result<()> {
-    // A slow observer may reconnect for the current snapshot; it cannot hold up
-    // configuration mutations or accumulate an unbounded queue of portraits.
-    tokio::time::timeout(std::time::Duration::from_secs(5), out.send(value)).await??;
-    Ok(())
+async fn send(out: &amplifier_acp_connection::Sender, value: Value) -> anyhow::Result<()> {
+    out.send(value)
 }
 
 /// Read-only presentation connection over the existing ACP bridge. It never
@@ -60,7 +57,7 @@ pub async fn observe(
     principal: String,
     headers: Option<HeaderMap>,
     first: Value,
-    mut incoming: tokio::sync::mpsc::Receiver<Value>,
+    incoming: tokio::sync::mpsc::Receiver<Value>,
     outgoing: tokio::sync::mpsc::Sender<Value>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -86,6 +83,13 @@ pub async fn observe(
         state: state.clone(),
         id,
     };
+    let mut connection =
+        amplifier_acp_connection::Connection::agent_messages(first, incoming, outgoing).await?;
+    let first = connection
+        .recv()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Identity observer closed before initialization"))?;
+    let outgoing = connection.sender.clone();
     send(
         &outgoing,
         json!({"jsonrpc":"2.0","id":first["id"],"result":{
@@ -101,7 +105,9 @@ pub async fn observe(
     let mut revision = Value::Null;
     loop {
         let request = tokio::select! {
-            request = incoming.recv() => match request { Some(value) => Some(value), None => return Ok(()) },
+            // This read-only subscription owns no work or pending effects.
+            // SDK transport closure ends it; reconnect reads a fresh snapshot.
+            request = connection.recv() => match request { Ok(Some(value)) => Some(value), Ok(None) | Err(_) => return Ok(()) },
             event = events.recv() => {
                 if let Some(headers) = &headers {
                     auth::check(&state, headers, "acp", false).map_err(|_| anyhow::anyhow!("ACP authorization ended"))?;
@@ -135,9 +141,7 @@ pub async fn observe(
         let Some(id) = request.get("id") else {
             continue;
         };
-        if request["jsonrpc"] != "2.0" {
-            send(&outgoing, json!({"jsonrpc":"2.0","id":id,"error":{"code":-32600,"message":"Expected an ACP JSON-RPC request"}})).await?;
-        } else if matches!(request["method"].as_str(), Some(METHOD | SUBSCRIBE)) {
+        if matches!(request["method"].as_str(), Some(METHOD | SUBSCRIBE)) {
             let doc = document(&state, true)?;
             if request["method"] == SUBSCRIBE {
                 subscribed = true;

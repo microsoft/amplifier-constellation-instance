@@ -681,32 +681,39 @@ fn interruption(state: &AppState, r: &Value) -> Option<&'static str> {
     }
 }
 struct Client {
-    tx: Option<mpsc::Sender<Value>>,
-    rx: mpsc::Receiver<Value>,
+    connection: Option<amplifier_acp_connection::Connection>,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 impl Drop for Client {
     fn drop(&mut self) {
-        self.tx.take();
+        self.connection.take();
         self.task.abort();
     }
 }
 impl Client {
-    async fn send(&self, v: Value) -> Result<(), &'static str> {
-        self.tx
+    async fn send(&self, value: Value) -> Result<(), &'static str> {
+        self.connection
             .as_ref()
-            .unwrap()
-            .send(v)
-            .await
+            .ok_or("backend_disconnected")?
+            .sender
+            .send(value)
+            .map_err(|_| "backend_disconnected")
+    }
+    fn request(&self, method: &str, params: Value) -> Result<Value, &'static str> {
+        self.connection
+            .as_ref()
+            .ok_or("backend_disconnected")?
+            .sender
+            .request(method, params)
             .map_err(|_| "backend_disconnected")
     }
     async fn stop(&mut self, sid: &Value) {
         if let Some(sid) = sid.as_str() {
             let _ = self
-                .send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
+                .send(json!({"method":"session/cancel","params":{"sessionId":sid}}))
                 .await;
         }
-        self.tx.take();
+        self.connection.take();
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.task).await;
     }
 }
@@ -714,7 +721,8 @@ async fn response(
     state: &AppState,
     run_id: &str,
     client: &mut Client,
-    request_id: u64,
+    request_id: Value,
+    is_prompt: bool,
     deadline: tokio::time::Instant,
     tool_ids: &mut BTreeSet<String>,
 ) -> Result<Value, &'static str> {
@@ -725,7 +733,7 @@ async fn response(
         if let Some(reason) = interruption(state, &r) {
             return Err(reason);
         }
-        let frame = tokio::select! {_ = tokio::time::sleep_until(deadline)=>return Err("time_budget"),_ = tokio::time::sleep(Duration::from_millis(100))=>continue,frame=client.rx.recv()=>frame.ok_or("backend_disconnected")?};
+        let frame = tokio::select! {_ = tokio::time::sleep_until(deadline)=>return Err("time_budget"),_ = tokio::time::sleep(Duration::from_millis(100))=>continue,frame=client.connection.as_mut().ok_or("backend_disconnected")?.recv()=>frame.map_err(|_|"backend_disconnected")?.ok_or("backend_disconnected")?};
         if let Some(method) = frame["method"].as_str() {
             if let Some(id) = frame.get("id") {
                 let denied = if method == "session/request_permission" {
@@ -749,7 +757,7 @@ async fn response(
                 {
                     return Err("session_mode_changed");
                 }
-                if request_id >= 4
+                if is_prompt
                     && u["sessionUpdate"] == "agent_message_chunk"
                     && u["content"]["type"] == "text"
                 {
@@ -770,7 +778,7 @@ async fn response(
                     })
                     .map_err(|_| "state_unavailable")?;
                 }
-                if request_id >= 4 && u["sessionUpdate"] == "tool_call" {
+                if is_prompt && u["sessionUpdate"] == "tool_call" {
                     if let Some(id) = u["toolCallId"].as_str() {
                         tool_ids.insert(format!("{request_id}:{id}"));
                     } else {
@@ -945,30 +953,37 @@ async fn run(state: Arc<AppState>, r: Value) {
     );
     let task =
         tokio::spawn(async move { acp::relay(relay_state, principal, incoming, outgoing).await });
+    let connection = match amplifier_acp_connection::Connection::client_messages(rx, tx).await {
+        Ok(connection) => connection,
+        Err(_) => {
+            task.abort();
+            let _ = finish(&state, id, Err("backend_disconnected"));
+            return;
+        }
+    };
     let mut client = Client {
-        tx: Some(tx),
-        rx,
+        connection: Some(connection),
         task,
     };
     let mut tools = BTreeSet::new();
     let result=async{
-        client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"agent-instance-background","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{}}})).await?;
-        let init=response(&state,id,&mut client,1,deadline,&mut tools).await?;
+        let request=client.request("initialize",json!({"protocolVersion":1,"clientInfo":{"name":"agent-instance-background","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{}}))?;
+        let init=response(&state,id,&mut client,request,false,deadline,&mut tools).await?;
         if init["protocolVersion"]!=1 {return Err("unsupported_protocol");}
         let load_supported=init["agentCapabilities"]["loadSession"]==true;
         update(&state,id,|r|r["load_session_supported"]=json!(load_supported)).map_err(|_|"state_unavailable")?;
         let cfg=state.instance_config();let backend=cfg.backend.ok_or("backend_missing")?;
         let mut session_params=json!({"cwd":expand(&state.home,&backend.working_directory),"mcpServers":[]});
         let method=if r["resume_session"]==true {if !load_supported{return Err("session_load_unavailable");}session_params["sessionId"]=r["session_id"].clone();"session/load"}else{"session/new"};
-        client.send(json!({"jsonrpc":"2.0","id":2,"method":method,"params":session_params})).await?;
-        let session=response(&state,id,&mut client,2,deadline,&mut tools).await?;
+        let request=client.request(method,session_params)?;
+        let session=response(&state,id,&mut client,request,false,deadline,&mut tools).await?;
         let sid=if r["resume_session"]==true {r["session_id"].as_str()}else{session["sessionId"].as_str()}.filter(|s|!s.is_empty()).ok_or("invalid_session")?;
         update(&state,id,|r|r["session_id"]=json!(sid)).map_err(|_|"state_unavailable")?;
         if let Some(mode)=r["session_mode"].as_str() {
             let offered=session["modes"]["availableModes"].as_array().is_some_and(|modes|modes.iter().any(|m|m["id"]==mode));
             if !offered {return Err("unsupported_session_mode");}
-            client.send(json!({"jsonrpc":"2.0","id":3,"method":"session/set_mode","params":{"sessionId":sid,"modeId":mode}})).await?;
-            response(&state,id,&mut client,3,deadline,&mut tools).await?;
+            let request=client.request("session/set_mode",json!({"sessionId":sid,"modeId":mode}))?;
+            response(&state,id,&mut client,request,false,deadline,&mut tools).await?;
             update(&state,id,|r|r["mode_applied"]=json!(true)).map_err(|_|"state_unavailable")?;
         }
         for turn in 0..budget.max_turns {
@@ -977,9 +992,8 @@ async fn run(state: Arc<AppState>, r: Value) {
             let offset=latest["report"].as_str().unwrap_or("").len();
             mark_prompt(&state,id).map_err(|_|"work_changed")?;
             let prompt=if turn==0 {context::execution_prompt(&r)} else {format!("Continue this same authorized responsibility from the previous turn. Do not repeat completed actions. Remaining turns: {}. The original time/output/tool budgets still apply across all turns. Stop for missing information or permission. End with the required AGENT_WORK_STATUS line: continue, blocked, or review. Your latest reported progress: {}",budget.max_turns-turn,latest["progress"])};
-            let request=4+turn as u64;
-            client.send(json!({"jsonrpc":"2.0","id":request,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":prompt}]}})).await?;
-            let mut result=response(&state,id,&mut client,request,deadline,&mut tools).await?;
+            let request=client.request("session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":prompt}]}))?;
+            let mut result=response(&state,id,&mut client,request,true,deadline,&mut tools).await?;
             if result["stopReason"]!="end_turn" {return Ok(result);}
             let latest=current(&state,id).map_err(|_|"state_unavailable")?;
             let text=latest["report"].as_str().unwrap_or("").get(offset..).unwrap_or("");
