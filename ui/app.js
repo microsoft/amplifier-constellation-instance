@@ -344,7 +344,7 @@
   }
   async function saveServiceConnection(){
     await flushDrafts();const service=app.savedConnections?.services.find(s=>s.id===state().filters.service_add);if(!service?.add)throw new Error("Refresh to load setup.");
-    const values={};for(const f of service.add.fields){const v=draft(`service_add.${f.name}`,undefined);if(v!==undefined && v!=="")values[f.name]=f.kind==="integer"?Number(v):f.kind==="boolean"?!!v:String(v);}
+    const values={};for(const f of service.add.fields){const v=draft(`service_add.${f.name}`,f.kind==="boolean"?false:undefined);if(v!==undefined && v!=="")values[f.name]=f.kind==="integer"?Number(v):f.kind==="boolean"?!!v:String(v);}
     const key=JSON.stringify([service.id,service.add.revision,values]);let body=app.connectionRequests.get(key);
     if(!body){body={service_id:service.id,revision:service.add.revision,action:"add",request_id:crypto.randomUUID(),values};app.connectionRequests.set(key,body);}
     await api("service-connections",{method:"POST",body});app.connectionRequests.delete(key);await loadSavedConnections();await command({type:"close_modal"});setNotice("Saving the connection. Check its confirmed status here.");

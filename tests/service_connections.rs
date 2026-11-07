@@ -66,6 +66,14 @@ async fn disconnect_preserves_context_until_quiesced_then_only_matching_connect_
         200
     );
     assert!(agent_instance::service_connections::context_enabled(&s, "world-context").unwrap());
+    let mut noncanonical = operation("disconnect");
+    noncanonical["request_id"] = json!("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA");
+    assert_eq!(
+        api(&s, "POST", "service-connections", noncanonical, true)
+            .await
+            .0,
+        400
+    );
     let disconnect = operation("disconnect");
     assert_eq!(
         api(&s, "POST", "service-connections", disconnect.clone(), true)

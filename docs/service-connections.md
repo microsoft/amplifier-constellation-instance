@@ -160,7 +160,7 @@ These endpoints require authenticated admin access (browser CSRF applies):
 - GET `/api/v1/service-connections`: public catalog, observed connection states,
   helper freshness, pending request and last completed result; no commands/secrets.
 - POST same path: `{connection_id, revision, action:connect|disconnect, request_id}`
-  or `{service_id, revision, action:add, request_id, values}`. Request IDs are UUIDs.
+  or `{service_id, revision, action:add, request_id, values}`. Request IDs are canonical lowercase hyphenated UUIDs.
   Changed reuse, stale revision, offline helper and another pending operation reject.
 - POST `/api/v1/service-connections/report`: host-only-by-deployment authenticated
   report `{schema:1,services,connections,add_result?}`. Services exclude commands;

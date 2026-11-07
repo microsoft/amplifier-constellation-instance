@@ -26,7 +26,7 @@ try{
  browser=await chromium.launch({headless:true,args:['--no-sandbox']});context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1400,height:1000}});
  await context.addCookies([{name:'ai_'+doc.config.instance_id.replaceAll('-',''),value:'native-oauth-fixture',url:origin,secure:true,httpOnly:true,sameSite:'Strict'}]);
  page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(origin);
- const serviceDefinition={id:'minecraft',label:'Minecraft',add:{revision:'template1',fields:[{name:'label',label:'Connection name',kind:'text',required:true,max_length:120},{name:'server',label:'Server',kind:'choice',required:true,choices:[{value:'workshop',label:'Constellation Workshop'}]}]}};
+ const serviceDefinition={id:'minecraft',label:'Minecraft',add:{revision:'template1',fields:[{name:'label',label:'Connection name',kind:'text',required:true,max_length:120},{name:'notify',label:'Notify me',kind:'boolean',required:true},{name:'server',label:'Server',kind:'choice',required:true,choices:[{value:'workshop',label:'Constellation Workshop'}]}]}};
  const connection={id:'world',service:'minecraft',label:'Home Server',revision:'r1',context_provider_ids:['context-home'],state:'connected',message:''};
  await call('POST','service-connections/report',{schema:1,services:[serviceDefinition],connections:[connection]});
  await page.locator('[data-control="nav.connections"]').click();
@@ -45,7 +45,7 @@ try{
  await page.locator('[data-control="service_add.label"]').fill('Workshop');
  await page.locator('[data-control="service_add.server"]').selectOption('workshop');
  await Promise.all([page.waitForResponse(r=>r.url().endsWith('/api/v1/service-connections') && r.request().method()==='POST'),page.getByRole('button',{name:'Save connection',exact:true}).click()]);
- state=await call('GET','service-connections');assert.equal(state.request.command.action,'add');assert.deepEqual(state.request.command.values,{label:'Workshop',server:'workshop'});
+ state=await call('GET','service-connections');assert.equal(state.request.command.action,'add');assert.deepEqual(state.request.command.values,{label:'Workshop',notify:false,server:'workshop'});
  pass('Add renders owner-defined fields and submits only typed values');
  await call('POST','service-connections/report',{schema:1,services:[serviceDefinition],connections:[connection,{...connection,id:'workshop',label:'Workshop',context_provider_ids:['context-workshop'],state:'disconnected'}],add_result:{service_id:'minecraft',request_id:state.request.command.request_id,state:'saved',settled:true,connection_id:'workshop',message:'Saved'}});
  await page.evaluate(()=>window.agentInstanceControl.perform('refresh'));

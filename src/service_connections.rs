@@ -263,7 +263,7 @@ pub async fn command(
     } else {
         name(&c.connection_id) && c.service_id.is_none() && c.values.is_empty()
     }) || !["add", "connect", "disconnect"].contains(&c.action.as_str())
-        || uuid::Uuid::parse_str(&c.request_id).is_err()
+        || !uuid::Uuid::parse_str(&c.request_id).is_ok_and(|id| id.to_string() == c.request_id)
     {
         return Err(ApiError::bad(
             "Choose Add, Connect or Disconnect for a saved connection with a UUID request_id",
@@ -303,8 +303,8 @@ pub async fn command(
             .iter()
             .find(|e| e.enrolled && e.id == c.connection_id && e.revision == c.revision)
             .ok_or_else(|| ApiError::conflict(json!({"error":"connection_changed"})))?;
-        // The queue is not execution. The serialized host worker closes context
-        // through its matching report before dispatch, after any update finishes.
+        // The queue is not execution. The host serializes with updates and
+        // acknowledges the domain's context handoffs around active-turn drain.
         let _ = entry;
     }
     let op = Operation {
