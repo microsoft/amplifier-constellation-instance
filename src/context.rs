@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Result, anyhow, ensure};
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -21,7 +21,7 @@ const SERVER_NAME: &str = "agent-continuity";
 const MAX_RESPONSE: usize = 256 * 1024;
 const LEASE_MS: i64 = 8 * 60 * 60 * 1000;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
     #[serde(default = "enabled_default")]
@@ -156,6 +156,7 @@ pub async fn put(
 ) -> ApiResult<Json<Value>> {
     let actor = auth::check(&state, &headers, "admin", true)?.actor;
     validate_registry(&registry).map_err(|e| ApiError::bad(e.to_string()))?;
+    let _lock = state.context_registry_lock.lock().unwrap();
     config::write_private(
         &state.home.join("context-providers.json"),
         &serde_json::to_vec_pretty(&registry).unwrap(),
@@ -166,6 +167,51 @@ pub async fn put(
     )?;
     Ok(Json(json!(registry)))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderUpdate {
+    pub expected_provider: Provider,
+    pub enabled: bool,
+}
+/// Conditional single-provider update. Unrelated providers are read under the
+/// same writer lock as full registry replacement and are never supplied by the caller.
+pub async fn patch_provider(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(update): Json<ProviderUpdate>,
+) -> ApiResult<Json<Value>> {
+    let actor = auth::check(&state, &headers, "admin", true)?.actor;
+    if id != update.expected_provider.id {
+        return Err(ApiError::bad(
+            "Expected provider must match the selected provider",
+        ));
+    }
+    let _lock = state.context_registry_lock.lock().unwrap();
+    let mut registry = registry(&state)?;
+    let target = registry
+        .providers
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| ApiError::conflict(json!({"error":"context_provider_changed"})))?;
+    if target != &update.expected_provider {
+        return Err(ApiError::conflict(
+            json!({"error":"context_provider_changed"}),
+        ));
+    }
+    target.enabled = update.enabled;
+    let result = json!(target);
+    config::write_private(
+        &state.home.join("context-providers.json"),
+        &serde_json::to_vec_pretty(&registry).unwrap(),
+    )?;
+    state.event(
+        "context.provider_changed",
+        json!({"actor":actor,"provider_id":id,"enabled":update.enabled}),
+    )?;
+    Ok(Json(result))
+}
+
 fn provider(state: &AppState, id: &str) -> Result<Provider> {
     registry(state)?
         .providers

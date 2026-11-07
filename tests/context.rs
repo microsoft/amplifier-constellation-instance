@@ -1563,3 +1563,119 @@ async fn disabled_provider_blocks_existing_grants_and_owner_context_without_dele
     client.close().await;
     owner.close().await;
 }
+
+#[tokio::test]
+async fn conditional_provider_update_preserves_other_admin_edits_and_rejects_stale_target() {
+    let f = Fixture::new().await;
+    let client = reqwest::Client::new();
+    let base = f.state.instance_config().server.public_url.unwrap();
+    let url = format!("{base}/api/v1/context/providers");
+    let mut registry = serde_json::to_value(context::registry(&f.state).unwrap()).unwrap();
+    registry["providers"][0]["enabled"] = json!(false);
+    assert!(
+        client
+            .put(&url)
+            .bearer_auth(&f.owner)
+            .json(&registry)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let expected = registry["providers"][0].clone();
+    // A different admin disables B and adds C after setup captured A. The
+    // targeted update must preserve both changes instead of writing old A/B.
+    registry["providers"][1]["enabled"] = json!(false);
+    registry["providers"].as_array_mut().unwrap().push(json!({"id":"new-provider","label":"New","url":"http://127.0.0.1:9","secret_ref":"new","enabled":false}));
+    assert!(
+        client
+            .put(&url)
+            .bearer_auth(&f.owner)
+            .json(&registry)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let patch = json!({"expected_provider":expected,"enabled":true});
+    let endpoint = format!("{url}/web:fixture");
+    let denied = client
+        .patch(&endpoint)
+        .bearer_auth(&f.acp_only)
+        .json(&patch)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        serde_json::to_value(context::registry(&f.state).unwrap()).unwrap(),
+        registry
+    );
+    let response = client
+        .patch(&endpoint)
+        .bearer_auth(&f.owner)
+        .json(&patch)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["enabled"], true);
+    let current = serde_json::to_value(context::registry(&f.state).unwrap()).unwrap();
+    registry["providers"][0]["enabled"] = json!(true);
+    assert_eq!(current, registry);
+    // A lost successful response cannot make the same stale precondition write again.
+    let stale = client
+        .patch(&endpoint)
+        .bearer_auth(&f.owner)
+        .json(&patch)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        serde_json::to_value(context::registry(&f.state).unwrap()).unwrap(),
+        current
+    );
+    let wrong = client
+        .patch(format!("{url}/different"))
+        .bearer_auth(&f.owner)
+        .json(&patch)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+    let mut missing = patch.clone();
+    missing["expected_provider"]["id"] = json!("absent");
+    let missing = client
+        .patch(format!("{url}/absent"))
+        .bearer_auth(&f.owner)
+        .json(&missing)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        serde_json::to_value(context::registry(&f.state).unwrap()).unwrap(),
+        current
+    );
+    assert!(
+        f.source.seen.lock().unwrap().is_empty(),
+        "Metadata update must not call providers"
+    );
+    let descriptor: Value = client
+        .get(format!("{base}/api/v1/descriptor"))
+        .bearer_auth(&f.owner)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        descriptor["context_provider_mutation"],
+        json!({"version":1,"method":"PATCH","path":"api/v1/context/providers/{id}","precondition":"expected_provider"})
+    );
+}

@@ -182,3 +182,28 @@ fixtures execute fixed subprocess commands, lost-delivery/status-only recovery,
 readiness report acknowledgement ordering, and atomic Add enrollment. Browser
 fixtures exercise Add/Connect/Disconnect with two saved connections and mobile
 layout. None of these fixtures call models, Slack or a live game.
+
+## Prepared context provider activation
+
+Hosts advertising `context_provider_mutation` with version 1, method `PATCH`,
+path `api/v1/context/providers/{id}` and precondition `expected_provider` support
+an atomic, admin-authenticated change of one provider's `enabled` flag:
+
+```json
+{"expected_provider":{"id":"prepared","label":"Workshop","url":"http://127.0.0.1:45851","secret_ref":"prepared-source","enabled":false},"enabled":true}
+```
+
+The exact expected provider, including its prior enabled state, must still match.
+A missing or changed target returns 409 without mutation. The response is the
+updated provider object. The operation shares a writer lock with full registry
+PUT, rereads current data under that lock, and preserves all unrelated providers.
+It changes no connection gate, session, credential or service state and calls no
+provider. Do not implement a stale whole-registry read/modify/write to enable one
+prepared source.
+
+A domain may use this only under explicit one-use prepared-installation authority,
+after confirming the saved descriptor and closed host context gate. Journal the
+same Connect operation before dispatch and reconcile a lost acknowledgment through
+read-only state; never repeat an uncertain enable or automatically re-enable an
+existing provider that an administrator subsequently disabled. This conditional
+API does not itself grant that domain authority.
