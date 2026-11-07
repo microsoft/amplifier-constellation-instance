@@ -2,6 +2,54 @@
 
 Owner: Instance. Review candidate; deployment is a separate decision.
 
+## Human engagement and observed activity
+
+The implementation advertises two additive features inside the existing
+`com.microsoft.amplifier.attention` capability:
+
+```json
+{
+  "humanMessages": {"version": 1, "budgetPolicy": "independent_of_ambient"},
+  "activity": {"version": 1, "contextField": "activities", "maxItems": 16}
+}
+```
+
+For a message trigger, a participant explicitly attributed `is_agent:false` by
+the source is evaluated even when ambient decision/turn/uncertainty budgets are
+exhausted. If the host engages, those ambient quotas do not block its one-use
+offer or get charged for it. Omitted/null participant kind is unknown. Peers and
+unknown kinds retain ambient accounting. Social holds for another addressee,
+provider refusals, source authorization, stop and actual tool/task limits remain.
+Direct ordinary ACP still needs no attention ticket. This is not an unlimited
+provider allowance or an authority grant inferred from message text.
+
+When `activity.version:1` is discovered, `context.activities` may contain observed
+`{id,actor,kind,summary,revision,occurred_at}` records. Kinds are `movement` and
+`interaction`; idle presence is not a supported activity. `trigger_id` can identify
+one of these records instead of a message. Keep `messages:[]` for an activity-only
+request. Its trigger time must match the outer `occurredAt` exactly. Activities
+remain ambient and may be held; do not fabricate human speech to gain priority.
+
+Limits: 16 activities; 40 combined messages/activities; 64 participants; 32 KiB
+total context. IDs are unique across both lists; activities need a known actor,
+nonempty ID (512 bytes maximum), revision (128 bytes), summary (2 KiB), and
+positive original time within the existing freshness/clock rules. The agent's
+own event cannot trigger itself. Only actual source changes create new events;
+coalesce meaningful observations and retain source identity/time. Full facts
+remain in the authorized source, not the attention journal.
+
+`budget_class` (`human_message` or `ambient`) and `source_kind` (`message` or
+`activity`) are private journal/event/report fields. Legacy rows count as ambient.
+Source delivery joins activity revisions exactly as it joins message revisions;
+incorporation is never completion. Existing offered/claimed/admitted distinctions,
+deduplication, cancellation and connection/session binding are unchanged.
+
+See the shared [human engagement contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/human-engagement.v1-candidate.md)
+for action-sequence semantics and adapter fallback. This feature does not change
+Runtime model scheduling, install an activity source in adapters, or make an
+older host accept the new optional context field. No production activity-quality
+or latency claim follows from deterministic transport/decision fixtures.
+
 ## Purpose and ownership
 
 An ambient conversation event is an opportunity to consider participation, not
@@ -121,8 +169,14 @@ bindings, explicit cancellation, changed authority and uncertain delivery fail
 closed; unused ordinary offers still expire on disconnect. The journal deduplicates the original event across reconnects;
 it does not promise to replay an event lost during a crash. Stale events,
 superseded evidence, edited duplicate events, cancellation, configuration changes
-and spent tickets cannot admit a turn. A newer event in the audience invalidates
-an older offer. A direct prompt cancels pending ambient offers for its session.
+and spent tickets cannot admit a turn. Newer audience events invalidate older
+ambient offers. With advertised human-message priority, distinct human messages
+remain independently eligible: later activity or speech alone is not cancellation.
+Changed source evidence, explicit cancellation, ticket expiry and single use still
+apply to each human offer. An older human message never rewinds ambient freshness.
+A direct prompt cancels pending ambient offers for its session, while preserving
+distinct human offers within their original expiry. Explicit session cancellation
+and access revocation still invalidate both classes.
 Events older than ten minutes are held. Records are retained for at most a day
 of active journal maintenance, longer than the event freshness window.
 
@@ -143,6 +197,7 @@ errors may also get that limited opportunity, but are labeled `provider_error`,
 not counted as semantic uncertainty. Refusals remain holds and are separately
 flagged. Defaults are 600 decision attempts, 60 admitted-or-claimed ambient
 turns, and 12 uncertain/error turns per rolling hour per installed agent.
+These are ambient limits; advertised human-message priority is described above.
 Independent task or platform limits may be lower. No automatic retries, idle
 polling prompts, task renewal or fallback budget expansion are authorized.
 

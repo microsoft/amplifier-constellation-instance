@@ -558,8 +558,7 @@ async fn relay_connection(
                         }
                         if method=="session/prompt" && value["params"]["_meta"].get(crate::attention::META).is_none()
                             && let Some(sid)=value["params"]["sessionId"].as_str(){
-                            crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
-                            pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
+                            crate::attention::supersede_ambient(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
                         }
                         if method == "session/prompt" {
                             // Reject admission errors before creating a maintenance operation.

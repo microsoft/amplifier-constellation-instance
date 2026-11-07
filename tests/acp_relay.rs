@@ -1307,6 +1307,141 @@ fn one_attention_slot(i: &Installation) {
 }
 
 #[tokio::test]
+async fn human_message_reaches_backend_after_ambient_quotas_are_exhausted() {
+    use agent_instance::attention;
+    let i = Installation::new();
+    one_attention_slot(&i);
+    i.state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .attention
+        .as_mut()
+        .unwrap()
+        .decisions_per_hour = 1;
+    let mut c = i.connect();
+    let init = c.initialize().await;
+    assert_eq!(
+        init["result"]["_meta"][attention::META]["humanMessages"]["budgetPolicy"],
+        "independent_of_ambient"
+    );
+    let sid = c.new_session(&i.work).await;
+    c.send(
+        200,
+        attention::METHOD,
+        attention_event(&sid, "ambient-first"),
+    )
+    .await;
+    let ambient = c.response(200).await.0["result"].clone();
+    c.send(201, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"Ambient work"}],"_meta":{attention::META:{"id":ambient["id"],"ticket":ambient["ticket"]}}})).await;
+    assert_eq!(c.response(201).await.0["result"]["stopReason"], "end_turn");
+
+    let mut human = attention_event(&sid, "fresh-human");
+    human["context"]["participants"][1]["is_agent"] = json!(false);
+    c.send(202, attention::METHOD, human.clone()).await;
+    let reply = c.response(202).await.0["result"].clone();
+    assert_eq!(reply["action"], "engage");
+    c.send(203, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"Fresh human asks for a reply"}],"_meta":{attention::META:{"id":reply["id"],"ticket":reply["ticket"]}}})).await;
+    let (response, updates) = c.response(203).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn");
+    assert!(
+        detail(&updates)["echo"]
+            .as_str()
+            .unwrap()
+            .contains("Fresh human asks for a reply")
+    );
+    c.send(204, attention::METHOD, human).await;
+    assert_eq!(c.response(204).await.0["result"]["reason"], "duplicate");
+    c.send(
+        205,
+        attention::METHOD,
+        attention_event(&sid, "ambient-still-exhausted"),
+    )
+    .await;
+    assert_eq!(
+        c.response(205).await.0["result"]["reason"],
+        "decision_budget"
+    );
+    assert_eq!(
+        attention::report(&i.state).unwrap()["counts"]["status:admitted"],
+        2
+    );
+    c.disconnect().await;
+}
+
+#[tokio::test]
+async fn ordinary_prompt_does_not_cancel_a_distinct_human_offer() {
+    use agent_instance::attention;
+    let i = Installation::new();
+    one_attention_slot(&i);
+    let mut c = i.connect();
+    c.initialize().await;
+    let sid = c.new_session(&i.work).await;
+    let mut human = attention_event(&sid, "human-awaiting-response");
+    human["context"]["participants"][1]["is_agent"] = json!(false);
+    c.send(200, attention::METHOD, human).await;
+    let human_offer = c.response(200).await.0["result"].clone();
+    c.send(
+        201,
+        attention::METHOD,
+        attention_event(&sid, "ambient-awaiting-response"),
+    )
+    .await;
+    let ambient_offer = c.response(201).await.0["result"].clone();
+    assert_eq!(ambient_offer["action"], "engage");
+    c.send(
+        202,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[{"type":"text","text":"A separate direct message"}]}),
+    )
+    .await;
+    assert_eq!(c.response(202).await.0["result"]["stopReason"], "end_turn");
+    c.send(203, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"Now answer the retained human request"}],"_meta":{attention::META:{"id":human_offer["id"],"ticket":human_offer["ticket"]}}})).await;
+    let (response, updates) = c.response(203).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn");
+    assert!(
+        detail(&updates)["echo"]
+            .as_str()
+            .unwrap()
+            .contains("retained human request")
+    );
+    c.send(204, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"Stale ambient work"}],"_meta":{attention::META:{"id":ambient_offer["id"],"ticket":ambient_offer["ticket"]}}})).await;
+    assert_eq!(c.response(204).await.0["error"]["code"], -32002);
+    c.disconnect().await;
+}
+
+#[tokio::test]
+async fn negotiated_activity_is_evidence_for_an_offer_not_automatic_prompt_admission() {
+    use agent_instance::{attention, state::now_ms};
+    let i = Installation::new();
+    one_attention_slot(&i);
+    let mut c = i.connect();
+    let init = c.initialize().await;
+    assert_eq!(
+        init["result"]["_meta"][attention::META]["activity"],
+        json!({"version":1,"contextField":"activities","maxItems":16})
+    );
+    let sid = c.new_session(&i.work).await;
+    let at = now_ms();
+    let evidence = json!({"sessionId":sid,"occurredAt":at,"context":{
+        "conversation_id":"room","agent":{"id":"a","name":"Agent","is_agent":true},
+        "participants":[{"id":"a","name":"Agent","is_agent":true},{"id":"h","name":"Human","is_agent":false}],
+        "messages":[],"activities":[{"id":"approach","actor":"h","kind":"interaction","summary":"Person used the shared workspace control.","revision":"r1","occurred_at":at}],"trigger_id":"approach"}});
+    c.send(200, attention::METHOD, evidence).await;
+    let offer = c.response(200).await.0["result"].clone();
+    assert_eq!(offer["action"], "engage");
+    assert!(attention::report(&i.state).unwrap()["counts"]["status:admitted"].is_null());
+    c.send(201, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"Observed public activity; no new task authority"}],"_meta":{attention::META:{"id":offer["id"],"ticket":offer["ticket"]}}})).await;
+    assert_eq!(c.response(201).await.0["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        attention::report(&i.state).unwrap()["counts"]["budget_class:ambient"],
+        1
+    );
+    c.disconnect().await;
+}
+
+#[tokio::test]
 async fn prompt_completion_race_restores_same_attention_ticket_without_renewing_its_slot() {
     use agent_instance::attention;
     let i = Installation::new();
