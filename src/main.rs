@@ -64,7 +64,6 @@ enum Command {
         command: BackgroundCommand,
     },
     Api {
-        #[arg(default_value = "GET")]
         method: String,
         path: String,
         #[arg(long)]
@@ -596,4 +595,39 @@ fn export_update_support(directory: &std::path::Path) -> anyhow::Result<()> {
         agent_instance::config::write_private(&directory.join(name), data)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn management_api_accepts_explicit_method_and_path() {
+        Cli::command().debug_assert();
+        for (method, path) in [("GET", "descriptor"), ("PATCH", "context/providers/game")] {
+            let parsed = Cli::try_parse_from([
+                "agent-instance",
+                "api",
+                method,
+                path,
+                "--file",
+                "request.json",
+            ])
+            .unwrap();
+            match parsed.command {
+                Command::Api {
+                    method: actual,
+                    path: target,
+                    file,
+                } => {
+                    assert_eq!(actual, method);
+                    assert_eq!(target, path);
+                    assert_eq!(file, Some(PathBuf::from("request.json")));
+                }
+                _ => panic!("Expected management API command"),
+            }
+        }
+        assert!(Cli::try_parse_from(["agent-instance", "api", "GET"]).is_err());
+    }
 }
