@@ -115,7 +115,7 @@ fn configured_bundle(config: &InstanceConfig) -> Option<&str> {
             "/node/bin/{}",
             crate::platform::executable("node")
         ))?;
-    (!bundle.is_empty()
+    ((bundle.starts_with("codex-") || bundle.starts_with("update-codex-"))
         && bundle
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.'))
@@ -792,5 +792,44 @@ mod tests {
         assert_eq!(status["status"], "ready");
         assert_eq!(status["auth_validated"], false);
         assert!(!status.to_string().contains("private-canary"));
+    }
+    #[test]
+    fn updated_codex_keeps_account_controls_and_reports_installed_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = InstanceConfig::blank("test".into(), "owner".into());
+        config.backend = Some(BackendConfig {
+            command: format!(
+                "${{AGENT_HOME}}/backend/runtime/update-codex-0.167.0-reviewed/{}",
+                runtime_files()[0]
+            ),
+            args: vec![],
+            env: Default::default(),
+            secret_env: Default::default(),
+            working_directory: "${AGENT_HOME}/workspace".into(),
+            allowed_working_roots: vec![],
+        });
+        write_private(
+            &dir.path().join("config.json"),
+            &serde_json::to_vec(&json!({"revision":1,"config":config})).unwrap(),
+        )
+        .unwrap();
+        for file in runtime_files() {
+            let path = runtime(dir.path()).join(file);
+            private_dir(path.parent().unwrap()).unwrap();
+            write_private(&path, b"fixture").unwrap();
+        }
+        write_private(
+            &runtime(dir.path()).join("runtime.json"),
+            br#"{"codex_version":"0.167.0","acp_version":"2.5.0","node_version":"22.23.2"}"#,
+        )
+        .unwrap();
+        let observed = status(dir.path(), &config);
+        assert_eq!(observed["kind"], "codex");
+        assert_eq!(observed["version"], "0.167.0");
+        assert_eq!(observed["status"], "needs_account");
+        assert!(runtime(dir.path()).ends_with("update-codex-0.167.0-reviewed"));
+        config.backend.as_mut().unwrap().command =
+            "${AGENT_HOME}/backend/runtime/unrelated/node/bin/node".into();
+        assert!(!configured_default(&config));
     }
 }

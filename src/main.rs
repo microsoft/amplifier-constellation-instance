@@ -99,6 +99,8 @@ enum Command {
         container_manifest: Option<PathBuf>,
         #[arg(long)]
         container_image: Option<String>,
+        #[arg(long)]
+        pull_container_image: bool,
     },
     /// Write this version's update helper for the host installation.
     ExportUpdateHelper {
@@ -337,6 +339,7 @@ async fn main() -> Result<()> {
             slack_home,
             container_manifest,
             container_image,
+            pull_container_image,
         } => {
             let staging = std::env::temp_dir()
                 .join(format!("constellation-updater-{}", uuid::Uuid::new_v4()));
@@ -367,6 +370,9 @@ async fn main() -> Result<()> {
             }
             if let Some(image) = container_image {
                 cmd.arg("--container-image").arg(image);
+            }
+            if pull_container_image {
+                cmd.arg("--pull-container-image");
             }
             let result = cmd.status();
             let _ = std::fs::remove_dir_all(&staging);

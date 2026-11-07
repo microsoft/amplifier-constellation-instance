@@ -482,6 +482,7 @@ class Worker:
         with self.reporting():return self.transaction_apply(plan,policy,agent,rollback,scheduled)
     def transaction_apply(self,plan,policy,agent=False,rollback=False,scheduled=False):
         if not rollback and not any(p['available'] for p in plan['components']):self.save(state='up_to_date');return
+        if plan.get('created_at',0)<self.state.get('enrolled_at',0):raise ValueError('plan_predates_enrollment')
         if plan.get('registration_sha256',self.registration_digest())!=self.registration_digest():raise ValueError('update_enrollment_changed')
         participants=self.selected_participants(plan)
         if plan.get('participants',participants)!=participants:raise ValueError('update_participants_changed')

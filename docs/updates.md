@@ -148,9 +148,8 @@ binding. No inference is required to check or install a release.
 
 Use `install-updates --container-manifest <existing manifest> --container-image
 <owner-selected reference>` to enroll an existing container. An immutable digest
-tracks that exact image; a registry tag is pulled when checking for a newer image.
-Existing owner-enrolled local image providers can instead track a locally built
-tag with `pull: false`. Enrollment does not build or publish container images.
+tracks that exact image; add `--pull-container-image` to pull a registry tag when checking for a newer image.
+Without that flag the provider tracks a locally built tag. Enrollment does not build or publish container images.
 
 Connected experiences can enroll protocol-1 `participants` in registration.json:
 
