@@ -1,5 +1,5 @@
 """Interruption and service-boundary tests for the shared update transaction."""
-import json
+import json, subprocess
 from unittest.mock import patch
 import unittest
 import test_worker as fixtures
@@ -71,6 +71,28 @@ class ParticipantTests(unittest.TestCase):
   captured=[];obj.api=lambda path,body:captured.append(body) or {}
   w.Worker.report(obj)
   value=json.dumps(captured);self.assertNotIn('secret-canary',value);self.assertNotIn('/private',value);self.assertEqual(captured[0]['status']['transaction']['participants'],['game'])
+
+ def test_progressing_session_replay_can_finish_after_short_control_deadline(self):
+  obj=self.worker();self.participant(obj);plan=self.plan(obj);calls=[]
+  def run(argv,timeout,env):
+   action=argv[-1];calls.append((action,timeout,env['CONSTELLATION_UPDATE_OUTCOME']))
+   # Simulated healthy replay takes 45 seconds. The subprocess boundary must
+   # permit it rather than rolling back an otherwise compatible installation.
+   if action=='verify' and timeout<45:raise subprocess.TimeoutExpired(argv,timeout)
+   return json.dumps({{'prepare':'ready','verify':'verified','restore':'restored'}[action]:True}).encode()
+  with patch.object(w,'run',side_effect=run):obj.apply(plan,obj.policy)
+  self.assertEqual(self.binary.read_bytes(),b'new-binary');self.assertIsNone(obj.state['transaction'])
+  self.assertEqual(calls,[('prepare',30,'unchanged'),('verify',300,'applied'),('restore',30,'applied')])
+
+ def test_exhausted_replay_budget_still_rolls_back_before_restore(self):
+  obj=self.worker();self.participant(obj);plan=self.plan(obj);calls=[]
+  def run(argv,timeout,env):
+   action=argv[-1];outcome=env['CONSTELLATION_UPDATE_OUTCOME'];calls.append((action,outcome))
+   if action=='verify' and outcome=='applied':raise subprocess.TimeoutExpired(argv,timeout)
+   return json.dumps({{'prepare':'ready','verify':'verified','restore':'restored'}[action]:True}).encode()
+  with patch.object(w,'run',side_effect=run),self.assertRaises(subprocess.TimeoutExpired):obj.apply(plan,obj.policy)
+  self.assertEqual(self.binary.read_bytes(),b'old-binary')
+  self.assertEqual(calls,[('prepare','unchanged'),('verify','applied'),('verify','rolled_back'),('restore','rolled_back')])
 
 if __name__=='__main__':
  import unittest

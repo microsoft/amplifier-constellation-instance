@@ -455,7 +455,10 @@ class Worker:
         file=Path(tx['directory'])/(p['id']+'.json')
         if digest(file)!=tx['contexts'][p['id']]:raise ValueError('participant_context_changed')
         env={**os.environ,'CONSTELLATION_UPDATE_PLAN':str(file),'CONSTELLATION_UPDATE_OUTCOME':outcome,'CONSTELLATION_UPDATE_TRANSACTION':tx['id']}
-        data=run(p['commands'][action],timeout=30,env=env)
+        # Compatibility verification can replay a large saved conversation.
+        # Keep pause/restore controls short without treating healthy replay as
+        # a failed update. This is management time, never agent work authority.
+        data=run(p['commands'][action],timeout=300 if action=='verify' else 30,env=env)
         if len(data)>65536:raise ValueError('participant_response_limit')
         value=json.loads(data)
         key={'prepare':'ready','verify':'verified','restore':'restored'}[action]
@@ -588,7 +591,7 @@ class Worker:
         if self.state.get('helper_instance_sha256')==current:return
         # A newer host helper can bootstrap an older compatible Instance. Do
         # not replace it with the old embedded helper before the host upgrade.
-        if version(run([component['binary'],'--version']).decode()) < (0,20,0):
+        if version(run([component['binary'],'--version']).decode()) < (0,20,1):
             self.save(helper_instance_sha256=current);return
         exported=self.root/'worker-next.py'
         run([component['binary'],'export-update-helper','--path',exported])
