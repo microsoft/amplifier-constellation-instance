@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "agent-instance"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "amplifier-acp-connection",
  "anyhow",
