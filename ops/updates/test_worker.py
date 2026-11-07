@@ -25,7 +25,7 @@ class UpdateTests(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,'outside'):w.load_registration(self.path)
  def test_api_uses_enrolled_bind_and_preserves_tls_and_auth(self):
   (self.home/'secrets').mkdir();(self.home/'secrets/control-token').write_text('fixture-token')
-  for bind,host in [('127.0.0.1','127.0.0.1'),('100.104.92.30','100.104.92.30'),('0.0.0.0','127.0.0.1'),('::','[::1]'),('::1','[::1]'),('fd7a:115c:a1e0::1','[fd7a:115c:a1e0::1]')]:
+  for bind,host in [('127.0.0.1','127.0.0.1'),('192.0.2.24','192.0.2.24'),('0.0.0.0','127.0.0.1'),('::','[::1]'),('::1','[::1]'),('2001:db8::1','[2001:db8::1]')]:
    with self.subTest(bind=bind),patch.object(w.ssl,'create_default_context'),patch.object(w,'http_json',return_value={'active_prompts':0}) as call:
     w.write(self.home/'config.json',{'config':{'server':{'bind':bind,'port':19400,'public_url':'https://not-the-management-origin.invalid'}}})
     obj=w.Worker(self.path);result=obj.api('status')
@@ -47,7 +47,7 @@ class UpdateTests(unittest.TestCase):
   self.registration['components'].append({'id':'slack','kind':'slack','binary':str(binary)})
   w.write(self.path,self.registration);obj=self.worker();obj.api=lambda *a,**k:{'instance_id':'fixture','uptime_ms':0}
   obj.state['cutover_at']=1
-  for bind,host in [('100.104.92.30','100.104.92.30'),('::','[::1]')]:
+  for bind,host in [('192.0.2.24','192.0.2.24'),('::','[::1]')]:
    w.write(slack/'adapter.json',{'enabled':True,'server':{'bind':bind,'port':19401}})
    with self.subTest(bind=bind),patch.object(w.ssl,'create_default_context') as context,patch.object(w,'http_json',return_value={'state':{'slack_connection':{'state':'connected'}},'runtime':{'updated_at':2}}) as call:
     w.Worker.health(obj,{'instance':w.digest(self.binary),'slack':w.digest(binary)})
