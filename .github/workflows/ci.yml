@@ -29,6 +29,9 @@ jobs:
         run: |
           python3 ops/updates/test_worker.py
           python3 ops/updates/test_container_provider.py
+          python3 ops/updates/test_participants.py
+          python3 ops/updates/test_engine_provider.py
+          python3 ops/updates/test_install_updates.py
       - name: Check installation contracts
         run: python3 scripts/test-installation.py
       - name: Check release retries preserve published assets

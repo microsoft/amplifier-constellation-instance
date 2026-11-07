@@ -134,3 +134,47 @@ Source-installed services, game adapters and their package dependencies can use
 the same protocol with their own build, digest, health and rollback logic. They
 are not silently treated as single-binary updates. The dashboard reports enrolled
 components, not a promise that every installed program has an update provider.
+
+## Updating the whole installation
+
+The helper can enroll vanilla Codex ACP, Claude Agent ACP, and Amplifier Agent ACP
+engines as well as the native runtime. `install-updates` discovers these supported
+versioned engine layouts. Other custom commands need an owner-enrolled provider.
+The external engine provider stages an upstream release in a new private version
+directory, freezes its files and dependency graph, and switches only the existing
+backend's executable paths at idle. Accounts, models, environment settings and
+session stores remain owned by that engine. Failed verification restores the prior
+binding. No inference is required to check or install a release.
+
+Use `install-updates --container-manifest <existing manifest> --container-image
+<owner-selected reference>` to enroll an existing container. An immutable digest
+tracks that exact image; add `--pull-container-image` to pull a registry tag when checking for a newer image.
+Without that flag the provider tracks a locally built tag. Enrollment does not build or publish container images.
+
+Connected experiences can enroll protocol-1 `participants` in registration.json:
+
+```json
+{"id":"experience","protocol":1,"components":["instance","runtime","engine","container-image"],"commands":{"prepare":["/owner/helper","prepare"],"verify":["/owner/helper","verify"],"restore":["/owner/helper","restore"]}}
+```
+
+Commands receive `CONSTELLATION_UPDATE_PLAN`, an immutable private JSON file:
+`{id, participant, plan:{schema:1,transaction_id,operation,components,restart_scope}}`.
+`operation` is `apply` or `rollback`. `CONSTELLATION_UPDATE_OUTCOME` is `unchanged`,
+`applied`, or `rolled_back`. Fixed commands must complete within 30 seconds and
+return respectively `{"ready":true}`, `{"verified":true}`, or
+`{"restored":true}`. Preparation can return `{"ready":false,"reason":"busy"}`;
+the helper polls for up to 30 minutes without interrupting work. The participant
+must durably close its own admission before acknowledging readiness, preserve its
+original state before mutation, and be idempotent across lost replies. Unknown
+listed component IDs are ignored; selection uses changed enrolled components.
+
+Protocol-2 component providers also receive `CONSTELLATION_UPDATE_TRANSACTION`.
+An explicitly enrolled component can declare `restart_scope` with `services`,
+`instance` and `slack_homes`. For a connector whose participant owns all service
+operations, use `{"services":[],"instance":false,"slack_homes":[]}`. Shared engine
+and host changes retain the full installation scope by default.
+
+Select **Install automatically when idle** and the desired check interval in the
+dashboard. It uses this same transaction for every enrolled component. No separate
+chat permissions or scheduler deployment script is needed. A successful staged
+plan is not yet an installed update; status records verification and recovery.

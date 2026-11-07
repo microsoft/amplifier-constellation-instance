@@ -14,6 +14,7 @@ class UpdateTests(unittest.TestCase):
   obj.api=lambda *args,**kwargs:{'policy':obj.policy,'active_prompts':0}
   obj.report=lambda *args,**kwargs:{'policy':obj.policy,'active_prompts':0}
   obj.control=lambda action,scope=None:None
+  obj.service_snapshot=lambda scope:{name:True for name in scope['services']}
   obj.health=lambda expected,scope=None:None
   return obj
  def plan(self,obj):

@@ -54,7 +54,7 @@ def validate_manifest(manifest):
 def run(*args):
     return subprocess.run(args, check=True, text=True, capture_output=True).stdout.strip()
 
-def install(manifest):
+def install(manifest, start_services=None):
     validate_manifest(manifest)
     if subprocess.run(['docker','inspect',manifest['container']],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode == 0:
         raise ValueError('Container already exists; stop and back it up before an explicit replacement')
@@ -78,6 +78,8 @@ def install(manifest):
     name=manifest['container']
     if not name.replace('-','').isalnum():raise ValueError('Invalid container name')
     services=manifest['services']
+    start_services=list(services) if start_services is None else start_services
+    if not set(start_services)<=set(services):raise ValueError('Unknown service requested')
     (state/'services.json').write_text(json.dumps({'container':name,'services':services},indent=2))
     (state/'bridge.json').write_text(json.dumps({'socket_directory':str(state/'sockets'),'routes':manifest.get('routes',[])},indent=2))
     (state/'container.json').write_text(json.dumps({'services':[],'loopback_ports':[r['listen'] for r in manifest.get('routes',[])], 'container_admin': admin, 'command_boundary': 'container' if admin else 'workspace'}))
@@ -128,7 +130,7 @@ WantedBy=default.target
 Description=Isolated installation {name}
 Requires={bridge}
 After={bridge} network-online.target
-Wants={' '.join(services)}
+Wants={' '.join(start_services)}
 PartOf={bridge}
 [Service]
 ExecStartPre=/usr/bin/systemctl is-active --quiet constellation-container-firewall.service
@@ -163,7 +165,7 @@ TimeoutStopSec=40
     for _ in range(100):
         if run('docker','inspect','--format','{{.State.Running}}',name)=='true':break
         time.sleep(.1)
-    for unit in services:run('systemctl','--user','start',unit)
+    for unit in start_services:run('systemctl','--user','start',unit)
     (state/'manifest.json').write_text(json.dumps(manifest,indent=2))
     print(json.dumps({'container':name,'services':list(services),'installed':True}))
 
