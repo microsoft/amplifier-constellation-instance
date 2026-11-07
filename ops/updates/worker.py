@@ -4,8 +4,8 @@
 The registration file is private operator input, never supplied by an agent.
 The authenticated instance API supplies only action/plan IDs and policy choices.
 """
-import argparse, contextlib, hashlib, io, ipaddress, json, os, platform, re, shutil
-import sqlite3, ssl, subprocess, sys, tarfile, tempfile, threading, time, urllib.request, uuid, zipfile
+import argparse, contextlib, datetime, email.utils, hashlib, io, ipaddress, json, os, platform, re, shutil
+import sqlite3, ssl, subprocess, sys, tarfile, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 from pathlib import Path
 
 REPOSITORIES = {'instance': ('amplifier-constellation-instance','agent-instance','ci.yml'),
@@ -93,12 +93,83 @@ def http_json(url,body=None,headers=None,ctx=None,method=None):
     r=urllib.request.Request(url,data=None if body is None else json.dumps(body).encode(),headers={'Content-Type':'application/json',**(headers or {})},method=method)
     with urllib.request.urlopen(r,context=ctx,timeout=15) as f:return json.loads(f.read(2*1024*1024))
 
+class GitHubRateLimited(RuntimeError):
+    def __init__(self,retry_at_ms):
+        self.retry_at_ms=int(retry_at_ms)
+        when=datetime.datetime.fromtimestamp(self.retry_at_ms/1000,datetime.timezone.utc).isoformat()
+        super().__init__('GitHub API quota exhausted; retry after '+when)
+
+def github_rate_limit(status,headers,body=b''):
+    headers={k.lower():v for k,v in headers.items()}
+    message=body.decode(errors='replace').lower() if isinstance(body,bytes) else str(body).lower()
+    if status not in (403,429) or not (status==429 or headers.get('x-ratelimit-remaining')=='0'
+            or 'retry-after' in headers or 'rate limit' in message):return None
+    now=time.time();deadlines=[now+60]
+    if headers.get('x-ratelimit-remaining')=='0':
+        try:deadlines.append(float(headers['x-ratelimit-reset']))
+        except (KeyError,ValueError):pass
+    if 'retry-after' in headers:
+        try:deadlines.append(now+float(headers['retry-after']))
+        except ValueError:
+            try:deadlines.append(email.utils.parsedate_to_datetime(headers['retry-after']).timestamp())
+            except (ValueError,TypeError,OverflowError):pass
+    finite=[v for v in deadlines if now<=v<253402300800]
+    return GitHubRateLimited(int(max(finite)*1000))
+
+def owner_github_available():
+    # This is a local credential-store query, not an API request. Never copy the
+    # token into state, arguments, the agent environment or diagnostics.
+    try:
+        p=subprocess.run(['gh','auth','token','--hostname','github.com'],capture_output=True,
+                         stdin=subprocess.DEVNULL,timeout=10)
+        return p.returncode==0 and bool(p.stdout.strip())
+    except (OSError,subprocess.TimeoutExpired):return False
+
+def github_cli_json(path):
+    p=subprocess.run(['gh','api','--include','--hostname','github.com',path],capture_output=True,
+                     stdin=subprocess.DEVNULL,timeout=90)
+    # gh owns authentication and HTTP. Its included response headers retain the
+    # actual account's retry deadline; do not reuse an anonymous quota deadline.
+    head,separator,body=p.stdout.replace(b'\r\n',b'\n').partition(b'\n\n')
+    lines=head.decode(errors='replace').splitlines()
+    match=re.fullmatch(r'HTTP/\S+ (\d{3})(?: .*)?',lines[0]) if lines else None
+    if not separator or not match:raise RuntimeError('GitHub CLI metadata response unavailable; check the owner GitHub login')
+    status=int(match[1]);headers=dict(line.split(':',1) for line in lines[1:] if ':' in line)
+    headers={k:v.strip() for k,v in headers.items()}
+    limited=github_rate_limit(status,headers,body)
+    if limited:raise limited
+    if status==401:raise RuntimeError('Owner GitHub login is invalid; sign in again on this host')
+    if p.returncode or not 200<=status<300:raise RuntimeError('GitHub metadata request failed (HTTP '+str(status)+')')
+    return json.loads(body)
+
+_github_local=threading.local()
+
+@contextlib.contextmanager
+def github_metadata_session():
+    previous=getattr(_github_local,'session',None)
+    _github_local.session={'responses':{},'authenticated':None}
+    try:yield
+    finally:_github_local.session=previous
+
 def gh(path):
-    # Public release metadata needs no login. An optional local gh account handles
-    # authenticated Actions downloads and public-API rate limits on busy machines.
-    try:return http_json('https://api.github.com/'+path,headers={'User-Agent':'Constellation-installation-updates'})
-    except Exception:
-        return json.loads(run(['gh','api','--hostname','github.com',path]))
+    # One coherent metadata view per plan. Runtime aliases and multiple Slack
+    # connectors must not spend a new public request for each identical lookup.
+    session=getattr(_github_local,'session',None)
+    if session is not None and path in session['responses']:return session['responses'][path]
+    authenticated=session['authenticated'] if session is not None else None
+    if authenticated is None:
+        authenticated=owner_github_available()
+        if session is not None:session['authenticated']=authenticated
+    if authenticated:
+        value=github_cli_json(path)
+    else:
+        try:value=http_json('https://api.github.com/'+path,headers={'User-Agent':'Constellation-installation-updates'})
+        except urllib.error.HTTPError as error:
+            limited=github_rate_limit(error.code,error.headers,error.read(8192))
+            if limited:raise limited from None
+            raise RuntimeError('GitHub metadata request failed (HTTP '+str(error.code)+')') from None
+    if session is not None:session['responses'][path]=value
+    return value
 
 def download(url,destination,expected):
     if not url.startswith('https://github.com/microsoft/') or not re.fullmatch('sha256:[0-9a-f]{64}',expected):raise ValueError('unverified_release_asset')
@@ -290,7 +361,18 @@ class Worker:
         try:yield
         finally:stopped.set();thread.join(timeout=16)
     def plan(self,policy):
-        with self.reporting():return self.build_plan(policy)
+        if self.state.get('github_retry_at_ms',0)>int(time.time()*1000):
+            raise GitHubRateLimited(self.state['github_retry_at_ms'])
+        if self.state.get('github_retry_at_ms'):self.save(github_retry_at_ms=0)
+        with self.reporting(),github_metadata_session():return self.build_plan(policy)
+    def defer_github_check(self,error,now):
+        if self.state.get('github_retry_at_ms',0)>now:
+            self.save(state='check_failed',error=str(GitHubRateLimited(self.state['github_retry_at_ms'])))
+            return
+        count=min(self.state.get('github_rate_limit_count',0)+1,7)
+        retry=max(error.retry_at_ms,now+min(60*2**(count-1),3600)*1000)
+        self.save(state='check_failed',last_check=now,github_retry_at_ms=retry,
+                  github_rate_limit_count=count,error=str(GitHubRateLimited(retry)))
     def build_plan(self,policy):
         identifier=str(uuid.uuid4());folder=self.root/'plans'/identifier;folder.mkdir(parents=True,mode=0o700)
         self.save(state='checking',error=None);self.report();components=[]
@@ -310,7 +392,7 @@ class Worker:
         plan['participants']=self.selected_participants(plan)
         plan['registration_sha256']=self.registration_digest()
         write(folder/'plan.json',plan)
-        self.save(state='available' if any(p['available'] for p in components) else 'up_to_date',plan_id=identifier,components=components,last_check=int(time.time()*1000))
+        self.save(state='available' if any(p['available'] for p in components) else 'up_to_date',plan_id=identifier,components=components,last_check=int(time.time()*1000),github_retry_at_ms=0,github_rate_limit_count=0)
         self.prune_plans();self.report();return plan
     def prune_plans(self):
         keep={self.state.get('plan_id'),self.state.get('rollback_plan_id')}
@@ -576,6 +658,8 @@ class Worker:
                 if action in ['check','plan','update']:plan=self.plan(policy)
                 else:plan=read(self.root/'plans'/str(uuid.UUID(request['plan_id']))/'plan.json')
                 if action in ['apply','update','rollback']:self.apply(plan,policy,agent,action=='rollback')
+            except GitHubRateLimited as e:
+                self.defer_github_check(e,int(time.time()*1000))
             except Exception as e:
                 if self.state['state'] not in ['recovery_required','rolled_back']:self.save(state='failed')
                 self.save(error=type(e).__name__+': '+str(e)[:160])
@@ -583,8 +667,11 @@ class Worker:
             return
         if self.state['state']=='recovery_required':return
         now=int(time.time()*1000)
-        if policy['check_minutes'] and now-self.state.get('last_check',0)>=policy['check_minutes']*60000:
+        retry=self.state.get('github_retry_at_ms',0)
+        if retry>now:return
+        if policy['check_minutes'] and (now-self.state.get('last_check',0)>=policy['check_minutes']*60000 or retry):
             try:self.plan(policy)
+            except GitHubRateLimited as e:self.defer_github_check(e,now);self.report();return
             except Exception as e:self.save(state='check_failed',last_check=now,error=type(e).__name__+': '+str(e)[:160]);self.report();return
         if self.state['state']=='available' and policy['install']!='on_request':
             if policy['install']=='when_idle' or self.in_window(policy):
