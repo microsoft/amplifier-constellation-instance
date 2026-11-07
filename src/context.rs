@@ -24,10 +24,15 @@ const LEASE_MS: i64 = 8 * 60 * 60 * 1000;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
+    #[serde(default = "enabled_default")]
+    pub enabled: bool,
     pub id: String,
     pub label: String,
     pub url: String,
     pub secret_ref: String,
+}
+fn enabled_default() -> bool {
+    true
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +137,11 @@ pub async fn get(State(state): State<Arc<AppState>>, headers: HeaderMap) -> ApiR
                 .is_ok_and(|s| !s.trim().is_empty());
             let mut value = json!(provider);
             value["configured"] = json!(configured);
+            value["effective_enabled"] = json!(
+                provider.enabled
+                    && crate::service_connections::context_enabled(&state, &provider.id)
+                        .unwrap_or(false)
+            );
             value
         })
         .collect();
@@ -160,7 +170,11 @@ fn provider(state: &AppState, id: &str) -> Result<Provider> {
     registry(state)?
         .providers
         .into_iter()
-        .find(|p| p.id == id)
+        .find(|p| {
+            p.id == id
+                && p.enabled
+                && crate::service_connections::context_enabled(state, id).unwrap_or(false)
+        })
         .ok_or_else(|| anyhow!("Context provider is not registered"))
 }
 async fn query(state: &AppState, id: &str, body: Value) -> Result<Value> {
@@ -469,6 +483,10 @@ async fn list_context(
     let providers: Vec<_> = registry(state)?
         .providers
         .into_iter()
+        .filter(|provider| {
+            provider.enabled
+                && crate::service_connections::context_enabled(state, &provider.id).unwrap_or(false)
+        })
         .filter(|provider| selected.is_none_or(|id| id == provider.id))
         .filter_map(|provider| {
             access_for(lease, &provider.id, None)

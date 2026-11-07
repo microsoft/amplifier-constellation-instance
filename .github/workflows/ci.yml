@@ -58,7 +58,7 @@ jobs:
         if: matrix.runner == 'ubuntu-24.04'
         env:
           AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
-        run: node ui/tests/updates.mjs
+        run: node ui/tests/updates.mjs && node ui/tests/service-connections.mjs
       - name: Check owner development setup and programmable view
         if: matrix.runner == 'ubuntu-24.04'
         env:

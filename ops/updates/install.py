@@ -61,6 +61,7 @@ def enroll(home,state,connector_homes,worker,container_manifest=None,container_i
         services.extend(s for s in previous['services'] if s['name'] not in service_names)
     registration={'schema':1,'instance_id':identifier,'home':str(home),'state':str(state),'components':components,'services':services,'slack_homes':[str(h.resolve()) for h in connector_homes]}
     registration['participants']=(previous or {}).get('participants',[])
+    if (previous or {}).get('service_connections') is not None:registration['service_connections']=previous['service_connections']
     state.mkdir(parents=True,exist_ok=True,mode=0o700)
     for p in connector_homes:
         (p/'updates').mkdir(exist_ok=True,mode=0o700);(p/'updates/admission.lock').touch(exist_ok=True)

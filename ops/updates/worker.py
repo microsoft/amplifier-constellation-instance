@@ -45,8 +45,57 @@ def local_api_base(config):
     host='['+str(address)+']' if address.version==6 else str(address)
     return 'https://'+host+':'+str(int(server['port']))+'/api/v1/'
 
+def validate_service_connections(catalog):
+    if catalog is None:return
+    if catalog.get('schema')!=1 or set(catalog)-{'schema','services','connections'}:raise ValueError('invalid_connection_catalog')
+    services=catalog.get('services',[]);connections=catalog.get('connections',[])
+    if len(services)>32 or len(connections)>64:raise ValueError('connection_catalog_too_large')
+    ids=set();providers=set();names=set()
+    for service in services:
+        if set(service)-{'id','label','setup_url','add','add_commands'} or not re.fullmatch('[a-zA-Z0-9_.:-]{1,128}',service['id']) or service['id'] in names:raise ValueError('invalid_connection_service')
+        names.add(service['id'])
+        if service.get('add'):
+            a=service['add']
+            if set(a)!={'revision','fields'} or not isinstance(a['revision'],str) or not 1<=len(a['revision'])<=128 or not isinstance(a['fields'],list) or len(a['fields'])>16:raise ValueError('invalid_add_template')
+            if set(service.get('add_commands',{}))!={'add','status'}:raise ValueError('fixed_add_commands_required')
+            for argv in service['add_commands'].values():
+                if not isinstance(argv,list) or not argv or not all(isinstance(v,str) and '\x00' not in v for v in argv) or not Path(argv[0]).is_absolute():raise ValueError('fixed_absolute_add_commands_required')
+        if not service.get('setup_url'):
+            if not service.get('add'):raise ValueError('setup_required')
+            continue
+        url=urllib.parse.urlparse(service['setup_url'])
+        try:loopback=ipaddress.ip_address(url.hostname).is_loopback
+        except ValueError:loopback=False
+        if not url.hostname or url.username or url.password or url.fragment or not (url.scheme=='https' or url.scheme=='http' and loopback):raise ValueError('invalid_connection_setup_url')
+    for connection in connections:
+        if set(connection)!={'id','service','label','revision','context_provider_ids','commands'} or connection['service'] not in names or not re.fullmatch('[a-zA-Z0-9_.:-]{1,128}',connection['id']) or connection['id'] in ids:raise ValueError('invalid_saved_connection')
+        ids.add(connection['id'])
+        if not isinstance(connection['revision'],str) or not 1<=len(connection['revision'])<=128:raise ValueError('invalid_connection_revision')
+        if len(connection['context_provider_ids'])>16:raise ValueError('invalid_context_bindings')
+        for provider in connection['context_provider_ids']:
+            if not re.fullmatch('[a-zA-Z0-9_.:-]{1,128}',provider) or provider in providers:raise ValueError('overlapping_context_bindings')
+            providers.add(provider)
+        if set(connection['commands'])!={'status','connect','disconnect'}:raise ValueError('fixed_connection_commands_required')
+        for argv in connection['commands'].values():
+            if not isinstance(argv,list) or not argv or not all(isinstance(a,str) and '\x00' not in a for a in argv) or not Path(argv[0]).is_absolute():raise ValueError('fixed_absolute_connection_commands_required')
+    for entry in services+connections:
+        if not isinstance(entry['label'],str) or not 1<=len(entry['label'].strip())<=200:raise ValueError('invalid_connection_label')
+
+def connection_call(entry,action,request_id):
+    payload={'schema':1,'connection_id':entry['id'],'revision':entry['revision'],'action':action,'request_id':request_id}
+    # Host-owned executable only; stdin is data, never shell or interpolated argv.
+    with tempfile.TemporaryFile() as output:
+        process=subprocess.run(entry['commands'][action],input=json.dumps(payload).encode(),stdout=output,stderr=subprocess.DEVNULL,timeout=30)
+        if process.returncode or output.tell()>65536:raise ValueError('connection_command_failed')
+        output.seek(0);result=json.load(output)
+    if set(result)-{'schema','connection_id','state','request_id','settled','message','context_ready','failed'} or result.get('schema')!=1 or result.get('connection_id')!=entry['id'] or result.get('state') not in ['connected','disconnected','busy','unknown'] or result.get('request_id')!=request_id or not isinstance(result.get('settled'),bool) or not isinstance(result.get('message',''),str) or len(result.get('message',''))>1000:raise ValueError('invalid_connection_result')
+    if not isinstance(result.get('context_ready',False),bool) or not isinstance(result.get('failed',False),bool):raise ValueError('invalid_connection_result')
+    result.setdefault('message','');result.setdefault('context_ready',False);result.setdefault('failed',False)
+    return result
+
 def load_registration(path):
     c=read(path)
+    validate_service_connections(c.get('service_connections'))
     if c.get('schema')!=1 or not c.get('components') or len(c['components'])>16: raise ValueError('invalid_registration')
     for key in ['home','state']:
         if not Path(c[key]).is_absolute(): raise ValueError('absolute_paths_required')
@@ -172,6 +221,7 @@ def candidate(component,channel,folder):
 
 class Worker:
     def __init__(self,registration):
+        self.registration=Path(registration)
         self.c=load_registration(registration);self.home=Path(self.c['home']);self.root=Path(self.c['state']);self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.file=self.root/'state.json';self.state=read(self.file) if self.file.exists() else {'state':'idle','components':[],'last_check':0}
         self.context=ssl.create_default_context(cafile=str(self.home/'tls/root-ca.crt'))
@@ -549,6 +599,93 @@ class Worker:
         self.report(finished=identifier)
     @staticmethod
     def in_window(policy):return (time.gmtime().tm_hour-policy['window_start_utc'])%24<policy['window_hours']
+    def add_connection(self,catalog,command,saved,journal):
+        service=next((s for s in catalog['services'] if s['id']==command.get('service_id') and s.get('add',{}).get('revision')==command['revision']),None)
+        if not service:raise ValueError('add_enrollment_changed')
+        fingerprint=hashlib.sha256(json.dumps(service,sort_keys=True).encode()).hexdigest()
+        if saved and saved['entry_sha256']!=fingerprint:raise ValueError('add_enrollment_changed')
+        action='status' if saved else 'add'
+        if not saved:write(journal,{'schema':1,'command':command,'entry_sha256':fingerprint})
+        payload={'schema':1,'action':action,'service_id':service['id'],'revision':command['revision'],'request_id':command['request_id'],'values':command.get('values',{})}
+        result={'service_id':service['id'],'request_id':command['request_id'],'state':'unknown','settled':False,'message':'Setup is being reconciled without repeating it.'}
+        try:
+            with tempfile.TemporaryFile() as output:
+                process=subprocess.run(service['add_commands'][action],input=json.dumps(payload).encode(),stdout=output,stderr=subprocess.DEVNULL,timeout=30)
+                if process.returncode or output.tell()>65536:raise ValueError('add_command_failed')
+                output.seek(0);received=json.load(output)
+            if set(received)-{'schema','service_id','request_id','state','settled','message','connection'} or received.get('schema')!=1 or received.get('service_id')!=service['id'] or received.get('request_id')!=command['request_id'] or received.get('state') not in ['saved','busy','unknown','failed'] or not isinstance(received.get('settled'),bool) or not isinstance(received.get('message',''),str) or len(received.get('message',''))>1000:raise ValueError('invalid_add_result')
+            result={k:received.get(k,'') for k in ['service_id','request_id','state','settled','message']}
+            if received['settled'] and received['state']=='saved':
+                entry=received['connection']
+                if entry.get('service')!=service['id']:raise ValueError('wrong_added_service')
+                # Only this fixed domain provider may enroll its own returned connection.
+                current=load_registration(self.registration)
+                current_catalog=current['service_connections']
+                if next((s for s in current_catalog['services'] if s['id']==service['id']),None)!=service:raise ValueError('add_enrollment_changed')
+                old=next((c for c in current_catalog['connections'] if c['id']==entry['id']),None)
+                if old is not None and old!=entry:raise ValueError('saved_connection_conflict')
+                if old is None:current_catalog['connections'].append(entry)
+                validate_service_connections(current_catalog)
+                if old is None:write(self.registration,current)
+                self.c=current;catalog.clear();catalog.update(current_catalog)
+                result['connection_id']=entry['id']
+        except Exception:
+            result={'service_id':service['id'],'request_id':command['request_id'],'state':'unknown','settled':False,'message':'Setup needs reconciliation; no command has been repeated.'}
+        return result
+
+    def connection_tick(self):
+        catalog=self.c.get('service_connections')
+        journal=self.root/'connection-operation.json'
+        if not catalog:return journal.exists()
+        outbox=self.root/'connection-report.json'
+        if outbox.exists():
+            self.api('service-connections/report',read(outbox));outbox.unlink()
+        snapshot=self.api('service-connections')
+        operation=snapshot.get('request');command=operation.get('command') if operation else None
+        saved=read(journal) if journal.exists() else None
+        if saved:
+            if command and command!=saved['command']:raise ValueError('connection_operation_changed')
+            command=saved['command']
+        adding=command and command['action']=='add'
+        add_result=self.add_connection(catalog,command,saved,journal) if adding else None
+        observations=[]
+        for entry in catalog['connections']:
+            request_id=command['request_id'] if command and not adding and command['connection_id']==entry['id'] else None
+            public={k:entry[k] for k in ['id','service','label','revision','context_provider_ids']}
+            if saved and not adding and request_id and saved['entry_sha256']!=hashlib.sha256(json.dumps(entry,sort_keys=True).encode()).hexdigest():raise ValueError('connection_enrollment_changed')
+            try:result=connection_call(entry,'status',request_id)
+            except Exception:result={'state':'unknown','request_id':request_id,'settled':False,'message':'Connection status is unavailable; no action has been repeated.'}
+            public.update({k:result.get(k,False if k in ['settled','context_ready','failed'] else '') for k in ['state','request_id','settled','message','context_ready','failed']});observations.append(public)
+        if command and not adding:
+            entry=next((e for e in catalog['connections'] if e['id']==command['connection_id'] and e['revision']==command['revision']),None)
+            if not entry:raise ValueError('connection_enrollment_changed')
+            expected='connected' if command['action']=='connect' else 'disconnected'
+            observed=next(e for e in observations if e['id']==entry['id'])
+            complete=observed['settled'] and (observed['state']==expected or observed.get('failed') and observed['state'] in ['connected','disconnected']) and observed['request_id']==command['request_id']
+            if not saved and not complete:
+                observed.update(state='busy',settled=False,context_ready=False,failed=False,message='Connection change is starting.')
+                gate_report={'schema':1,'services':[{k:v for k,v in service.items() if k!='add_commands'} for service in catalog['services']],'connections':observations}
+                write(outbox,gate_report);self.api('service-connections/report',gate_report);outbox.unlink()
+                write(journal,{'schema':1,'command':command,'entry_sha256':hashlib.sha256(json.dumps(entry,sort_keys=True).encode()).hexdigest()})
+                try:
+                    result=connection_call(entry,command['action'],command['request_id'])
+                    observed.update({k:result.get(k,False if k in ['context_ready','failed'] else '') for k in ['state','request_id','settled','message','context_ready','failed']})
+                except Exception:observed.update(state='unknown',settled=False,context_ready=False,message='Connection operation needs reconciliation; its status will be checked without repeating it.')
+        body={'schema':1,'services':[{k:v for k,v in s.items() if k!='add_commands'} for s in catalog['services']],'connections':observations}
+        if add_result:body['add_result']=add_result
+        # Persist and acknowledge context readiness before ANY subsequent domain status phase.
+        write(outbox,body)
+        result=self.api('service-connections/report',body);outbox.unlink()
+        pending=result.get('request')
+        if command and not pending:
+            terminal=add_result if adding else next((e for e in observations if e['id']==command['connection_id']),{})
+            expected='saved' if adding else 'connected' if command['action']=='connect' else 'disconnected'
+            if terminal.get('settled') and terminal.get('request_id')==command['request_id'] and (terminal.get('state')==expected or (terminal.get('state')=='failed' if adding else terminal.get('failed') and terminal.get('state') in ['connected','disconnected'])):
+                journal.unlink(missing_ok=True)
+                if adding:self.save(state='idle',last_check=0) # Added enrollment invalidates frozen update plans.
+            else:return True
+        return bool(pending or journal.exists())
+
     def tick(self):
         if self.state.get('transaction'):
             try:
@@ -563,6 +700,8 @@ class Worker:
             if self.state.get('active_request'):self.finish_request(self.state['active_request'])
         elif self.state.get('active_request') and self.state['state'] in ['succeeded','rolled_back']:
             self.finish_request(self.state['active_request'])
+        if self.state['state']!='recovery_required' and self.connection_tick():
+            self.report();return
         status=self.report();policy=status['policy'];request=status.get('request')
         active=request and request.get('pending')
         if active:
@@ -613,7 +752,7 @@ class Worker:
         while True:
             try:
                 self.tick()
-                if not self.state.get('transaction') and self.state["state"] not in CRITICAL|{"recovery_required"}:self.refresh_helper()
+                if not self.state.get('transaction') and not (self.root/'connection-operation.json').exists() and self.state["state"] not in CRITICAL|{"recovery_required"}:self.refresh_helper()
             except Exception:self.save(last_error_at=int(time.time()*1000))
             time.sleep(5)
 
