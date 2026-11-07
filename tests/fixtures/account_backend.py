@@ -18,7 +18,13 @@ def send(value):
 
 
 def complete():
-    time.sleep(0.2)
+    # The test releases completion only after checking the pending login twice.
+    # A fixed sleep lets loaded CI runners complete before that assertion.
+    deadline = time.monotonic() + 30
+    while not (provider / "fixture-complete").exists():
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
     (provider / "auth.json").write_text('{"tokens":{"access_token":"fixture-only-private-token"}}')
     send({"method": "account/login/completed", "params": {"loginId": "fixture-login", "success": True}})
 
@@ -32,5 +38,4 @@ for line in sys.stdin:
         send({"id": request["id"], "result": {"account": None, "requiresOpenaiAuth": True}})
     elif method == "account/login/start":
         send({"id": request["id"], "result": {"type": "chatgptDeviceCode", "loginId": "fixture-login", "verificationUrl": "https://auth.openai.com/codex/device", "userCode": "ABCD-1234"}})
-        if (provider / "fixture-complete").exists():
-            threading.Thread(target=complete, daemon=True).start()
+        threading.Thread(target=complete, daemon=True).start()

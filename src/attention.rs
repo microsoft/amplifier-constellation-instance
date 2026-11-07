@@ -22,8 +22,10 @@ pub struct Config {
     /// bearer or api-key. The credential is an installation secret, never adapter data.
     pub auth: String,
     pub credential_secret: String,
+    /// Ambient activity/peer evaluation quota; explicit human messages are separate.
     #[serde(default = "decision_limit")]
     pub decisions_per_hour: usize,
+    /// Ambient offers claimed or admitted per hour, not a human reply quota.
     #[serde(default = "turn_limit")]
     pub turns_per_hour: usize,
     #[serde(default = "uncertain_limit")]
@@ -80,7 +82,9 @@ pub struct Event {
     pub context: Context,
 }
 pub fn capability(state: &AppState) -> Value {
-    json!({"version":1,"enabled":state.instance_config().attention.is_some(),"method":METHOD,"promptMetadata":META,"scope":"ambient_conversation","uncertain":"bounded_engage","ticketLifetimeMs":30000})
+    json!({"version":1,"enabled":state.instance_config().attention.is_some(),"method":METHOD,"promptMetadata":META,"scope":"ambient_conversation","uncertain":"bounded_engage","ticketLifetimeMs":30000,
+        "humanMessages":{"version":1,"budgetPolicy":"independent_of_ambient"},
+        "activity":{"version":1,"contextField":"activities","maxItems":16}})
 }
 fn key(parts: Value) -> String {
     format!("{:x}", Sha256::digest(parts.to_string().as_bytes()))
@@ -130,6 +134,13 @@ fn save(state: &AppState, row: &Value) -> Result<()> {
     state.set_record("attention_events", row["id"].as_str().unwrap(), row.clone())
 }
 fn head(state: &AppState, row: &Value) -> Result<bool> {
+    // Distinct human messages remain eligible independently. A later movement,
+    // peer update, or message is not cancellation of an earlier human request.
+    // Source edits, explicit cancellation, expiry and single use are checked
+    // separately against the journal entry, not this ambient freshness head.
+    if row["budget_class"] == "human_message" {
+        return Ok(true);
+    }
     Ok(state
         .get_record("attention_heads", row["audience"].as_str().unwrap())?
         .is_some_and(|v| v["id"] == row["id"]))
@@ -144,6 +155,36 @@ pub fn reserve(
     binding: Option<&Value>,
 ) -> Result<Value> {
     attention_policy::validate(&event.context)?;
+    ensure!(
+        event
+            .context
+            .activities
+            .iter()
+            .all(|a| a.occurred_at <= now_ms() + 5000),
+        "Activity cannot have a future source time"
+    );
+    if let Some(activity) = event
+        .context
+        .activities
+        .iter()
+        .find(|a| a.id == event.context.trigger_id)
+    {
+        ensure!(
+            activity.occurred_at == event.occurred_at,
+            "Activity trigger must retain its original source time"
+        );
+    }
+    let human_message = attention_policy::human_message(&event.context);
+    let source_kind = if event
+        .context
+        .activities
+        .iter()
+        .any(|a| a.id == event.context.trigger_id)
+    {
+        "activity"
+    } else {
+        "message"
+    };
     let installed = state.instance_config();
     let config = installed
         .attention
@@ -184,16 +225,21 @@ pub fn reserve(
     if !fresh(event.occurred_at) {
         return Ok(json!({"action":"hold","reason":"stale","id":id}));
     }
-    if let Some(latest) = state.get_record("attention_heads", &audience)?
-        && latest["occurred_at"].as_i64().unwrap_or(0) > event.occurred_at
-    {
+    let latest = state.get_record("attention_heads", &audience)?;
+    let advances_head = latest
+        .as_ref()
+        .is_none_or(|r| r["occurred_at"].as_i64().unwrap_or(0) <= event.occurred_at);
+    if !human_message && !advances_head {
         return Ok(json!({"action":"hold","reason":"superseded","id":id}));
     }
     let attempts = rows(state)?
         .iter()
-        .filter(|r| r["requested_at"].as_i64().unwrap_or(0) > now_ms() - 3600000)
+        .filter(|r| {
+            r["budget_class"] != "human_message"
+                && r["requested_at"].as_i64().unwrap_or(0) > now_ms() - 3600000
+        })
         .count();
-    if attempts >= config.decisions_per_hour {
+    if !human_message && attempts >= config.decisions_per_hour {
         state.set_record(
             "attention_heads",
             &audience,
@@ -202,13 +248,15 @@ pub fn reserve(
         return Ok(json!({"action":"hold","reason":"decision_budget","id":id}));
     }
     let status = "evaluating";
-    let row = json!({"id":id,"audience":audience,"connection":connection,"principal":principal,"session_id":event.session_id,"event_id":event.context.trigger_id,"occurred_at":event.occurred_at,"requested_at":now_ms(),"status":status,"reason":status,"evidence_sha256":key(json!(event.context)),"review":"unreviewed","config_sha256":policy_key(&installed),"binding_sha256":binding_key(binding)});
+    let row = json!({"id":id,"audience":audience,"connection":connection,"principal":principal,"session_id":event.session_id,"event_id":event.context.trigger_id,"occurred_at":event.occurred_at,"requested_at":now_ms(),"status":status,"reason":status,"evidence_sha256":key(json!(event.context)),"review":"unreviewed","config_sha256":policy_key(&installed),"binding_sha256":binding_key(binding),"budget_class":if human_message {"human_message"}else{"ambient"},"source_kind":source_kind});
     save(state, &row)?;
-    state.set_record(
-        "attention_heads",
-        &audience,
-        json!({"id":id,"occurred_at":event.occurred_at}),
-    )?;
+    if advances_head {
+        state.set_record(
+            "attention_heads",
+            &audience,
+            json!({"id":id,"occurred_at":event.occurred_at}),
+        )?;
+    }
     Ok(row)
 }
 
@@ -222,7 +270,15 @@ async fn query(
     let mut evidence = json!(context);
     evidence["prior_delivery"] = delivery;
     evidence["installed_purpose"] = json!(installed.purpose);
-    let instructions = attention_policy::instructions();
+    let instructions = if context.activities.is_empty() {
+        attention_policy::instructions().to_owned()
+    } else {
+        format!(
+            "{}\n{}",
+            attention_policy::instructions(),
+            attention_policy::activity_instructions()
+        )
+    };
     let choices = attention_policy::choices();
     let body = if config.protocol == "openai_decisions" {
         json!({"model":config.model,"input":[{"role":"user","content":[{"type":"input_json","data":evidence}]}],"questions":[{"name":"participation","type":"choice","instructions":instructions,"choices":choices.as_object().unwrap().iter().map(|(value,description)|json!({"value":value,"description":description})).collect::<Vec<_>>()}]})
@@ -260,7 +316,10 @@ pub async fn evaluate(state: Arc<AppState>, mut row: Value, event: Event) -> Res
     }
     let installed = state.instance_config();
     let config = installed.attention.as_ref().context("Attention disabled")?;
-    state.event("attention.requested", json!({"id":row["id"]}))?;
+    state.event(
+        "attention.requested",
+        json!({"id":row["id"],"budget_class":row["budget_class"],"source_kind":row["source_kind"]}),
+    )?;
     let start = now_ms();
     let sources: Vec<_> = event
         .context
@@ -273,6 +332,17 @@ pub async fn evaluate(state: Arc<AppState>, mut row: Value, event: Event) -> Res
                 occurred_at: m.occurred_at?,
             })
         })
+        .chain(
+            event
+                .context
+                .activities
+                .iter()
+                .map(|a| crate::source_delivery::Source {
+                    id: a.id.clone(),
+                    revision: a.revision.clone(),
+                    occurred_at: a.occurred_at,
+                }),
+        )
         .collect();
     let delivery = crate::source_delivery::facts(
         &state,
@@ -321,7 +391,7 @@ pub async fn evaluate(state: Arc<AppState>, mut row: Value, event: Event) -> Res
     row["ticket_hash"] = json!(key(json!(ticket)));
     row["expires_at"] = json!(now_ms() + 30000);
     save(&state, &row)?;
-    state.event("attention.evaluated",json!({"id":row["id"],"judgment":row["judgment"],"reason":row["reason"],"status":row["status"],"investigate":investigate}))?;
+    state.event("attention.evaluated",json!({"id":row["id"],"judgment":row["judgment"],"reason":row["reason"],"status":row["status"],"investigate":investigate,"budget_class":row["budget_class"],"source_kind":row["source_kind"]}))?;
     if row["status"] == "offered" {
         Ok(
             json!({"action":"engage","reason":reason,"id":row["id"],"ticket":ticket,"expiresAt":row["expires_at"],"_meta":{crate::source_delivery::META:{"priorDelivery":delivery}}}),
@@ -384,12 +454,15 @@ pub fn consume(
     let recent: Vec<_> = rows(state)?
         .into_iter()
         .filter(|r| {
-            r["id"] != row["id"] && r["claimed_at"].as_i64().unwrap_or(0) > now_ms() - 3600000
+            r["id"] != row["id"]
+                && r["budget_class"] != "human_message"
+                && r["claimed_at"].as_i64().unwrap_or(0) > now_ms() - 3600000
         })
         .collect();
     let uncertain = recent.iter().filter(|r| r["investigate"] == true).count();
-    if recent.len() >= config.turns_per_hour
-        || (row["investigate"] == true && uncertain >= config.uncertain_turns_per_hour)
+    if row["budget_class"] != "human_message"
+        && (recent.len() >= config.turns_per_hour
+            || (row["investigate"] == true && uncertain >= config.uncertain_turns_per_hour))
     {
         row["status"] = json!("budget_hold");
         save(state, &row)?;
@@ -446,10 +519,10 @@ pub fn restore_unapplied(state: &AppState, id: &str) -> Result<Option<i64>> {
 /// A transport close may retain only a proven-unapplied offer with a saved,
 /// source-verified audience. Explicit cancellation never uses this exception.
 pub fn disconnect(state: &AppState, connection: &str) {
-    cancel_inner(state, connection, None, None, None, true);
+    cancel_inner(state, connection, None, None, None, true, false);
 }
 pub fn cancel(state: &AppState, connection: &str, sid: Option<&str>) {
-    cancel_inner(state, connection, sid, None, None, false);
+    cancel_inner(state, connection, sid, None, None, false, false);
 }
 pub fn cancel_session(
     state: &AppState,
@@ -465,6 +538,26 @@ pub fn cancel_session(
         Some(principal),
         binding,
         false,
+        false,
+    );
+}
+/// A new ordinary prompt supersedes ambient work, not distinct human requests.
+/// Actual session cancellation/revocation continues to invalidate both classes.
+pub fn supersede_ambient(
+    state: &AppState,
+    principal: &str,
+    connection: &str,
+    sid: &str,
+    binding: Option<&Value>,
+) {
+    cancel_inner(
+        state,
+        connection,
+        Some(sid),
+        Some(principal),
+        binding,
+        false,
+        true,
     );
 }
 fn cancel_inner(
@@ -474,10 +567,14 @@ fn cancel_inner(
     principal: Option<&str>,
     binding: Option<&Value>,
     disconnected: bool,
+    ambient_only: bool,
 ) {
     let _lock = state.attention_lock.lock().unwrap();
     if let Ok(rows) = rows(state) {
         for mut row in rows {
+            if ambient_only && row["budget_class"] == "human_message" {
+                continue;
+            }
             let current_binding = binding_key(binding);
             let rebound_candidate = row["disconnected_unapplied"] == true
                 && current_binding.is_some()
@@ -524,6 +621,11 @@ pub fn report(state: &AppState) -> Result<Value> {
         for (key, value) in [
             ("status", r["status"].as_str()),
             ("reason", r["reason"].as_str()),
+            ("source_kind", r["source_kind"].as_str()),
+            (
+                "budget_class",
+                Some(r["budget_class"].as_str().unwrap_or("ambient")),
+            ),
         ] {
             if let Some(v) = value {
                 *counts.entry(format!("{key}:{v}")).or_default() += 1;

@@ -600,15 +600,15 @@ mod tests {
     #[tokio::test]
     async fn account_login_is_idempotent_and_completion_drops_device_code() {
         let dir = account_fixture();
+        let started = login_start(dir.path()).await.unwrap();
+        assert_eq!(started["state"], "pending");
+        assert_eq!(started["user_code"], "ABCD-1234");
+        assert_eq!(login_start(dir.path()).await.unwrap(), started);
         write_private(
             &dir.path().join("backend/provider/fixture-complete"),
             b"yes",
         )
         .unwrap();
-        let started = login_start(dir.path()).await.unwrap();
-        assert_eq!(started["state"], "pending");
-        assert_eq!(started["user_code"], "ABCD-1234");
-        assert_eq!(login_start(dir.path()).await.unwrap(), started);
         let complete = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let state = login_status(dir.path()).await.unwrap();
