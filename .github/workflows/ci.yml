@@ -28,6 +28,7 @@ jobs:
       - name: Check installation updater recovery
         run: |
           python3 ops/updates/test_worker.py
+          python3 ops/updates/test_github_metadata.py
           python3 ops/updates/test_container_provider.py
           python3 ops/updates/test_participants.py
           python3 ops/updates/test_engine_provider.py
@@ -111,6 +112,7 @@ jobs:
       - name: Check native installer and runtime boundaries
         run: |
           python ops/updates/test_worker.py
+          python ops/updates/test_github_metadata.py
           python scripts/test-native-installation.py
           python scripts/test-provisioning.py
       - name: Test native executable and process boundaries
