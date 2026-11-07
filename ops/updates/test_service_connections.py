@@ -40,6 +40,8 @@ class Connections(unittest.TestCase):
         self.w.c={};self.assertTrue(self.w.connection_tick())
     def test_catalog_rejects_overlapping_context_unsafe_urls_and_relative_commands(self):
         worker.validate_service_connections(self.catalog)
+        existing=copy.deepcopy(self.catalog);existing['services'][0].pop('setup_url')
+        worker.validate_service_connections(existing)
         for mutate in [lambda c:c['services'][0].update(setup_url='http://remote/setup'),lambda c:c['connections'][0]['commands'].update(connect=['sh','-c','bad']),lambda c:c['connections'].append(dict(self.entry,id='other'))]:
             c=copy.deepcopy(self.catalog);mutate(c)
             with self.assertRaises(ValueError):worker.validate_service_connections(c)
@@ -50,14 +52,14 @@ class Connections(unittest.TestCase):
         self.assertEqual(result['request_id'],self.command['request_id']);self.assertTrue(result['settled'])
         script.write_text('print("not-json")')
         with self.assertRaises(ValueError):worker.connection_call(self.entry,'disconnect',self.command['request_id'])
-    def test_readiness_report_ack_precedes_next_domain_status_after_lost_http_reply(self):
-        self.command['action']='connect';order=[];fail=[True]
+    def _report_ack_precedes_next_status(self,action,field):
+        self.command['action']=action;order=[];fail=[True]
         def domain(entry,action,request_id):
             order.append(action)
-            return {'schema':1,'connection_id':'world','state':'busy','request_id':request_id,'settled':False,'context_ready':action=='connect','message':''}
+            return {'schema':1,'connection_id':'world','state':'busy','request_id':request_id,'settled':False,field:action!='status','message':''}
         def api(path,body=None):
             if body:
-                ready=body['connections'][0].get('context_ready',False);order.append('report_ready' if ready else 'report_gate')
+                ready=body['connections'][0].get(field,False);order.append('report_ready' if ready else 'report_gate')
                 if ready and fail[0]:fail[0]=False;raise OSError('ack lost')
             return {'request':self.pending}
         self.w.api=api
@@ -65,7 +67,12 @@ class Connections(unittest.TestCase):
             with self.assertRaises(OSError):self.w.connection_tick()
             self.assertTrue((self.root/'connection-report.json').exists())
             self.w.connection_tick()
-        self.assertEqual(order[:6],['status','report_gate','connect','report_ready','report_ready','status'])
+        self.assertEqual(order[:6],['status','report_gate',action,'report_ready','report_ready','status'])
+
+    def test_readiness_report_ack_precedes_next_domain_status_after_lost_http_reply(self):
+        self._report_ack_precedes_next_status('connect','context_ready')
+    def test_disconnect_quiescence_ack_precedes_body_stop_after_lost_http_reply(self):
+        self._report_ack_precedes_next_status('disconnect','context_quiesced')
 
     def test_add_uses_fixed_provider_and_preserves_registration_and_idempotence(self):
         script=self.root/'add.py'

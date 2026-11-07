@@ -65,8 +65,16 @@ impl Add {
                     && f.name
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    && !["password", "token", "secret", "authorization"]
-                        .contains(&f.name.to_ascii_lowercase().as_str())
+                    && ![
+                        "password",
+                        "token",
+                        "secret",
+                        "authorization",
+                        "__proto__",
+                        "constructor",
+                        "prototype",
+                    ]
+                    .contains(&f.name.to_ascii_lowercase().as_str())
                     && label(&f.label)
                     && names.insert(&f.name)
                     && match f.kind.as_str() {
@@ -111,6 +119,8 @@ impl Add {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Connection {
+    #[serde(default)]
+    pub settings_url: Option<String>,
     #[serde(default = "enrolled_default")]
     pub enrolled: bool,
     pub id: String,
@@ -125,6 +135,8 @@ pub struct Connection {
     pub settled: bool,
     #[serde(default)]
     pub context_ready: bool,
+    #[serde(default)]
+    pub context_quiesced: bool,
     #[serde(default)]
     pub failed: bool,
     #[serde(default)]
@@ -205,7 +217,33 @@ pub fn context_enabled(s: &AppState, id: &str) -> anyhow::Result<bool> {
         .unwrap_or(true))
 }
 fn public(r: &Registry) -> Value {
-    json!({"schema":1,"services":r.services,"connections":r.connections,"observed_at":r.observed_at,
+    let connections: Vec<Value> = r
+        .connections
+        .iter()
+        .map(|c| {
+            let mut v = json!(c);
+            v["context_active"] = json!(
+                c.context_provider_ids
+                    .iter()
+                    .all(|id| r.gates.get(id).copied().unwrap_or(true))
+            );
+            v["desired_state"] = r
+                .requests
+                .values()
+                .filter(|op| op.command.connection_id == c.id)
+                .max_by_key(|op| op.created_at)
+                .map(|op| {
+                    json!(if op.command.action == "connect" {
+                        "connected"
+                    } else {
+                        "disconnected"
+                    })
+                })
+                .unwrap_or(Value::Null);
+            v
+        })
+        .collect();
+    json!({"schema":1,"services":r.services,"connections":connections,"observed_at":r.observed_at,
         "helper_connected":r.observed_at>0 && now_ms()-r.observed_at<90000,
         "request":r.pending.as_ref().and_then(|id| r.requests.get(id)),
         "last_operation":r.requests.values().filter(|op|op.finished_at.is_some()).max_by_key(|op|op.finished_at)})
@@ -319,7 +357,6 @@ pub async fn report(
         || b.services.iter().any(|v| {
             !name(&v.id)
                 || !label(&v.label)
-                || (v.setup_url.is_none() && v.add.is_none())
                 || v.setup_url.as_deref().is_some_and(|u| !setup_url(u))
                 || v.add.as_ref().is_some_and(|a| !a.valid())
                 || !services.insert(v.id.clone())
@@ -328,6 +365,7 @@ pub async fn report(
             !name(&c.id)
                 || !services.contains(&c.service)
                 || !label(&c.label)
+                || c.settings_url.as_deref().is_some_and(|u| !setup_url(u))
                 || c.revision.is_empty()
                 || c.revision.len() > 128
                 || !ids.insert(c.id.clone())
@@ -420,10 +458,14 @@ pub async fn report(
                         "disconnected"
                     };
             for provider in &c.context_provider_ids {
-                r.gates.insert(
-                    provider.clone(),
-                    op.command.action == "connect" && !c.failed && (success || c.context_ready),
-                );
+                if op.command.action == "connect" {
+                    r.gates
+                        .insert(provider.clone(), !c.failed && (success || c.context_ready));
+                } else if c.context_quiesced || success || c.failed {
+                    // Preserve active-turn grants during domain admission/drain. Once
+                    // quiesced, no subsequent busy report may reopen this gate.
+                    r.gates.insert(provider.clone(), false);
+                }
             }
             if success || (c.settled && c.failed && c.state != "unknown" && c.state != "busy") {
                 op.finished_at = Some(now_ms());

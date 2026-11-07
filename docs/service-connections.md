@@ -30,10 +30,15 @@ Owner-managed `registration.json` has an optional `service_connections` object:
 }
 ```
 
-A service exposes either a usable `setup_url`, a typed Add provider, or both.
+A service may expose a usable `setup_url`, a typed Add provider, or both.
+Existing-connection-only services may omit both; no Add control is advertised
+until usable setup is enrolled. Do not provide placeholder URLs.
 HTTPS is required except numeric loopback HTTP for local setup. Credentials must
 not appear in URLs. Each context provider belongs to at most one connection.
 There are at most 32 services, 64 connections and 16 provider IDs per connection.
+A connection may include settings_url with the same URL restrictions, linking to
+its own configuration/authorization page. Public enrolled/context_active and
+desired_state distinguish observed state, availability and requested intent.
 Registration changes retain other component IDs, participants and policies.
 Fixed owner command files live outside agent-writable/container-mounted paths.
 
@@ -53,7 +58,7 @@ Each invocation is bounded to 30 seconds and a single JSON response of at most
 ```
 
 States are `connected`, `disconnected`, `busy`, `unknown`. Optional
-`context_ready` and `failed` default to false. Periodic status has null request_id.
+`context_ready`, `context_quiesced` and `failed` default to false. Periodic status has null request_id.
 A matching request ID plus settled=true and the requested terminal state proves
 success. Acceptance, a healthy process or transport closure does not.
 
@@ -81,7 +86,13 @@ The browser queues an action; it does not execute it. A queued action must not
 invalidate an updater already verifying a saved session. After active update
 transactions finish, the host sends a matching busy/context_ready=false report,
 gets its acknowledgement, then journals and dispatches the fixed command. This
-closes that connection's provider gates before domain effects.
+closes Connect's provider gates before domain effects. For Disconnect it preserves
+the current context gate while the domain closes admission and drains active work.
+After current work settles and the controller stops, the domain returns
+context_quiesced=true while busy, BEFORE stopping its context/body. The host must
+acknowledge that report (closing the gate) before the next status phase may stop
+the body. Later busy/unknown reports cannot reopen a quiesced Disconnect gate.
+Terminal disconnected or a known settled failure also closes the gate.
 
 Connect may return context_ready=true with the matching request ID while busy,
 after its context/MCP endpoint is reachable under closed controller/effect

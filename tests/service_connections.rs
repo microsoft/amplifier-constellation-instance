@@ -51,7 +51,7 @@ fn operation(action: &str) -> Value {
     json!({"connection_id":"world","revision":"r1","action":action,"request_id":uuid::Uuid::new_v4().to_string()})
 }
 #[tokio::test]
-async fn disconnect_gates_immediately_and_only_matching_connect_reopens_after_restart() {
+async fn disconnect_preserves_context_until_quiesced_then_only_matching_connect_reopens() {
     let (d, s) = fixture();
     assert_eq!(
         api(
@@ -84,6 +84,19 @@ async fn disconnect_gates_immediately_and_only_matching_connect_reopens_after_re
             Some(disconnect["request_id"].as_str().unwrap()),
             false,
         ),
+        true,
+    )
+    .await;
+    assert!(agent_instance::service_connections::context_enabled(&s, "world-context").unwrap());
+    let mut quiesced = catalog("busy", disconnect["request_id"].as_str(), false);
+    quiesced["connections"][0]["context_quiesced"] = json!(true);
+    api(&s, "POST", "service-connections/report", quiesced, true).await;
+    assert!(!agent_instance::service_connections::context_enabled(&s, "world-context").unwrap());
+    api(
+        &s,
+        "POST",
+        "service-connections/report",
+        catalog("busy", disconnect["request_id"].as_str(), false),
         true,
     )
     .await;
@@ -330,4 +343,17 @@ async fn add_validates_owner_schema_and_requires_saved_enrollment_for_settlement
             .is_null()
     );
     assert!(!agent_instance::service_connections::context_enabled(&s, "world-context").unwrap());
+}
+
+#[tokio::test]
+async fn existing_only_catalog_has_no_invented_setup_requirement() {
+    let (_d, s) = fixture();
+    let mut c = catalog("connected", None, false);
+    c["services"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("setup_url");
+    let (status, body) = api(&s, "POST", "service-connections/report", c, true).await;
+    assert_eq!(status, 200);
+    assert!(body["services"][0]["add"].is_null());
 }

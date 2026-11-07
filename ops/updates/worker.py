@@ -60,16 +60,19 @@ def validate_service_connections(catalog):
             if set(service.get('add_commands',{}))!={'add','status'}:raise ValueError('fixed_add_commands_required')
             for argv in service['add_commands'].values():
                 if not isinstance(argv,list) or not argv or not all(isinstance(v,str) and '\x00' not in v for v in argv) or not Path(argv[0]).is_absolute():raise ValueError('fixed_absolute_add_commands_required')
-        if not service.get('setup_url'):
-            if not service.get('add'):raise ValueError('setup_required')
-            continue
+        if not service.get('setup_url'):continue
         url=urllib.parse.urlparse(service['setup_url'])
         try:loopback=ipaddress.ip_address(url.hostname).is_loopback
         except ValueError:loopback=False
         if not url.hostname or url.username or url.password or url.fragment or not (url.scheme=='https' or url.scheme=='http' and loopback):raise ValueError('invalid_connection_setup_url')
     for connection in connections:
-        if set(connection)!={'id','service','label','revision','context_provider_ids','commands'} or connection['service'] not in names or not re.fullmatch('[a-zA-Z0-9_.:-]{1,128}',connection['id']) or connection['id'] in ids:raise ValueError('invalid_saved_connection')
+        if not {'id','service','label','revision','context_provider_ids','commands'}<=set(connection) or set(connection)-{'id','service','label','revision','context_provider_ids','commands','settings_url'} or connection['service'] not in names or not re.fullmatch('[a-zA-Z0-9_.:-]{1,128}',connection['id']) or connection['id'] in ids:raise ValueError('invalid_saved_connection')
         ids.add(connection['id'])
+        if connection.get('settings_url'):
+            url=urllib.parse.urlparse(connection['settings_url'])
+            try:loopback=ipaddress.ip_address(url.hostname).is_loopback
+            except ValueError:loopback=False
+            if not url.hostname or url.username or url.password or url.fragment or not (url.scheme=='https' or url.scheme=='http' and loopback):raise ValueError('invalid_connection_settings_url')
         if not isinstance(connection['revision'],str) or not 1<=len(connection['revision'])<=128:raise ValueError('invalid_connection_revision')
         if len(connection['context_provider_ids'])>16:raise ValueError('invalid_context_bindings')
         for provider in connection['context_provider_ids']:
@@ -88,9 +91,9 @@ def connection_call(entry,action,request_id):
         process=subprocess.run(entry['commands'][action],input=json.dumps(payload).encode(),stdout=output,stderr=subprocess.DEVNULL,timeout=30)
         if process.returncode or output.tell()>65536:raise ValueError('connection_command_failed')
         output.seek(0);result=json.load(output)
-    if set(result)-{'schema','connection_id','state','request_id','settled','message','context_ready','failed'} or result.get('schema')!=1 or result.get('connection_id')!=entry['id'] or result.get('state') not in ['connected','disconnected','busy','unknown'] or result.get('request_id')!=request_id or not isinstance(result.get('settled'),bool) or not isinstance(result.get('message',''),str) or len(result.get('message',''))>1000:raise ValueError('invalid_connection_result')
-    if not isinstance(result.get('context_ready',False),bool) or not isinstance(result.get('failed',False),bool):raise ValueError('invalid_connection_result')
-    result.setdefault('message','');result.setdefault('context_ready',False);result.setdefault('failed',False)
+    if set(result)-{'schema','connection_id','state','request_id','settled','message','context_ready','context_quiesced','failed'} or result.get('schema')!=1 or result.get('connection_id')!=entry['id'] or result.get('state') not in ['connected','disconnected','busy','unknown'] or result.get('request_id')!=request_id or not isinstance(result.get('settled'),bool) or not isinstance(result.get('message',''),str) or len(result.get('message',''))>1000:raise ValueError('invalid_connection_result')
+    if not isinstance(result.get('context_ready',False),bool) or not isinstance(result.get('context_quiesced',False),bool) or not isinstance(result.get('failed',False),bool):raise ValueError('invalid_connection_result')
+    result.setdefault('message','');result.setdefault('context_ready',False);result.setdefault('context_quiesced',False);result.setdefault('failed',False)
     return result
 
 def load_registration(path):
@@ -652,10 +655,11 @@ class Worker:
         for entry in catalog['connections']:
             request_id=command['request_id'] if command and not adding and command['connection_id']==entry['id'] else None
             public={k:entry[k] for k in ['id','service','label','revision','context_provider_ids']}
+            if entry.get('settings_url'):public['settings_url']=entry['settings_url']
             if saved and not adding and request_id and saved['entry_sha256']!=hashlib.sha256(json.dumps(entry,sort_keys=True).encode()).hexdigest():raise ValueError('connection_enrollment_changed')
             try:result=connection_call(entry,'status',request_id)
             except Exception:result={'state':'unknown','request_id':request_id,'settled':False,'message':'Connection status is unavailable; no action has been repeated.'}
-            public.update({k:result.get(k,False if k in ['settled','context_ready','failed'] else '') for k in ['state','request_id','settled','message','context_ready','failed']});observations.append(public)
+            public.update({k:result.get(k,False if k in ['settled','context_ready','context_quiesced','failed'] else '') for k in ['state','request_id','settled','message','context_ready','context_quiesced','failed']});observations.append(public)
         if command and not adding:
             entry=next((e for e in catalog['connections'] if e['id']==command['connection_id'] and e['revision']==command['revision']),None)
             if not entry:raise ValueError('connection_enrollment_changed')
@@ -663,13 +667,13 @@ class Worker:
             observed=next(e for e in observations if e['id']==entry['id'])
             complete=observed['settled'] and (observed['state']==expected or observed.get('failed') and observed['state'] in ['connected','disconnected']) and observed['request_id']==command['request_id']
             if not saved and not complete:
-                observed.update(state='busy',settled=False,context_ready=False,failed=False,message='Connection change is starting.')
+                observed.update(state='busy',settled=False,context_ready=False,context_quiesced=False,failed=False,message='Connection change is starting.')
                 gate_report={'schema':1,'services':[{k:v for k,v in service.items() if k!='add_commands'} for service in catalog['services']],'connections':observations}
                 write(outbox,gate_report);self.api('service-connections/report',gate_report);outbox.unlink()
                 write(journal,{'schema':1,'command':command,'entry_sha256':hashlib.sha256(json.dumps(entry,sort_keys=True).encode()).hexdigest()})
                 try:
                     result=connection_call(entry,command['action'],command['request_id'])
-                    observed.update({k:result.get(k,False if k in ['context_ready','failed'] else '') for k in ['state','request_id','settled','message','context_ready','failed']})
+                    observed.update({k:result.get(k,False if k in ['context_ready','context_quiesced','failed'] else '') for k in ['state','request_id','settled','message','context_ready','context_quiesced','failed']})
                 except Exception:observed.update(state='unknown',settled=False,context_ready=False,message='Connection operation needs reconciliation; its status will be checked without repeating it.')
         body={'schema':1,'services':[{k:v for k,v in s.items() if k!='add_commands'} for s in catalog['services']],'connections':observations}
         if add_result:body['add_result']=add_result
