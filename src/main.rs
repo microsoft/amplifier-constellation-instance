@@ -95,11 +95,20 @@ enum Command {
         state: Option<PathBuf>,
         #[arg(long)]
         slack_home: Vec<PathBuf>,
+        #[arg(long)]
+        container_manifest: Option<PathBuf>,
+        #[arg(long)]
+        container_image: Option<String>,
     },
     /// Write this version's update helper for the host installation.
     ExportUpdateHelper {
         #[arg(long)]
         path: PathBuf,
+    },
+    /// Export owner-run providers used by this version's installation updater.
+    ExportUpdateSupport {
+        #[arg(long)]
+        directory: PathBuf,
     },
     Schema,
 }
@@ -322,10 +331,17 @@ async fn main() -> Result<()> {
             )?;
             Ok(())
         }
-        Command::InstallUpdates { state, slack_home } => {
+        Command::ExportUpdateSupport { directory } => export_update_support(&directory),
+        Command::InstallUpdates {
+            state,
+            slack_home,
+            container_manifest,
+            container_image,
+        } => {
             let staging = std::env::temp_dir()
                 .join(format!("constellation-updater-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&staging)?;
+            export_update_support(&staging)?;
             agent_instance::config::write_private(
                 &staging.join("worker.py"),
                 include_bytes!("../ops/updates/worker.py"),
@@ -345,6 +361,12 @@ async fn main() -> Result<()> {
             }
             for home in slack_home {
                 cmd.arg("--slack-home").arg(home);
+            }
+            if let Some(manifest) = container_manifest {
+                cmd.arg("--container-manifest").arg(manifest);
+            }
+            if let Some(image) = container_image {
+                cmd.arg("--container-image").arg(image);
             }
             let result = cmd.status();
             let _ = std::fs::remove_dir_all(&staging);
@@ -531,4 +553,41 @@ async fn main() -> Result<()> {
                 .context("Management request failed")?,
         ),
     }
+}
+
+fn export_update_support(directory: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(directory.join("container"))?;
+    for (name, data) in [
+        (
+            "engine_provider.py",
+            include_bytes!("../ops/updates/engine_provider.py").as_slice(),
+        ),
+        (
+            "container_provider.py",
+            include_bytes!("../ops/updates/container_provider.py").as_slice(),
+        ),
+        (
+            "provision-backend.py",
+            include_bytes!("../scripts/provision-backend.py").as_slice(),
+        ),
+        (
+            "container/install.py",
+            include_bytes!("../ops/container/install.py").as_slice(),
+        ),
+        (
+            "container/bridge.py",
+            include_bytes!("../ops/container/bridge.py").as_slice(),
+        ),
+        (
+            "container/launch-service.py",
+            include_bytes!("../ops/container/launch-service.py").as_slice(),
+        ),
+        (
+            "container/seccomp.json",
+            include_bytes!("../ops/container/seccomp.json").as_slice(),
+        ),
+    ] {
+        agent_instance::config::write_private(&directory.join(name), data)?;
+    }
+    Ok(())
 }

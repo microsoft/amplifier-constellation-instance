@@ -107,17 +107,33 @@ pub async fn install_native(home: &Path, binary: Option<&Path>) -> Result<Backen
     Ok(serde_json::from_value(result["backend"].clone())?)
 }
 
+fn configured_bundle(config: &InstanceConfig) -> Option<&str> {
+    let command = &config.backend.as_ref()?.command;
+    let bundle = command
+        .strip_prefix("${AGENT_HOME}/backend/runtime/")?
+        .strip_suffix(&format!(
+            "/node/bin/{}",
+            crate::platform::executable("node")
+        ))?;
+    (!bundle.is_empty()
+        && bundle
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.'))
+    .then_some(bundle)
+}
 fn runtime(home: &Path) -> PathBuf {
-    home.join("backend/runtime").join(BUNDLE)
+    let config = std::fs::read(home.join("config.json"))
+        .ok()
+        .and_then(|v| serde_json::from_slice::<Value>(&v).ok())
+        .and_then(|v| serde_json::from_value::<InstanceConfig>(v["config"].clone()).ok());
+    let bundle = config
+        .as_ref()
+        .and_then(configured_bundle)
+        .unwrap_or(BUNDLE);
+    home.join("backend/runtime").join(bundle)
 }
 fn configured_default(config: &InstanceConfig) -> bool {
-    config.backend.as_ref().is_some_and(|b| {
-        b.command
-            == format!(
-                "${{AGENT_HOME}}/backend/runtime/{BUNDLE}/{}",
-                runtime_files()[0]
-            )
-    })
+    configured_bundle(config).is_some()
 }
 fn runtime_files() -> Vec<String> {
     vec![
@@ -270,6 +286,10 @@ pub fn status(home: &Path, config: &InstanceConfig) -> Value {
     }
     let is_default = configured_default(config);
     let installed = installed(home);
+    let versions = std::fs::read(runtime(home).join("runtime.json"))
+        .ok()
+        .and_then(|v| serde_json::from_slice::<Value>(&v).ok())
+        .unwrap_or_else(|| serde_json::from_str(LOCK).unwrap());
     let auth_ready = is_default && installed && account_present(home);
     let kind = if is_default {
         "codex"
@@ -302,9 +322,9 @@ pub fn status(home: &Path, config: &InstanceConfig) -> Value {
     };
     json!({"kind":kind,"configured":config.backend.is_some(),"installed":installed,
         "name":if kind=="custom" {"Custom ACP agent"} else {"Codex"},
-        "version": if kind=="custom" {None} else {Some("0.165.0")},
-        "acp_version":if kind=="custom" {None} else {Some("2.5.0")},
-        "node_version":if kind=="custom" {None} else {Some("22.23.2")},
+        "version": if kind=="custom" {None} else {versions["codex_version"].as_str()},
+        "acp_version":if kind=="custom" {None} else {versions["acp_version"].as_str()},
+        "node_version":if kind=="custom" {None} else {versions["node_version"].as_str()},
         "auth_ready":auth_ready,"auth_validated":false,"account_source":if is_default {source(home)} else {"none"},
         "status":state,"problem":problem,"help": if state=="needs_account" {Some("Sign in once for this agent. Device-code login must be enabled in your ChatGPT security settings or workspace permissions.")} else {None::<&str>},
         "actions":actions,
