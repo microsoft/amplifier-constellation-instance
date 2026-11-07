@@ -23,7 +23,7 @@ def tree_digest(root):
     return h.hexdigest()
 
 def remap(value,old,new):
-    if isinstance(value,str):return value.replace(old,new)
+    if isinstance(value,str):return value.replace(old,new).replace(old.replace('\\','/'),new.replace('\\','/'))
     if isinstance(value,list):return [remap(x,old,new) for x in value]
     if isinstance(value,dict):return {k:remap(v,old,new) for k,v in value.items()}
     return value
@@ -150,8 +150,8 @@ class Provider:
         destination=self.runtime/('update-'+release['version']+'-'+uuid.uuid4().hex[:8]);destination.mkdir(parents=True,mode=0o700)
         try:
             command=self.stage(release,destination)
-            old_token=str(old) if not backend['command'].startswith('${AGENT_HOME}') else '${AGENT_HOME}/'+str(old.relative_to(self.home))
-            new_token=str(destination) if not backend['command'].startswith('${AGENT_HOME}') else '${AGENT_HOME}/'+str(destination.relative_to(self.home))
+            old_token=str(old) if not backend['command'].startswith('${AGENT_HOME}') else '${AGENT_HOME}/'+old.relative_to(self.home).as_posix()
+            new_token=str(destination) if not backend['command'].startswith('${AGENT_HOME}') else '${AGENT_HOME}/'+destination.relative_to(self.home).as_posix()
             after=remap(backend,old_token,new_token)
             if Path(after['command'].replace('${AGENT_HOME}',str(self.home)))!=Path(command):raise ValueError('engine_command_layout_changed')
             w.write(destination/'engine-update.json',{'kind':self.kind,'version':release['version'],'source':release})

@@ -41,6 +41,10 @@ class EngineTests(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,'family_changed'):self.p.current()
  def test_bytecode_cache_is_not_engine_drift(self):
   p=self.planned();folder=Path(p['candidate']);(folder/'__pycache__').mkdir();(folder/'__pycache__/loaded.pyc').write_bytes(b'transient');self.p.apply();self.assertTrue(self.p.verify()['healthy'])
+ def test_windows_executable_paths_keep_placeholder_and_account_paths(self):
+  value={'command':'C:/agent/releases/old/bin/engine.exe','env':{'ACCOUNT':'C:/agent/account'}}
+  result=e.remap(value,r'C:\agent\releases\old',r'C:\agent\releases\new')
+  self.assertEqual(result['command'],'C:/agent/releases/new/bin/engine.exe');self.assertEqual(result['env'],value['env'])
  def test_release_binary_limit_is_explicit(self):
   import io,tarfile
   out=io.BytesIO()
