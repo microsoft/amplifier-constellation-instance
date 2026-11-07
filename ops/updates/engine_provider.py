@@ -78,14 +78,17 @@ class Provider:
                 if not re.fullmatch('[0-9a-f]{40}',result['commit']):raise ValueError('release_commit_required')
             return result
         # The reviewed installer still owns extraction/version validation. Resolve
-        # only official stable npm versions and retain the enrolled Node LTS line.
+        # only official stable npm versions and update patches within the enrolled Node LTS line.
         p=module('provision_engine',Path(__file__).with_name('provision-backend.py'))
         codex=w.http_json('https://registry.npmjs.org/@openai%2Fcodex/latest')
         acp=w.http_json('https://registry.npmjs.org/@agentclientprotocol%2Fcodex-acp/latest')
         key=p.platform_key();old=w.read(self.current()[2]/'runtime.json')
         cv,av=codex['version'],acp['version'];nv=old['node_version']
+        node_releases=w.http_json('https://nodejs.org/dist/index.json')
+        same_major=[r['version'].removeprefix('v') for r in node_releases if r['version'].startswith('v'+nv.split('.')[0]+'.') and r.get('lts')]
+        if same_major:nv=max([nv,*same_major],key=w.version)
         if any(not re.fullmatch(r'\d+\.\d+\.\d+',v) for v in (cv,av,nv)):raise ValueError('stable_engine_release_required')
-        if w.version(cv)<=w.version(old['codex_version']) and w.version(av)<=w.version(old['acp_version']):return None
+        if w.version(cv)<=w.version(old['codex_version']) and w.version(av)<=w.version(old['acp_version']) and w.version(nv)<=w.version(old['node_version']):return None
         if w.version(cv)<w.version(old['codex_version']) or w.version(av)<w.version(old['acp_version']):raise ValueError('engine_downgrade_refused')
         package=w.http_json('https://registry.npmjs.org/@openai%2Fcodex/'+cv+'-'+key)
         node_name='node-v'+nv+'-'+key.replace('win32','win')+('.zip' if os.name=='nt' else '.tar.gz')

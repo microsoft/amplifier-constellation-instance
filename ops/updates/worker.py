@@ -172,7 +172,12 @@ class Worker:
         return http_json('https://127.0.0.1:'+str(config['server']['port'])+'/api/v1/'+path,body,{'Authorization':'Bearer '+token},self.context)
     def save(self,**values):self.state.update(values,updated_at=int(time.time()*1000));write(self.file,self.state)
     def report(self,drain=False,finished=None):
-        return self.api('updates/report',{'status':self.state,'finished_request':finished,'drain_seconds':60 if drain else 0})
+        public=dict(self.state)
+        tx=public.get('transaction')
+        if tx:
+            public['transaction']={k:tx.get(k) for k in ('id','plan_id','phase','outcome','attempted','restored')}
+            public['transaction']['participants']=[p['id'] for p in tx['participants']]
+        return self.api('updates/report',{'status':public,'finished_request':finished,'drain_seconds':60 if drain else 0})
     def full_restart_scope(self):
         return {'services':[s['name'] for s in self.c.get('services',[])],
                 'instance':True,'slack_homes':self.c.get('slack_homes',[])}
@@ -378,7 +383,10 @@ class Worker:
                 part=next(x for x in plan['components'] if x['id']==p['id'])
                 if part['available'] or 'restart_scope' not in plan:self.replace(backup,p['binary'])
             elif p['id'] in plan.get('provider_attempts',[x['id'] for x in plan['components'] if x['available']]):self.provider_call(p,'rollback',folder)
-        self.control('start',scope);self.provider_verify(plan);self.health(expected,scope);self.save(state='rolled_back',rollback_plan_id=None,components=self.installed_inventory(plan,rolled_back=True));self.report()
+        self.control('start',scope);self.provider_verify(plan);self.health(expected,scope)
+        tx=self.state.get('transaction')
+        if tx:self.transaction_save(tx,phase='restoring_checks',outcome='rolled_back')
+        self.save(state='verifying' if tx else 'rolled_back',rollback_plan_id=None,components=self.installed_inventory(plan,rolled_back=True));self.report()
     def validate_provider_plans(self,plan):
         folder=self.root/'plans'/plan['id']
         for p in self.c['components']:
@@ -433,7 +441,7 @@ class Worker:
                             plan.setdefault('provider_attempts',[]).append(p['id']);write(folder/'plan.json',plan)
                             self.provider_call(p,'apply',folder)
                 self.control('start',scope);self.save(state='verifying');self.provider_verify(plan);self.health(expected,scope)
-                self.save(state='succeeded',rollback_plan_id=plan['id'],installed_at=int(time.time()*1000),components=self.installed_inventory(plan));self.report()
+                self.save(state='verifying' if self.state.get('transaction') else 'succeeded',rollback_plan_id=plan['id'],installed_at=int(time.time()*1000),components=self.installed_inventory(plan));self.report()
             except BaseException:
                 try:self.rollback(plan)
                 except BaseException:self.save(state='recovery_required');raise
@@ -516,7 +524,7 @@ class Worker:
                 if tx.get('outcome')=='applied':
                     self.transaction_save(tx,phase='cutover')
                     self.rollback(plan)
-                outcome='rolled_back' if self.state['state']=='rolled_back' else 'unchanged'
+                outcome='rolled_back' if tx.get('outcome')=='rolled_back' or self.state['state']=='rolled_back' else 'unchanged'
                 if self.state['state']=='recovery_required':raise ValueError('component_recovery_required')
                 self.transaction_save(tx,phase='restoring_checks',outcome=outcome)
                 self.restore_participants(tx,outcome)

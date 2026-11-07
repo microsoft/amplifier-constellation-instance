@@ -66,6 +66,12 @@ class ParticipantTests(unittest.TestCase):
    w.Worker.control(obj,'start',{'services':['live.service','paused.service'],'instance':True,'slack_homes':[]})
   self.assertEqual([c.args[0] for c in run.call_args_list],[['systemctl','--user','start','live.service']])
 
+ def test_status_does_not_export_owner_commands_or_context_paths(self):
+  obj=self.worker();obj.state['transaction']={'id':'tx','participants':[{'id':'game','commands':{'prepare':['/private/owner','secret-canary']}}],'directory':'/private/receipts','contexts':{'game':'private'},'phase':'preparing'}
+  captured=[];obj.api=lambda path,body:captured.append(body) or {}
+  w.Worker.report(obj)
+  value=json.dumps(captured);self.assertNotIn('secret-canary',value);self.assertNotIn('/private',value);self.assertEqual(captured[0]['status']['transaction']['participants'],['game'])
+
 if __name__=='__main__':
  import unittest
  unittest.main()
