@@ -586,11 +586,14 @@ class Worker:
         if component is None:return
         current=digest(component['binary'])
         if self.state.get('helper_instance_sha256')==current:return
+        # A newer host helper can bootstrap an older compatible Instance. Do
+        # not replace it with the old embedded helper before the host upgrade.
+        if version(run([component['binary'],'--version']).decode()) < (0,20,0):
+            self.save(helper_instance_sha256=current);return
         exported=self.root/'worker-next.py'
         run([component['binary'],'export-update-helper','--path',exported])
         same=digest(exported)==digest(Path(__file__))
-        if version(run([component['binary'],'--version']).decode()) >= (0,20,0):
-            run([component['binary'],'export-update-support','--directory',self.root])
+        run([component['binary'],'export-update-support','--directory',self.root])
         self.save(helper_instance_sha256=current)
         if same:exported.unlink();return
         target=Path(__file__);os.replace(exported,target)
