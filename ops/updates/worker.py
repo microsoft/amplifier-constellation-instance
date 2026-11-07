@@ -591,7 +591,7 @@ class Worker:
         if self.state.get('helper_instance_sha256')==current:return
         # A newer host helper can bootstrap an older compatible Instance. Do
         # not replace it with the old embedded helper before the host upgrade.
-        if version(run([component['binary'],'--version']).decode()) < (0,20,0):
+        if version(run([component['binary'],'--version']).decode()) < (0,20,1):
             self.save(helper_instance_sha256=current);return
         exported=self.root/'worker-next.py'
         run([component['binary'],'export-update-helper','--path',exported])

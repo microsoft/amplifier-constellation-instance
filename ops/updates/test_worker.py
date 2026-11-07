@@ -23,6 +23,13 @@ class UpdateTests(unittest.TestCase):
  def test_helper_state_cannot_be_inside_agent(self):
   self.registration['state']=str(self.home/'helper');w.write(self.path,self.registration)
   with self.assertRaisesRegex(ValueError,'outside'):w.load_registration(self.path)
+ def test_verification_helper_bootstrap_is_not_replaced_by_older_instance(self):
+  obj=self.worker()
+  for installed in ('0.19.0','0.20.0'):
+   with self.subTest(installed=installed),patch.object(w,'run',return_value=('agent-instance '+installed).encode()) as run:
+    obj.state.pop('helper_instance_sha256',None);obj.refresh_helper()
+    run.assert_called_once_with([str(self.binary),'--version'])
+    self.assertEqual(obj.state['helper_instance_sha256'],w.digest(self.binary))
  def test_stable_github_tags_match_installed_versions(self):
   for tag in ['v0.14.0','v0.12.0']:
    with self.subTest(tag=tag),patch.object(w,'gh',return_value={'tag_name':tag}),patch.object(w,'run',return_value=b'agent-instance 0.14.0'),patch.object(w,'download') as download:
