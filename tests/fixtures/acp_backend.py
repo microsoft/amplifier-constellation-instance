@@ -103,7 +103,11 @@ def prompt(req):
         emit({"jsonrpc": "2.0", "id": 1, "method": "session/request_permission", "params": {
             "sessionId": sid, "toolCall": {"toolCallId": "tool1", "title": "Fixture operation"},
             "options": [{"optionId": "permit", "kind": "allow_once", "name": "Allow fixture"}, {"optionId": "reject", "kind": "reject_once", "name": "Reject fixture"}]}})
-        done.wait(10)
+        # Permission is the test's explicit release barrier. A slow native CI
+        # runner must not silently finish this prompt while steering is tested.
+        if not done.wait(60):
+            fail(req, -32000, "Fixture permission release was not received")
+            return
         detail["permission"] = callbacks.pop("1", {}).get("response", {})
     if "REQUEST_FILE" in text:
         done = threading.Event()
