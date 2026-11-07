@@ -23,9 +23,39 @@ class UpdateTests(unittest.TestCase):
  def test_helper_state_cannot_be_inside_agent(self):
   self.registration['state']=str(self.home/'helper');w.write(self.path,self.registration)
   with self.assertRaisesRegex(ValueError,'outside'):w.load_registration(self.path)
+ def test_api_uses_enrolled_bind_and_preserves_tls_and_auth(self):
+  (self.home/'secrets').mkdir();(self.home/'secrets/control-token').write_text('fixture-token')
+  for bind,host in [('127.0.0.1','127.0.0.1'),('100.104.92.30','100.104.92.30'),('0.0.0.0','127.0.0.1'),('::','[::1]'),('::1','[::1]'),('fd7a:115c:a1e0::1','[fd7a:115c:a1e0::1]')]:
+   with self.subTest(bind=bind),patch.object(w.ssl,'create_default_context'),patch.object(w,'http_json',return_value={'active_prompts':0}) as call:
+    w.write(self.home/'config.json',{'config':{'server':{'bind':bind,'port':19400,'public_url':'https://not-the-management-origin.invalid'}}})
+    obj=w.Worker(self.path);result=obj.api('status')
+    self.assertEqual(result,{'active_prompts':0});self.assertEqual(call.call_args.args,('https://'+host+':19400/api/v1/status',None,{'Authorization':'Bearer fixture-token'},obj.context))
+ def test_api_rejects_non_ip_bind_without_sending_token(self):
+  (self.home/'secrets').mkdir();(self.home/'secrets/control-token').write_text('fixture-token')
+  for bind in ['host.invalid','127.0.0.1@elsewhere.invalid','https://elsewhere.invalid']:
+   with self.subTest(bind=bind),patch.object(w.ssl,'create_default_context'),patch.object(w,'http_json') as call:
+    w.write(self.home/'config.json',{'config':{'server':{'bind':bind,'port':19400}}});obj=w.Worker(self.path)
+    with self.assertRaises(ValueError):obj.api('status')
+    call.assert_not_called()
+ def test_missing_bind_remains_loopback_compatible(self):
+  self.assertEqual(w.local_api_base({'server':{'port':19400}}),'https://127.0.0.1:19400/api/v1/')
+ def test_slack_reconnection_uses_its_own_enrolled_listener(self):
+  slack=self.root/'slack';(slack/'bin').mkdir(parents=True);(slack/'secrets').mkdir()
+  binary=slack/'bin/acp-slack-adapter';binary.write_bytes(b'slack-binary')
+  (slack/'secrets/control-token').write_text('slack-fixture-token')
+  self.registration['slack_homes']=[str(slack)]
+  self.registration['components'].append({'id':'slack','kind':'slack','binary':str(binary)})
+  w.write(self.path,self.registration);obj=self.worker();obj.api=lambda *a,**k:{'instance_id':'fixture','uptime_ms':0}
+  obj.state['cutover_at']=1
+  for bind,host in [('100.104.92.30','100.104.92.30'),('::','[::1]')]:
+   w.write(slack/'adapter.json',{'enabled':True,'server':{'bind':bind,'port':19401}})
+   with self.subTest(bind=bind),patch.object(w.ssl,'create_default_context') as context,patch.object(w,'http_json',return_value={'state':{'slack_connection':{'state':'connected'}},'runtime':{'updated_at':2}}) as call:
+    w.Worker.health(obj,{'instance':w.digest(self.binary),'slack':w.digest(binary)})
+    context.assert_called_once_with(cafile=str(slack/'tls/root-ca.crt'))
+    call.assert_called_once_with('https://'+host+':19401/api/v1/status',headers={'Authorization':'Bearer slack-fixture-token'},ctx=context.return_value)
  def test_verification_helper_bootstrap_is_not_replaced_by_older_instance(self):
   obj=self.worker()
-  for installed in ('0.19.0','0.20.0'):
+  for installed in ('0.19.0','0.20.0','0.20.1'):
    with self.subTest(installed=installed),patch.object(w,'run',return_value=('agent-instance '+installed).encode()) as run:
     obj.state.pop('helper_instance_sha256',None);obj.refresh_helper()
     run.assert_called_once_with([str(self.binary),'--version'])

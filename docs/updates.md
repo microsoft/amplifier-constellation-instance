@@ -41,6 +41,12 @@ Each installation still works independently. The default helper directory is
 Linux uses a user service, macOS a LaunchAgent, and Windows a scheduled task owned
 by the signed-in user. The installer requires Python 3.9 or newer.
 
+The helper connects to each enrolled service's configured bind address. Wildcard
+listeners use the matching IPv4 or IPv6 loopback address; explicit private
+addresses remain explicit. Management calls and Slack reconnection checks retain
+the installation's TLS trust and control token, without using its public URL or
+changing the listener configuration.
+
 The private `registration.json` can enroll additional update providers. The built-in
 GitHub provider supports the native instance, runtime, Slack and Teams component
 repositories when a matching platform artifact is available. A `command` provider

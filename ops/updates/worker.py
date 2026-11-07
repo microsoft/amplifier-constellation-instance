@@ -4,7 +4,7 @@
 The registration file is private operator input, never supplied by an agent.
 The authenticated instance API supplies only action/plan IDs and policy choices.
 """
-import argparse, contextlib, hashlib, io, json, os, platform, re, shutil
+import argparse, contextlib, hashlib, io, ipaddress, json, os, platform, re, shutil
 import sqlite3, ssl, subprocess, sys, tarfile, tempfile, threading, time, urllib.request, uuid, zipfile
 from pathlib import Path
 
@@ -36,6 +36,14 @@ def version(text):
     m=re.search(r'\bv?(\d+)\.(\d+)\.(\d+)',text)
     if not m: raise ValueError('version_unavailable')
     return tuple(map(int,m.groups()))
+
+def local_api_base(config):
+    # Connect to the enrolled listener, not a public URL or guessed loopback.
+    # Match Instance's local address selection for wildcard and IPv6 binds.
+    server=config['server'];address=ipaddress.ip_address(server.get('bind','127.0.0.1'))
+    if address.is_unspecified:address=ipaddress.ip_address('::1' if address.version==6 else '127.0.0.1')
+    host='['+str(address)+']' if address.version==6 else str(address)
+    return 'https://'+host+':'+str(int(server['port']))+'/api/v1/'
 
 def load_registration(path):
     c=read(path)
@@ -169,7 +177,7 @@ class Worker:
         self.context=ssl.create_default_context(cafile=str(self.home/'tls/root-ca.crt'))
     def api(self,path='updates',body=None):
         config=read(self.home/'config.json')['config'];token=(self.home/'secrets/control-token').read_text().strip()
-        return http_json('https://127.0.0.1:'+str(config['server']['port'])+'/api/v1/'+path,body,{'Authorization':'Bearer '+token},self.context)
+        return http_json(local_api_base(config)+path,body,{'Authorization':'Bearer '+token},self.context)
     def save(self,**values):self.state.update(values,updated_at=int(time.time()*1000));write(self.file,self.state)
     def report(self,drain=False,finished=None):
         public=dict(self.state)
@@ -253,7 +261,7 @@ class Worker:
                     if self.state.get('service_snapshot',{}).get(component.get('service_name')) is False:continue
                     cfg=read(Path(home)/'adapter.json');ctx=ssl.create_default_context(cafile=str(Path(home)/'tls/root-ca.crt'))
                     h={'Authorization':'Bearer '+(Path(home)/'secrets/control-token').read_text().strip()}
-                    value=http_json('https://127.0.0.1:'+str(cfg['server']['port'])+'/api/v1/status',headers=h,ctx=ctx)
+                    value=http_json(local_api_base(cfg)+'status',headers=h,ctx=ctx)
                     if cfg['enabled'] and value.get('state',{}).get('slack_connection',{}).get('state')!='connected':raise ValueError('slack_reconnecting')
                     if cfg['enabled'] and value.get('runtime',{}).get('updated_at',0)<self.state.get('cutover_at',0):raise ValueError('old_slack_process')
                 return
@@ -591,7 +599,7 @@ class Worker:
         if self.state.get('helper_instance_sha256')==current:return
         # A newer host helper can bootstrap an older compatible Instance. Do
         # not replace it with the old embedded helper before the host upgrade.
-        if version(run([component['binary'],'--version']).decode()) < (0,20,1):
+        if version(run([component['binary'],'--version']).decode()) < (0,20,2):
             self.save(helper_instance_sha256=current);return
         exported=self.root/'worker-next.py'
         run([component['binary'],'export-update-helper','--path',exported])
