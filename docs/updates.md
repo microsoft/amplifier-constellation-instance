@@ -160,8 +160,15 @@ Connected experiences can enroll protocol-1 `participants` in registration.json:
 Commands receive `CONSTELLATION_UPDATE_PLAN`, an immutable private JSON file:
 `{id, participant, plan:{schema:1,transaction_id,operation,components,restart_scope}}`.
 `operation` is `apply` or `rollback`. `CONSTELLATION_UPDATE_OUTCOME` is `unchanged`,
-`applied`, or `rolled_back`. Fixed commands must complete within 30 seconds and
-return respectively `{"ready":true}`, `{"verified":true}`, or
+`applied`, or `rolled_back`. Fixed `prepare` and `restore` commands must complete
+within 30 seconds. Starting with 0.20.1, `verify` has a separate bounded 300-second
+ceiling so replaying a large original session is not mistaken for a failed
+update. Participants should bound their own probe and cleanup within that ceiling,
+distinguish stalled replay from continuing progress, and require actual successful
+terminal settlement. Verification must not create a replacement session or send
+an agent prompt. Its management time does not extend any task, tool or world-action
+authority. A timeout still fails verification and follows the same rollback and
+recovery rules. Commands return respectively `{"ready":true}`, `{"verified":true}`, or
 `{"restored":true}`. Preparation can return `{"ready":false,"reason":"busy"}`;
 the helper polls for up to 30 minutes without interrupting work. The participant
 must durably close its own admission before acknowledging readiness, preserve its
