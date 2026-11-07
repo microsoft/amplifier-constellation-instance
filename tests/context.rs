@@ -1515,3 +1515,51 @@ async fn restored_ticket_without_verified_source_cannot_survive_transport_close(
     assert_eq!(row["status"], "cancelled");
     assert_ne!(row["disconnected_unapplied"], true);
 }
+
+#[tokio::test]
+async fn disabled_provider_blocks_existing_grants_and_owner_context_without_deleting_identity() {
+    let f = Fixture::new().await;
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let original = f.state.get_record("context_bindings", &sid).unwrap();
+    let mut registry = context::registry(&f.state).unwrap();
+    registry.providers[0].enabled = false;
+    write_private(
+        &f.state.home.join("context-providers.json"),
+        &serde_json::to_vec(&registry).unwrap(),
+    )
+    .unwrap();
+    let seen = f.source.seen.lock().unwrap().len();
+    let denied = client
+        .request(
+            50,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"retrieve context"}]}),
+        )
+        .await;
+    assert!(denied.0["error"].is_object());
+    assert_eq!(f.source.seen.lock().unwrap().len(), seen);
+    assert_eq!(
+        f.state.get_record("context_bindings", &sid).unwrap(),
+        original
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.state.home.join("secrets/context-source")).unwrap(),
+        "provider-secret-canary"
+    );
+    let mut owner = f.client(true);
+    owner.init().await;
+    let owner_sid = owner.new_session(f.params(None)).await;
+    let response = owner
+        .prompt(&owner_sid, json!({"name":"context_list","arguments":{}}))
+        .await;
+    let items = response["call"]["result"]["structuredContent"]["items"]
+        .as_array()
+        .unwrap();
+    assert_eq!(items.len(), 2); // only the other enabled provider
+    client.close().await;
+    owner.close().await;
+}

@@ -28,6 +28,7 @@ pub mod work;
 
 pub mod development;
 
+pub mod service_connections;
 pub mod updates;
 
 mod answer;

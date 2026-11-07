@@ -28,6 +28,8 @@ The [0.17.0 release notes](docs/releases/0.17.0.md) describe the empty-receipt r
 
 ## What this version does
 
+- Saved service connections with Add, Connect and Disconnect through fixed installation-owned actions. Domain setup, credentials, sessions and tasks remain local. [Connection contract](docs/service-connections.md), [0.21.0 release notes](docs/releases/0.21.0.md).
+
 - Two-step setup: Identity → Ready. Installed runtime and account readiness are visible; runtime paths, environment, limits, and service controls stay under Advanced settings. Installation identity and owner are read-only.
 - Public connection help, certificate download, and Windows/Mac/Ubuntu browser-trust instructions. The optional HTTP listener serves only this help; sign-in and management require HTTPS.
 - Useful Activity with work outcomes, problems and connection/service changes, server-side search/pagination, and opt-in diagnostics with separate retention.
@@ -135,3 +137,5 @@ For an existing Linux installation, see the [per-installation container recipe](
 ### Updates
 
 Use **Updates** to check, install, schedule checks, or let the agent request updates from chat. Each installation owns its update helper. See [installation updates](docs/updates.md).
+
+Saved service connections: see [installation-owned Add, Connect and Disconnect](docs/service-connections.md). The host helper executes only enrolled fixed domain commands; credentials and sessions stay with each connector.
