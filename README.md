@@ -139,3 +139,5 @@ For an existing Linux installation, see the [per-installation container recipe](
 Use **Updates** to check, install, schedule checks, or let the agent request updates from chat. Each installation owns its update helper. See [installation updates](docs/updates.md).
 
 Saved service connections: see [installation-owned Add, Connect and Disconnect](docs/service-connections.md). The host helper executes only enrolled fixed domain commands; credentials and sessions stay with each connector.
+
+[Instance 0.21.2](docs/releases/0.21.2.md) adds explicit pre-forward attention rejection evidence and reduces history-load diagnostic overhead.
