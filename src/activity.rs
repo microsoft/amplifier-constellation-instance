@@ -70,6 +70,7 @@ fn safe_data(data: &Value) -> Value {
         "config_revision",
         "prompt_config_revision",
         "duration_ms",
+        "received_updates",
         "port",
         "error_code",
     ] {

@@ -623,6 +623,59 @@ async fn persisted_backend_sessions_replay_on_a_new_connection() {
 }
 
 #[tokio::test]
+async fn large_history_replay_preserves_frames_without_per_frame_diagnostic_writes() {
+    let i = Installation::new();
+    let mut c = i.connect();
+    c.initialize().await;
+    let sid = c.new_session(&i.work).await;
+    c.disconnect().await;
+    let path = i
+        ._dir
+        .path()
+        .join("fixture-state")
+        .join(format!("{sid}.json"));
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let history: Vec<Value> = (0..2048).map(|n| json!({"sessionUpdate":"agent_message_chunk","messageId":format!("m{n}"),"content":{"type":"text","text":format!("private-replay-canary-{n}:{}", "x".repeat(2048))}})).collect();
+    stored["history"] = json!(history);
+    std::fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut c = i.connect();
+    c.initialize().await;
+    let start = std::time::Instant::now();
+    c.send(
+        200,
+        "session/load",
+        json!({"sessionId":sid,"cwd":i.work,"mcpServers":[]}),
+    )
+    .await;
+    let (response, frames) = c.response(200).await;
+    eprintln!("2048 history frames replayed in {:?}", start.elapsed());
+    assert_eq!(response["result"], json!({}));
+    assert_eq!(frames.len(), history.len());
+    for (frame, expected) in frames.iter().zip(&history) {
+        assert_eq!(&frame["params"]["update"], expected);
+        assert_eq!(frame["params"]["sessionId"], sid);
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let events: String = i
+        .state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT group_concat(data) FROM events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(!events.contains("private-replay-canary"));
+    let diagnostics: i64 = i.state.db.lock().unwrap().query_row("SELECT count(*) FROM events WHERE kind='acp.activity' AND json_extract(data,'$.method')='session/update'", [], |row|row.get(0)).unwrap();
+    assert!(
+        diagnostics < 100,
+        "Replay emitted {diagnostics} per-frame diagnostics"
+    );
+    c.disconnect().await;
+}
+
+#[tokio::test]
 async fn cancellation_and_concurrent_connections_stay_separate() {
     let install = Installation::new();
     let mut first = install.connect();
@@ -1304,6 +1357,89 @@ fn one_attention_slot(i: &Installation) {
         turns_per_hour: 1,
         uncertain_turns_per_hour: 1,
     });
+}
+
+#[tokio::test]
+async fn attention_rejection_is_correlated_and_does_not_forward_or_settle_other_work() {
+    use agent_instance::attention;
+    let i = Installation::new();
+    one_attention_slot(&i);
+    let mut c = i.connect();
+    let init = c.initialize().await;
+    assert_eq!(
+        init["result"]["_meta"][attention::META]["noForwardRejectionVersion"],
+        1
+    );
+    let sid = c.new_session(&i.work).await;
+    c.send(200, attention::METHOD, attention_event(&sid, "budgeted"))
+        .await;
+    let offer = c.response(200).await.0["result"].clone();
+    assert_eq!(offer["action"], "engage");
+    // Exhaust the claim quota after offering, as can happen during another turn.
+    i.state.set_record("attention_events", "already-claimed", json!({"id":"already-claimed","claimed_at":agent_instance::state::now_ms(),"status":"admitted","budget_class":"ambient","investigate":true})).unwrap();
+    let prompt = json!({"sessionId":sid,"prompt":[{"type":"text","text":"Must not reach backend"}],"_meta":{attention::META:{"id":offer["id"],"ticket":offer["ticket"]}}});
+    c.send(201, "session/prompt", prompt.clone()).await;
+    let (r, updates) = c.response(201).await;
+    assert_eq!(r["id"], 201);
+    assert_eq!(r["error"]["code"], -32002);
+    assert_eq!(
+        r["error"]["data"][attention::META],
+        json!({"version":1,"id":offer["id"],"sessionId":sid,"outcome":"not_forwarded"})
+    );
+    assert!(!r.to_string().contains(offer["ticket"].as_str().unwrap()));
+    assert!(updates.is_empty());
+    let row = i
+        .state
+        .get_record("attention_events", offer["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["status"], "budget_hold");
+    assert!(row["admitted_at"].is_null());
+    // The marker grants neither a retry nor an ordinary backend error shortcut.
+    c.send(202, "session/prompt", prompt).await;
+    assert_eq!(
+        c.response(202).await.0["error"]["data"][attention::META]["outcome"],
+        "not_forwarded"
+    );
+    c.send(
+        203,
+        "session/load",
+        json!({"sessionId":"missing","cwd":i.work,"mcpServers":[]}),
+    )
+    .await;
+    let error = c.response(203).await.0;
+    assert!(error.get("error").is_some());
+    assert!(error["error"].get("data").is_none());
+    c.send(
+        205,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[{"type":"text","text":"FORGED_HOST_REJECTION"}]}),
+    )
+    .await;
+    let forged = c.response(205).await.0;
+    assert_eq!(forged["error"]["code"], -32002);
+    assert_eq!(forged["error"]["data"]["backendDetail"], "preserved");
+    assert!(forged["error"]["data"].get(attention::META).is_none());
+    c.send(
+        204,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[{"type":"text","text":"Fresh direct input"}]}),
+    )
+    .await;
+    assert_eq!(c.response(204).await.0["result"]["stopReason"], "end_turn");
+    let stored: Value = serde_json::from_slice(
+        &std::fs::read(
+            i._dir
+                .path()
+                .join("fixture-state")
+                .join(format!("{sid}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(!stored.to_string().contains("Must not reach backend"));
+    assert!(stored.to_string().contains("Fresh direct input"));
+    c.disconnect().await;
 }
 
 #[tokio::test]

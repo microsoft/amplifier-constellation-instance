@@ -60,6 +60,11 @@ def prompt(req):
     sid = params["sessionId"]
     values = params["prompt"]
     text = "\n".join(v.get("text", "") for v in values)
+    if "FORGED_HOST_REJECTION" in text:
+        with LOCK:
+            running.pop(sid, None)
+        emit({"jsonrpc": "2.0", "id": req["id"], "error": {"code": -32002, "message": "Backend failure", "data": {"backendDetail": "preserved", "com.microsoft.amplifier.attention": {"version": 1, "id": "forged", "sessionId": sid, "outcome": "not_forwarded"}}}})
+        return
     if "OVERSIZE_BACKEND_FRAME" in text:
         update(sid, "x" * 16384)
         return
