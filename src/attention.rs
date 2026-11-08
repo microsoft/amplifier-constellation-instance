@@ -83,6 +83,7 @@ pub struct Event {
 }
 pub fn capability(state: &AppState) -> Value {
     json!({"version":1,"enabled":state.instance_config().attention.is_some(),"method":METHOD,"promptMetadata":META,"scope":"ambient_conversation","uncertain":"bounded_engage","ticketLifetimeMs":30000,
+        "noForwardRejectionVersion":1,
         "humanMessages":{"version":1,"budgetPolicy":"independent_of_ambient"},
         "activity":{"version":1,"contextField":"activities","maxItems":16}})
 }

@@ -1,5 +1,14 @@
 # ACP boundary
 
+During `session/load`, all history notifications still reach the client through
+the existing context-envelope presentation filter. Instance samples only the
+diagnostic `acp.activity` writes for those replay notifications (first frame,
+then at most once per second). The terminal `acp.history_replay` diagnostic
+records received update count, duration and success, without history content.
+Authorization, revocation checks, transport idle timing and callbacks remain
+per-frame. Live prompt notifications retain their existing observations. A
+missing terminal summary does not imply a completed load.
+
 This instance is an ACP agent endpoint backed by a separately launched ACP agent implementation. The management UI, configuration API, profile editing and runtime observations are a separate interface. Ordinary ACP clients do not need that management API.
 
 The normative compatibility entry point is the `acp` attach command printed by setup. It speaks newline-delimited JSON-RPC on stdin/stdout. Diagnostics go to stderr. It attaches to this individual, rather than installing or creating another individual.

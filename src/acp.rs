@@ -90,6 +90,8 @@ struct Pending {
     work_id: Option<String>,
     started_at: i64,
     cancelled: bool,
+    replay_updates: u64,
+    replay_observed_at: Option<Instant>,
 }
 
 struct LaunchProgress {
@@ -632,7 +634,7 @@ async fn relay_connection(
                                 if let Some(guard)=crate::updates::admit(&state) { update_admissions.insert(key.clone(),guard); }
                                 else {maintenance_guards.remove(&key);if let Some(receipt)=maintenance.finish(&mut rpc_error(id.clone(),-32002,"not_started")){crate::maintenance::save(&state,&principal,&receipt)?;}reject_request(&outgoing,&value,-32002,"This installation is updating; retry after it reconnects").await?;continue;}
                             }
-                            let request = Pending { id:id.clone(), method:method.clone(), session_id:value["params"]["sessionId"].as_str().map(str::to_owned), cwd:value["params"]["cwd"].as_str().map(str::to_owned), work_id:(method == "session/prompt").then(||uuid::Uuid::new_v4().to_string()), started_at:now_ms(), cancelled:false };
+                            let request = Pending { id:id.clone(), method:method.clone(), session_id:value["params"]["sessionId"].as_str().map(str::to_owned), cwd:value["params"]["cwd"].as_str().map(str::to_owned), work_id:(method == "session/prompt").then(||uuid::Uuid::new_v4().to_string()), started_at:now_ms(), cancelled:false, replay_updates:0, replay_observed_at:None };
                             if request.work_id.is_some() { starting_work = Some(request.clone()); }
                             pending.insert(key, request);
                         }
@@ -650,7 +652,16 @@ async fn relay_connection(
                             },
                             Err(_)=>{
                                 if let Some(id)=value.get("id") {pending.remove(&id.to_string());maintenance_guards.remove(&id.to_string());update_admissions.remove(&id.to_string());}
-                                reject_request(&outgoing,&value,-32002,"Attention offer expired, cancelled, superseded, used, or over budget; no input was forwarded").await?;
+                                if let Some(id) = value.get("id") {
+                                    let mut rejection = rpc_error(id.clone(), -32002, "Attention offer expired, cancelled, superseded, used, or over budget; no input was forwarded");
+                                    // This statement is about this correlated request only. It
+                                    // neither settles earlier effects nor permits a ticket retry.
+                                    if let Some(offer) = metadata["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 512)
+                                        && !sid.is_empty() && sid.len() <= 512 {
+                                        rejection["error"]["data"][crate::attention::META] = json!({"version":1,"id":offer,"sessionId":sid,"outcome":"not_forwarded"});
+                                    }
+                                    send_frontend(&outgoing, rejection).await?;
+                                }
                                 continue;
                             }
                         }
@@ -685,6 +696,11 @@ async fn relay_connection(
                     let Some(mut value) = frame? else { bail!("ACP backend closed its output"); };
                     if tool_guard.as_ref().is_some_and(|guard| guard.check(&state, auth_headers.as_ref()).is_err()) { ending_reason = "tool_authorization_changed"; bail!("Tool connection authorization changed; reconnect"); }
                     ensure!(is_rpc_message(&value), "ACP backend emitted an invalid JSON-RPC message");
+                    // Only Instance can attest that it did not forward a request.
+                    // A backend error must not impersonate that host-owned marker.
+                    if let Some(data) = value.get_mut("error").and_then(|error| error.get_mut("data")).and_then(Value::as_object_mut) {
+                        data.remove(crate::attention::META);
+                    }
                     idle_deadline = Instant::now() + idle_duration;
                     if value["method"]=="session/update" {
                         let receipt=&value["params"]["update"]["_meta"]["io.github.bkrabach.agent-runtime"]["inputReceipt"];
@@ -705,16 +721,25 @@ async fn relay_connection(
                     }
                     if value["params"]["update"]["sessionUpdate"]=="compaction_summary_chunk" && !client_compaction {continue;}
                     if let Some(method) = value["method"].as_str() {
-                        observe(&state, &connection_id, "agent_to_client", method, &value)?;
-                        if method == "session/update" && pending.values().any(|request| {
+                        if method == "session/update" && let Some(request) = pending.values_mut().find(|request| {
                             request.method == "session/load"
                                 && request.session_id.as_deref() == value["params"]["sessionId"].as_str()
                         }) {
+                            // History is already durable at the backend. Do not turn
+                            // replay into thousands of synchronous diagnostic writes.
+                            // Delivery, authorization checks and idle timing still run
+                            // for every frame; only diagnostic persistence is sampled.
+                            request.replay_updates += 1;
+                            if request.replay_observed_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+                                observe(&state, &connection_id, "agent_to_client", method, &value)?;
+                                request.replay_observed_at = Some(Instant::now());
+                            }
                             for frame in replay.push(value, max_frame) {
                                 send_frontend(&outgoing, frame).await?;
                             }
                             continue;
                         }
+                        observe(&state, &connection_id, "agent_to_client", method, &value)?;
                     } else if let Some(request) = value.get("id").and_then(|id| pending.remove(&id.to_string())) {
                         maintenance_guards.remove(&request.id.to_string());
                         if let Some((admission,_))=pending_steering_attention.remove(&request.id.to_string())
@@ -725,6 +750,8 @@ async fn relay_connection(
                         }
                         if request.method == "session/load" && let Some(sid) = &request.session_id {
                             for frame in replay.finish(sid) { send_frontend(&outgoing, frame).await?; }
+                            update_connection(&state, &connection_id, "last_activity_at", json!(now_ms()));
+                            state.event("acp.history_replay", json!({"connection_id":connection_id,"session_id":sid,"received_updates":request.replay_updates,"duration_ms":now_ms()-request.started_at,"success":value.get("result").is_some()}))?;
                         }
                         let used_tools = pending_tools.remove(&request.id.to_string()) || request.session_id.as_deref().map(|sid| state.get_record("session_tool_access", sid)).transpose()?.flatten().is_some();
                         if value.get("result").is_some() {

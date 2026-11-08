@@ -2,6 +2,29 @@
 
 Owner: Instance. Review candidate; deployment is a separate decision.
 
+## Pre-forward rejection evidence
+
+The attention capability advertises `noForwardRejectionVersion: 1`. For a
+correlated prompt or steering request rejected by Instance's attention admission
+check, `error.data["com.microsoft.amplifier.attention"]` contains:
+
+```json
+{"version":1,"id":"exact-offer-id","sessionId":"request-session","outcome":"not_forwarded"}
+```
+
+Clients must verify the advertised version, JSON-RPC request correlation, offer
+ID and session. This states only that this request was not forwarded to the
+backend. It does not settle earlier effects, complete the source, renew task
+authority or authorize retrying the offer. Missing/malformed evidence and lost
+responses remain unknown. Neither `-32002` nor error prose establishes this
+outcome. Instance removes this reserved marker from backend-originated errors;
+other backend error data is preserved. Invalid or oversized offer/session IDs
+receive an ordinary error without this marker. No ticket secret is returned.
+
+An optional ambient refusal is a delivery outcome, separate from an existing
+task's execution state. Experiences must still inspect their own effect receipts
+and authority before continuing work.
+
 ## Human engagement and observed activity
 
 The implementation advertises two additive features inside the existing
