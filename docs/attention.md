@@ -80,6 +80,14 @@ an instruction to execute work. The installation owns the policy, decision
 provider, credentials, deduplication, budgets and admission journal. This applies
 equally to native and third-party ACP engines hosted by Instance.
 
+Attention asks whether an input needs consideration, including a correction or
+changed dependency that requires no public acknowledgment. The decision provider
+gets the original exchange in source order and ID references to the evaluated
+agent and trigger. An older trigger is not repeated after messages that may have
+resolved it. Source-delivery observations inform this judgment; they establish
+neither fulfillment nor a reason to repeat the input. Weak or uncertain choices
+still use the existing bounded review path, where the engine may remain silent.
+
 Experiences own conversation IDs, source timestamps, participants, edits,
 thread boundaries, membership, delivery and platform-specific tools. They map
 facts to the optional profile and verify that the source is still current before

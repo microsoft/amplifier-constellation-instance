@@ -140,4 +140,4 @@ Use **Updates** to check, install, schedule checks, or let the agent request upd
 
 Saved service connections: see [installation-owned Add, Connect and Disconnect](docs/service-connections.md). The host helper executes only enrolled fixed domain commands; credentials and sessions stay with each connector.
 
-[Instance 0.21.2](docs/releases/0.21.2.md) adds explicit pre-forward attention rejection evidence and reduces history-load diagnostic overhead.
+[Instance 0.21.3](docs/releases/0.21.3.md) distinguishes useful attention from public replies and preserves the original exchange when evaluating peer inputs.

@@ -12,6 +12,9 @@ use std::sync::{
 use tempfile::TempDir;
 
 fn install(endpoint: String, limit: usize) -> (TempDir, Arc<AppState>) {
+    install_protocol(endpoint, limit, "system_one")
+}
+fn install_protocol(endpoint: String, limit: usize, protocol: &str) -> (TempDir, Arc<AppState>) {
     let home = tempfile::tempdir().unwrap();
     private_dir(&home.path().join("secrets")).unwrap();
     write_private(&home.path().join("secrets/decision"), b"test-only").unwrap();
@@ -20,7 +23,7 @@ fn install(endpoint: String, limit: usize) -> (TempDir, Arc<AppState>) {
     c.attention = Some(Config {
         endpoint,
         model: "fixture".into(),
-        protocol: "system_one".into(),
+        protocol: protocol.into(),
         auth: "bearer".into(),
         credential_secret: "decision".into(),
         decisions_per_hour: 20,
@@ -286,6 +289,121 @@ async fn attention_receives_verified_source_facts_but_still_makes_its_own_judgme
         "{wire}"
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn attention_focus_references_original_ordered_evidence_on_both_protocols() {
+    for protocol in ["system_one", "openai_decisions"] {
+        for activity in [false, true] {
+            let seen = Arc::new(std::sync::Mutex::new(Value::Null));
+            let capture = seen.clone();
+            let route = axum::Router::new().route(
+                "/",
+                axum::routing::post(move |axum::Json(v): axum::Json<Value>| {
+                    let capture = capture.clone();
+                    async move {
+                        *capture.lock().unwrap() = v;
+                        axum::Json(answer("engage"))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, route).await.unwrap() });
+            let (_home, state) = install_protocol(format!("http://{addr}/"), 2, protocol);
+            let at = now_ms() - 2000;
+            let input = json!({
+                "sessionId":"session", "occurredAt":at,
+                "context": {
+                    "conversation_id":"room", "thread_id":"thread",
+                    "agent":{"id":"agent","name":"Explorer","is_agent":true},
+                    "participants":[
+                        {"id":"agent","name":"Explorer","is_agent":true},
+                        {"id":"peer","name":"Teammate","is_agent":true}
+                    ],
+                    "messages":[
+                        {"id":"correction","sender":"peer","text":"That route is closed.",
+                         "revision":"original-r1","occurred_at":at,"recipients":["agent"],"reply_to":"earlier"},
+                        {"id":"resolution","sender":"agent","text":"I used the other route; this is resolved.",
+                         "revision":"original-r2","occurred_at":at+1000,"recipients":["peer"],"reply_to":"correction"}
+                    ],
+                    "trigger_id":if activity {"movement"} else {"correction"},
+                    "responsibilities":"No formal assignment is required to consider relevant context."
+                }
+            });
+            let mut event: Event = serde_json::from_value(input).unwrap();
+            if activity {
+                event.context.activities.push(serde_json::from_value(json!({
+                    "id":"movement","actor":"peer","kind":"movement",
+                    "summary":"Walked toward the room.","revision":"activity-r1","occurred_at":at
+                })).unwrap());
+            }
+            let original = serde_json::to_value(&event.context).unwrap();
+            let row = attention::reserve(&state, "p", "c", &event, None).unwrap();
+            let result = attention::evaluate(state.clone(), row, event)
+                .await
+                .unwrap();
+            assert_eq!(result["action"], "engage");
+            let wire = seen.lock().unwrap().clone();
+            let (evidence, question) = if protocol == "openai_decisions" {
+                (
+                    &wire["input"][0]["content"][0]["data"],
+                    &wire["questions"][0],
+                )
+            } else {
+                (&wire["state"], &wire["questions"]["participation"])
+            };
+            assert_eq!(
+                evidence["current_decision_focus"],
+                json!({
+                    "evaluated_agent_id":"agent", "trigger_id":original["trigger_id"]
+                })
+            );
+            // The old trigger stays before its resolution, with its original provenance.
+            for (key, value) in original.as_object().unwrap() {
+                assert_eq!(&evidence[key], value, "{protocol}: source field {key}");
+            }
+            assert_eq!(evidence["prior_delivery"], json!([]));
+            assert!(evidence["installed_purpose"].is_string());
+            assert_eq!(
+                evidence.as_object().unwrap().len(),
+                original.as_object().unwrap().len() + 3
+            );
+            assert_eq!(question["type"], "choice");
+            assert_eq!(
+                question["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains(attention_policy::activity_instructions()),
+                activity
+            );
+            let choices = if protocol == "openai_decisions" {
+                Value::Object(
+                    question["choices"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|c| {
+                            (
+                                c["value"].as_str().unwrap().to_owned(),
+                                c["description"].clone(),
+                            )
+                        })
+                        .collect(),
+                )
+            } else {
+                question["criteria"].clone()
+            };
+            assert_eq!(choices, attention_policy::choices());
+            // A review opportunity is still an unconsumed offer, not delivery or execution.
+            let saved = state
+                .get_record("attention_events", result["id"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_ne!(saved["status"], "consumed");
+            server.abort();
+        }
+    }
 }
 
 fn typed_event(id: &str, is_agent: Option<bool>) -> Event {
