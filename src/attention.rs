@@ -271,6 +271,12 @@ async fn query(
     let mut evidence = json!(context);
     evidence["prior_delivery"] = delivery;
     evidence["installed_purpose"] = json!(installed.purpose);
+    // Refer to the original exchange once: repeating an older trigger after a
+    // later resolution can make that resolved input appear current again.
+    evidence["current_decision_focus"] = json!({
+        "evaluated_agent_id": context.agent.id,
+        "trigger_id": context.trigger_id,
+    });
     let instructions = if context.activities.is_empty() {
         attention_policy::instructions().to_owned()
     } else {
