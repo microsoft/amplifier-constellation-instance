@@ -72,7 +72,8 @@ class Provider:
             if self.kind=='claude':
                 target={'Linux':'linux','Darwin':'darwin','Windows':'windows'}[platform.system()]+'-'+{'aarch64':'arm64','arm64':'arm64','x86_64':'x64','AMD64':'x64'}[platform.machine()]
                 name='claude-agent-acp-'+target+('.tar.gz' if platform.system()=='Linux' else '.zip')
-                result['asset']=next(a for a in r['assets'] if a['name']==name)
+                result['asset']=next((a for a in r['assets'] if a['name']==name),None)
+                if result['asset'] is None:result['unavailable_reason']='release_not_available_for_platform'
             else:
                 ref=w.gh('repos/'+repo+'/commits/'+r['tag_name']);result['commit']=ref['sha']
                 if not re.fullmatch('[0-9a-f]{40}',result['commit']):raise ValueError('release_commit_required')
@@ -147,6 +148,8 @@ class Provider:
         self.prune_staged()
         cfg,backend,old,current=self.current();release=self.discover(current)
         if release is None:return {'available':False,'version':current}
+        if release.get('unavailable_reason'):
+            return {'available':False,'version':current,'release_version':release['version'],'reason':release['unavailable_reason']}
         destination=self.runtime/('update-'+release['version']+'-'+uuid.uuid4().hex[:8]);destination.mkdir(parents=True,mode=0o700)
         try:
             command=self.stage(release,destination)

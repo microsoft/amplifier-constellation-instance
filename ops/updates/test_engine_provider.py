@@ -1,4 +1,4 @@
-import importlib.util,json,os,tempfile,unittest
+import importlib.util,json,os,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('engine',Path(__file__).with_name('engine_provider.py'));e=importlib.util.module_from_spec(spec);spec.loader.exec_module(e)
@@ -36,6 +36,45 @@ class EngineTests(unittest.TestCase):
  def test_no_update_does_not_install_or_mutate(self):
   with patch.object(self.p,'discover',return_value=None),patch.object(self.p,'stage') as stage:
    self.assertFalse(self.p.plan()['available']);stage.assert_not_called()
+ def test_missing_platform_release_preserves_engine_and_reports_unavailable(self):
+  before=(self.home/'config.json').read_bytes()
+  for assets in ([],[{'name':'claude-agent-acp-windows-x64.zip'}]):
+   release={'tag_name':'v1.1.0','html_url':'https://github.com/agentclientprotocol/claude-agent-acp/releases/tag/v1.1.0','assets':assets}
+   with self.subTest(assets=assets),patch.object(e.w,'gh',return_value=release),patch.object(e.platform,'system',return_value='Linux'),patch.object(e.platform,'machine',return_value='aarch64'),patch.object(self.p,'stage') as stage:
+    result=self.p.plan()
+    self.assertEqual(result,{'available':False,'version':'1.0.0','release_version':'1.1.0','reason':'release_not_available_for_platform'})
+    stage.assert_not_called();self.assertEqual(list(self.runtime.iterdir()),[self.old]);self.assertEqual((self.home/'config.json').read_bytes(),before)
+ def test_platform_release_becomes_available_on_later_check(self):
+  release={'tag_name':'v1.1.0','html_url':'https://github.com/agentclientprotocol/claude-agent-acp/releases/tag/v1.1.0','assets':[]}
+  asset={'name':'claude-agent-acp-linux-arm64.tar.gz','digest':'sha256:'+'a'*64}
+  def stage(release,dest):
+   self.assertEqual(release['asset'],asset);(dest/'claude-agent-acp').write_text('new');return str(dest/'claude-agent-acp')
+  with patch.object(e.w,'gh',side_effect=[release,{**release,'assets':[asset]}]),patch.object(e.platform,'system',return_value='Linux'),patch.object(e.platform,'machine',return_value='aarch64'),patch.object(self.p,'stage',side_effect=stage) as install:
+   self.assertFalse(self.p.plan()['available']);self.assertTrue(self.p.plan()['available']);install.assert_called_once()
+  self.assertEqual(e.w.read(self.home/'config.json')['revision'],7)
+ def test_release_metadata_failure_remains_an_error(self):
+  with patch.object(e.w,'gh',side_effect=RuntimeError('metadata unavailable')),patch.object(self.p,'stage') as stage:
+   with self.assertRaisesRegex(RuntimeError,'metadata unavailable'):self.p.plan()
+   stage.assert_not_called()
+ def test_worker_still_plans_independent_source_when_engine_asset_is_absent(self):
+  components=[]
+  for name in ['engine','minecraft']:
+   components.append({'id':name,'provider':'command','protocol':2,'commands':{action:[sys.executable,name,action] for action in ['status','plan','apply','verify','rollback']},'restart_scope':{'services':[],'instance':False,'slack_homes':[]}})
+  registration=self.root/'registration.json';e.w.write(registration,{'schema':1,'instance_id':'fixture','home':str(self.home),'state':str(self.root/'shared'),'components':components,'services':[]})
+  with patch.object(e.w.ssl,'create_default_context'):worker=e.w.Worker(registration)
+  worker.report=lambda *args,**kwargs:None
+  calls=[]
+  def run(argv,**kwargs):
+   _,component,action=argv;calls.append((component,action))
+   result=getattr(self.p,action)() if component=='engine' else ({'version':'old-source'} if action=='status' else {'available':True,'version':'new-source'})
+   return json.dumps(result).encode()
+  release={'tag_name':'v1.1.0','html_url':'https://github.com/agentclientprotocol/claude-agent-acp/releases/tag/v1.1.0','assets':[]}
+  with patch.object(e.w,'run',side_effect=run),patch.object(e.w,'gh',return_value=release),patch.object(self.p,'stage') as stage:
+   plan=worker.build_plan({'revision':0,'channel':'stable'})
+  self.assertEqual(calls,[('engine','status'),('engine','plan'),('minecraft','status'),('minecraft','plan')]);stage.assert_not_called()
+  self.assertEqual([(p['id'],p['available']) for p in plan['components']],[('engine',False),('minecraft',True)])
+  frozen=e.w.read(worker.root/'plans'/plan['id']/'engine.provider.json')['plan']
+  self.assertEqual(frozen['reason'],'release_not_available_for_platform');self.assertEqual(self.p.status()['version'],'1.0.0')
  def test_declared_family_cannot_switch(self):
   self.planned();self.p.apply();current=self.p.current()[2];record=e.w.read(current/'engine-update.json');record['kind']='codex';e.w.write(current/'engine-update.json',record)
   with self.assertRaisesRegex(ValueError,'family_changed'):self.p.current()
