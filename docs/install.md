@@ -34,7 +34,7 @@ Account readiness indicates configured credential metadata. It does not claim th
 
 ## Default runtime and account recovery
 
-Agent Instance **0.16.3** pins Constellation **0.10.1**. Its platform archives and binary hashes are recorded in `scripts/native-runtime-lock.json` and embedded in the instance executable. Provisioning verifies both the downloaded archive and selected binary before use. The default runtime is downloaded directly without GitHub sign-in. Authenticated GitHub CLI remains a fallback for explicitly configured private releases. Use `--runtime-binary /path/to/agent-runtime` for a verified local build. Every installation owns its runtime files, provider state and history; updating one agent does not update another.
+The selected native release, platform archives and binary hashes are recorded in [the runtime lock](../scripts/native-runtime-lock.json) and embedded in the instance executable. Provisioning verifies both the downloaded archive and selected binary before use. The default runtime is downloaded directly without GitHub sign-in. Authenticated GitHub CLI remains a fallback for explicitly configured private releases. Use `--runtime-binary /path/to/agent-runtime` for a verified local build. Every installation owns its runtime files, provider state and history; updating one agent does not update another.
 
 For an initialized instance that lacks the default backend:
 
@@ -48,7 +48,7 @@ The same installation operation is available in the web setup and through `POST 
 
 Native account operations use `/api/v1/native-account` and the `native-account` CLI; see [Native configuration](native-configuration.md). OS/PAM sign-in controls access to the management UI; provider authentication supplies model access.
 
-For the explicitly selected Codex alternative, `scripts/backend-lock.json` pins Codex **0.165.0**, `@agentclientprotocol/codex-acp` **2.5.0**, and Node **22.23.2**. That separate package uses its own provider folder and `/api/v1/backend/account/login` device-code operation. Its account cache, private runtime files and npm/Node download process are not part of the native path.
+For the explicitly selected Codex alternative, [the backend lock](../scripts/backend-lock.json) pins the Codex, ACP bridge and Node versions. That separate package uses its own provider folder and `/api/v1/backend/account/login` device-code operation. Its account cache, private runtime files and npm/Node download process are not part of the native path.
 
 To use a different ACP implementation, pass `--backend none` during installation, then configure that implementation in **Advanced**. This opt-out also makes backend-free installer tests independent of network access. A custom implementation's credentials and capabilities remain its own responsibility; it does not silently become a Codex backend.
 

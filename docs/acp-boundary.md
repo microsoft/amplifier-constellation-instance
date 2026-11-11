@@ -15,6 +15,11 @@ The normative compatibility entry point is the `acp` attach command printed by s
 
 The attach command connects to the running service at `/api/v1/acp` using authenticated WSS. This network hop is the **agent-instance.wss/1 custom framing profile**: one JSON-RPC object per WebSocket text message. It is not the proposed official ACP Streamable HTTP transport. Each connection has an independent backend stdio process, negotiated capabilities and active-session bindings. All processes belong to this one installed individual; they share only the backend state that its configuration intentionally supplies.
 
+Optional product-profile versions are independent of ACP's `protocolVersion`.
+An unknown profile version must not be treated as compatible version 1. Use its
+serving contract for discovery and fallback; ordinary ACP capability negotiation
+does not imply support for every Instance application interface.
+
 ## Backend behavior remains authoritative
 
 The relay forwards initialization, authentication, prompts, content blocks, MCP server configuration, session configuration, cancellation, callbacks, updates and extension methods. It does not manufacture `loadSession`, list, resume or other capabilities. Reconnection continuity therefore requires a backend that advertises and implements persistent sessions. A client must create, load or resume a session on its connection before prompting it.

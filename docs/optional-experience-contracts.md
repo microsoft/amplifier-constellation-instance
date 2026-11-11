@@ -1,97 +1,40 @@
-# Optional experience contracts alongside ACP
+# Optional interfaces alongside ACP
 
-The base boundary is ACP initialization, authentication, sessions, prompts,
-updates, callbacks, and advertised capabilities. A client can use an agent
-without knowing this product's context, participation, management, or work
-conventions. Optional contracts must not be reported as standard ACP features.
+This is a navigation aid for clients composing Instance with an engine or an
+experience. The [ACP boundary](acp-boundary.md) defines the standard relay and
+Instance's optional behavior. The [family interface agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md#interface-responsibilities)
+assigns ownership; this page adds no wire fields or requirements.
 
-ACP permits custom metadata where `_meta` is defined and separately named
-custom methods/capabilities. Our conversation integration uses namespaced
-metadata and standard MCP configuration; it adds no standard ACP method for
-sharing transcripts, accepting work, or choosing who speaks.
-[ACP extensibility](https://agentclientprotocol.com/protocol/v1/extensibility),
-[initialization](https://agentclientprotocol.com/protocol/v1/initialization),
-[session setup](https://agentclientprotocol.com/protocol/v1/session-setup).
+## Find the serving contract
 
-## Existing versioned profiles
+| Interface | Definition and owner |
+| --- | --- |
+| Ordinary ACP initialization, sessions, input, updates and callbacks | [ACP boundary](acp-boundary.md), the upstream protocol and the selected backend's advertised capabilities |
+| `agent-instance.wss/1` remote framing | [ACP boundary](acp-boundary.md) |
+| `agent-instance.management/1` descriptor and management operations | [Management API](api.md) |
+| `agent-instance.context/1` conversation context and bindings | [Conversation continuity](conversation-continuity.md) |
+| `com.microsoft.amplifier.attention` version 1 engagement/admission | [Attention](attention.md) |
+| `agent-instance.work/1` responsibility records | [Responsibilities](responsibilities.md) |
+| `agent-instance.completion-contract/1` acceptance briefs and evidence | [Completion](completion-contract.md) |
+| Saved connection and update controls | [Service connections](service-connections.md), [updates](updates.md) |
 
-| Profile | Owner and boundary | Without it |
-| --- | --- | --- |
-| `com.microsoft.amplifier.attention` version 1 | Instance-owned optional ambient event assessment and one-use prompt admission; see [attention](attention.md) | Ordinary ACP prompts continue; no pre-turn decision-model savings assumed. |
-| `agent-instance.wss/1` | Attach helper/service; one JSON-RPC object per WebSocket text message, a custom transport profile | Use standard stdio through an ordinary ACP client. |
-| `agent-instance.management/1` | Separate authenticated descriptor/API | ACP works; installation/configuration/UI control cannot be assumed. |
-| `agent-instance.context/1` | Authorized conversation-provider HTTP query | Use current session and explicitly supplied context; assume no cross-room access. |
-| `slack-conversation-decision/1` | Slack adapter's opt-in prompt convention, advertised in its management descriptor | Direct final text remains useful; ambient group participation requires deliberate configuration. |
-| `agent-experiment-lab.scenario/1` | Lab scenario and response convention | Ordinary ACP final text is accepted and recorded as plain text. |
-| `agent-instance.work/1`, optionally containing `agent-instance.completion-contract/1` | Management/work tools | ACP work continues without assuming durable responsibility/evidence/closure state. |
+Use the serving contract for version discovery, enabled-state checks, authority,
+errors and fallback behavior. Application profiles and metadata do not become
+standard ACP merely because they accompany an ACP exchange. The [upstream
+extensibility specification](https://agentclientprotocol.com/protocol/v1/extensibility)
+and the [shared SDK agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/protocol-sdk.v1-candidate.md)
+define that boundary.
 
-These suffixes version product profiles independently of ACP's
-`protocolVersion`. Unknown versions must not be treated as compatible version 1.
-Attention additionally advertises its version and enabled state in ACP initialization
-metadata. This is explicit optional discovery, not universal ACP negotiation for
-application features.
+## Follow source and experience ownership
 
-## Context and identity
+The context contract owns how Instance validates a provider binding and supplies
+authorized context. The source provider owns its membership, source IDs and
+query payloads. A connector owns its platform input and delivery conventions;
+those detailed definitions belong in its repository, located through the
+[family registry](https://github.com/microsoft/amplifier-constellation/blob/main/family.toml).
+This page does not reproduce Slack, Lab or other experience response envelopes.
 
-An adapter may attach
-`_meta["io.github.bkrabach.conversation"] = {provider_id, grant}` during session
-setup. The instance validates that wrapper hint with its registered provider,
-removes it before forwarding to an unrelated backend, binds the verified
-audience, and revalidates on prompts/retrieval. Provider bearer credentials and
-opaque conversation grants stay out of prompts and history.
-
-The provider owns conversation/thread IDs, source links, edits/deletions,
-membership and identity mapping. `owner:true` follows explicit verified owner
-linking. Group grants stay scoped to their provider/conversation. Presence in a
-different room does not grant permission to retrieve that room. Replies stay in
-the experience's selected destination; reading a source never grants posting
-authority there.
-
-`authorize`, `list`, `read`, and `orientation` retain provenance and coverage.
-Partial history remains partial; failed sources are not empty conversations;
-revocation never downgrades to owner access. Optional context MCP tools require
-backend support for their transport. Exact payloads and lifecycle rules live in
-[conversation continuity](conversation-continuity.md).
-
-## Participation and delivery
-
-Slack distinguishes direct messages/explicit address from ambient group turns.
-Its opt-in group convention requests final text like:
-
-```json
-{"decision":"speak","text":"A useful contribution.","reason":"Answers the open question"}
-```
-
-or `{"decision":"pass","reason":"Already answered"}`. Direct exchanges use
-normal final text, with an explicit request for silence as the defined exception.
-Invalid group decisions are observed and withheld. Intermediate reasoning and
-tool output are never published as chat.
-
-Experiment Lab's version-1 scenario uses a different convention:
-`{"action":"speak","text":"..."}` or
-`{"action":"pass","reason":"..."}`. It also supports ordinary final text,
-while malformed attempted envelopes remain private. It records drafts,
-receipts, cancellation, scenario identity, and driver versions. Its seeded
-rounds do not reproduce Slack timing. These two shapes are separate application
-conventions; neither is a shared ACP wire type.
-
-The experience decides prompt timing and what context was actually visible;
-the agent chooses whether it has a useful contribution under the configured
-policy. Inference, parsing a speak decision, publishing a message, and confirmed
-delivery are distinct observations. Pass, malformed output, timeout,
-cancellation, and unknown delivery remain distinguishable. No participation
-decision grants work, tool, or posting authority.
-
-## Work and evidence
-
-The [completion contract](completion-contract.md) freezes a source-linked brief,
-records versions and reviews, and separates requester closure. Background work
-still needs its own grant. Plain ACP does not authenticate peer delegation or
-human acceptance automatically.
-
-A third-party runtime can participate using plain ACP, optionally follow
-experience prompt conventions, and separately support authenticated context/
-management/work contracts directly or through a wrapper. None requires a fleet
-service to define its identity or access to another participant's private files.
-Unsupported optional features must stay visible rather than being approximated
-with hidden access or invented completion evidence.
+Use the [interaction agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/experience.v1-candidate.md)
+for the shared meanings of receipt, response, delivery and completion. A client's
+supported composition can be smaller than this map; inspect its actual interfaces
+rather than inferring capabilities from a shared product name.
