@@ -6,8 +6,8 @@ that individual to several experiences while its selected ACP engine handles
 reasoning and tool execution.
 
 The [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md)
-explains the larger ambition. The [family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md)
-owns shared responsibilities and information boundaries. Instance can be used
+explains the larger ambition. The [shared agreements](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
+own cross-component promises. Instance can be used
 without a fleet service or the other Constellation components.
 
 ## Start with the role you need
@@ -68,19 +68,9 @@ and operations. [Reference-client controls](docs/ui-contract.md) define view
 state separately from service state. A new experience can compose these
 interfaces without reproducing the bundled administration screens.
 
-| Service area | Authoritative local definition |
-| --- | --- |
-| Authorized conversation access and exact tool connections | [Conversation continuity](docs/conversation-continuity.md), [tool connections](docs/tool-connections.md) |
-| Optional engagement policy | [Attention](docs/attention.md) |
-| Responsibilities, review and accepted results | [Responsibilities](docs/responsibilities.md), [completion](docs/completion-contract.md) |
-| Authorized continuation outside a foreground connection | [Background work](docs/background-work.md) |
-| Attributed memory and identity presentation | [Memory](docs/memory.md), [agent identity](docs/agent-identity.md) |
-| Installation-owned lifecycle | [Saved connections](docs/service-connections.md), [updates](docs/updates.md), [checkpoints](docs/checkpoints.md) |
-| Native engine settings | [Native configuration](docs/native-configuration.md) |
-
-These interfaces have distinct authority and compatibility rules. The
-[contract map](contracts/README.md) connects them to the shared agreements;
-it is not a release inventory or a promise that every installation enables them.
+The [hosting agreement](contracts/hosting.md) identifies Instance's local promises;
+the [technical interface map](contracts/README.md#technical-interfaces) locates
+source bindings, responsibilities, memory, lifecycle and other optional APIs.
 
 ## Local commands
 
