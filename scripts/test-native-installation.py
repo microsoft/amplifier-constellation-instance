@@ -8,6 +8,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -42,11 +45,28 @@ class NativeInstallTests(unittest.TestCase):
                 text = (owner / '.config/systemd/user' / service['name']).read_text()
                 working = next(line for line in text.splitlines() if line.startswith('WorkingDirectory='))
                 command = next(line for line in text.splitlines() if line.startswith('ExecStart='))
+                self.assertEqual(working, 'WorkingDirectory=' + str(home).replace('%', '%%'))
+                self.assertNotIn('\"', working)
                 self.assertIn('$literal %%test', working)
                 self.assertNotIn('$$literal', working)
                 self.assertIn('$$literal %%test', command)
                 self.assertEqual(service['kind'], 'systemd-user')
                 self.assertEqual([call.args[0][2] for call in run.call_args_list], ['daemon-reload', 'enable'])
+
+    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('systemd-analyze'), 'Linux offline systemd parser')
+    def test_generated_linux_unit_is_accepted_by_real_systemd_parser(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            home = owner / 'agent café $literal %test'
+            home.mkdir()
+            with mock.patch.object(native.Path, 'home', return_value=owner), mock.patch.object(native, 'run'):
+                service = native.make_service(home, {'instance_id': 'd442aa2b-768e-4dc0-b60a-6964a413d40f'})
+            path = owner / '.config/systemd/user' / service['name']
+            text = path.read_text()
+            text = '\n'.join('ExecStart=/usr/bin/true' if line.startswith('ExecStart=') else line for line in text.splitlines()) + '\n'
+            path.write_text(text)
+            result = subprocess.run(['systemd-analyze', 'verify', '--man=no', str(path)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def instance(self, root):
         home = root / "agent space $literal"

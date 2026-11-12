@@ -123,7 +123,7 @@ def make_service(home, config):
         with destination.open('x') as output:
             output.write('[Unit]\nDescription=One Constellation agent\nAfter=network-online.target\n'
                          '[Service]\nExecStart=' + ' '.join(quote(x, command=True) for x in [executable, 'serve', '--home', home]) +
-                         '\nWorkingDirectory=' + quote(home) + '\nRestart=on-failure\nRestartSec=5\nUMask=0077\n'
+                         '\nWorkingDirectory=' + str(home).replace('%', '%%') + '\nRestart=on-failure\nRestartSec=5\nUMask=0077\n'
                          '[Install]\nWantedBy=default.target\n')
         destination.chmod(0o600)
         run(['systemctl', '--user', 'daemon-reload'], timeout=30)

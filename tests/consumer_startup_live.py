@@ -44,7 +44,7 @@ def main():
         manifest['files'][name] = hashlib.sha256((baseline / name).read_bytes()).hexdigest()
         manifest['version'] = subprocess.check_output([str(baseline / name), '--version'], text=True).strip().split()[-1]
         (baseline / 'consumer-bundle.json').write_text(json.dumps(manifest))
-        home = root / 'same installed individual'
+        home = root / 'same installed individual café 日本'
         env = os.environ.copy()
         if os.name == 'nt':
             system = Path(os.environ['SystemRoot']) / 'System32'
@@ -66,7 +66,7 @@ def main():
             return json.loads(result.stdout)
         try:
             engine_args = [] if manifest.get('native_runtime') else ['--skip-runtime']
-            installed = run(baseline / name, 'setup', '--home', home, '--name', 'Disposable startup',
+            installed = run(baseline / name, 'setup', '--home', home, '--name', 'Startup café 日本',
                             '--bind', '127.0.0.1', '--no-browser', *engine_args)
             identifier = str(uuid.UUID(installed['instance_id']))
             assert installed['running_verified'] and installed['service']
@@ -94,7 +94,7 @@ def main():
         finally:
             # Even a partially failed install has an owner-generated UUID in config.
             if identifier is None and (home / 'config.json').exists():
-                identifier = str(uuid.UUID(json.loads((home / 'config.json').read_text())['config']['instance_id']))
+                identifier = str(uuid.UUID(json.loads((home / 'config.json').read_text(encoding='utf-8'))['config']['instance_id']))
             if identifier:
                 if os.name == 'nt':
                     tool = str(Path(os.environ['SystemRoot']) / 'System32/schtasks.exe')

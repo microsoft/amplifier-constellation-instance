@@ -415,7 +415,7 @@ async fn main() -> Result<()> {
             )?;
             let python = agent_instance::platform::installation_python(&cli.home)?;
             let mut cmd = std::process::Command::new(python);
-            cmd.arg("-I")
+            cmd.args(["-I", "-X", "utf8"])
                 .arg("-B")
                 .arg(staging.join("install.py"))
                 .arg("--home")

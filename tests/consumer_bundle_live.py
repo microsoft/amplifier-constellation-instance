@@ -37,7 +37,7 @@ def main():
                     target.chmod((entry.external_attr >> 16) & 0o777)
         executable = bundle / ('agent-instance.exe' if os.name == 'nt' else 'agent-instance')
         manifest = json.loads((bundle / 'consumer-bundle.json').read_text())
-        home = root / 'installed agent with spaces'
+        home = root / 'installed agent café 日本'
         env = os.environ.copy()
         env.pop('PYTHONPATH', None); env.pop('PYTHONHOME', None)
         if os.name == 'nt':
@@ -62,9 +62,10 @@ def main():
                 raise RuntimeError('Consumer command failed: ' + result.stderr[-3000:])
             return result
         engine_args = [] if manifest.get('native_runtime') else ['--skip-runtime']
-        installed = json.loads(command('setup', '--home', home, '--name', 'Disposable consumer',
+        installed = json.loads(command('setup', '--home', home, '--name', 'Disposable café 日本',
                                        '--bind', '127.0.0.1', '--no-service', '--no-browser', *engine_args).stdout)
         assert installed['running_verified'] is False
+        assert json.loads((home / 'config.json').read_text(encoding='utf-8'))['config']['name'] == 'Disposable café 日本'
         checks.append('actual native setup with developer tools absent and hostile Python environment')
         private = home / 'support' / manifest['python_directory'] / manifest['python_executable']
         assert private.is_file()
@@ -79,6 +80,7 @@ def main():
             receipt = json.loads((home / 'engine/installation.json').read_text())
             assert receipt['sha256'] == manifest['native_runtime']['binary_sha256']
             assert receipt['credentials_copied'] is False
+            assert json.loads((home / 'engine/runtime.json').read_text(encoding='utf-8'))['name'] == 'Disposable café 日本'
             checks.append('published default native engine installed from verified bundle without setup download')
         executable = home / 'bin' / executable.name
         before = {name: hashlib.sha256((home / name).read_bytes()).hexdigest()

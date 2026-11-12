@@ -70,7 +70,7 @@ pub fn run(home: &Path, arguments: Vec<String>) -> Result<()> {
     );
     let mut command = std::process::Command::new(ordinary(root, &relative)?);
     command
-        .arg("-I")
+        .args(["-I", "-X", "utf8"])
         .arg("-B")
         .arg(ordinary(root, script)?)
         .args(arguments)
