@@ -5,6 +5,7 @@ Only UUID-named jobs created by this fixture are removed. No model calls or
 production installation. A version-only binary is labelled as a fixture.
 """
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -75,9 +76,10 @@ def main():
             before = run(native, 'status', '--home', home, '--json')
             files = {str(path.relative_to(home)): hashlib.sha256(path.read_bytes()).hexdigest()
                      for path in [home / 'config.json', home / 'secrets/control-token', home / 'tls/root-ca.crt']}
-            with sqlite3.connect(home / 'state.sqlite3') as db:
+            with closing(sqlite3.connect(home / 'state.sqlite3')) as db:
                 db.execute('CREATE TABLE native_consumer_continuity(value TEXT)')
                 db.execute('INSERT INTO native_consumer_continuity VALUES (?)', ('retained original work/unknown outcome fixture',))
+                db.commit()
             updated = run(bundle / name, 'setup', 'update', '--home', home, '--no-browser')
             assert updated['running_verified'] and updated['previous'] == installed['release']
             assert updated['release']['id'] != installed['release']['id']
@@ -88,7 +90,7 @@ def main():
             checks.append('actual previous executable rollback restores the same authenticated individual')
             for relative, expected in files.items():
                 assert hashlib.sha256((home / relative).read_bytes()).hexdigest() == expected
-            with sqlite3.connect(home / 'state.sqlite3') as db:
+            with closing(sqlite3.connect(home / 'state.sqlite3')) as db:
                 assert db.execute('SELECT value FROM native_consumer_continuity').fetchall() == [('retained original work/unknown outcome fixture',)]
             checks.append('configuration, credential, CA and retained work data unchanged across both switches')
         finally:

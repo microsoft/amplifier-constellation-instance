@@ -6,6 +6,7 @@ The bundled default engine is initialized without copying an account.
 The runner's Python drives the test; only the package interpreter runs setup.
 """
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -119,7 +120,7 @@ def main():
         second = start_and_check()
         assert first['instance_id'] == second['instance_id'] == installed['instance_id']
         assert {name: hashlib.sha256((home / name).read_bytes()).hexdigest() for name in before} == before
-        with sqlite3.connect(home / 'state.sqlite3') as db:
+        with closing(sqlite3.connect(home / 'state.sqlite3')) as db:
             assert db.execute('SELECT value FROM consumer_preservation').fetchall() == [('same session/task/unknown receipt fixture',)]
         checks.append('actual same-installation restart preserves identity/config/credential/CA and retained data')
         # Installation support survives removal of the original download.
