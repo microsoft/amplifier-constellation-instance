@@ -181,6 +181,6 @@ is guidance to evaluate with real conversations, not a shared leader-election
 service or automatic commitment extractor.
 
 The coordinated contract is the family's
-[collaboration candidate](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/collaboration.v1-candidate.md).
+[collaboration candidate](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md).
 `tests/acp_relay.rs` covers active-only admission, stale/wrong-session references,
 preserved approvals and rejection of new attention offers.

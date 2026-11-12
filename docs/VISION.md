@@ -1,55 +1,38 @@
-# A persistent individual across experiences
+# A home for a continuing agent
 
-Instance should make an agent usable as a continuing collaborator rather than a
-new configuration exercise for each place a person works. Its contribution is the
-installed individual: identity and configuration, authorized context, accepted
-responsibilities and controls that people and experiences can rely on.
+Instance gives an agent a lasting place in a person's work. Its identity,
+configuration, connections and responsibilities remain available as people
+return to it through different experiences. The person should not need to set
+up a new agent or narrate its commitments again for every conversation.
 
 The [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md)
-defines the larger ambition. The [family agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md#information-ownership)
-assigns information ownership across engines, conversation sources, domains and
-experiences. Instance's local [contract map](../contracts/README.md) locates the
-concrete service interfaces.
+describes the larger team. Instance contributes the individual agent's home;
+its selected engine supplies reasoning and execution, while connected services
+supply their own conversations, context and actions.
 
 ## Make continuity useful
 
-A person should be able to bring the same individual into a different experience,
-understand its commitments and resume relevant work without rebuilding its
-configuration or narrating all the context again. Useful continuity depends on
-knowing which information belongs to which source and audience, what work was
-accepted, what actually happened and what remains uncertain.
+Someone should be able to connect an individual, understand what it has agreed
+to do, inspect relevant evidence and redirect supported work. The home should
+make those capabilities accessible to experiences without turning every product
+into another installation manager. Useful memory and ongoing responsibilities
+should deepen that continuity while preserving their sources and meaning.
 
-The service should make that information available through clear, supported
-operations. Authorized retrieval, responsibility follow-through, memory and
-installation recovery are substantial areas to deepen. The early implementation
-barely bounds that opportunity; it is a place to learn from, not the limit of
-future investment.
+For example, a person returns to an agent from a different experience. Instance
+makes its identity, connections and permitted responsibilities available; the
+experience presents them appropriately, and the engine continues through its
+supported session interface.
 
-## Compose with independent capabilities
+## Keep the host focused
 
-Instance should be a dependable host for the selected ACP engine, not a second
-implementation of that engine's reasoning loop or private session store. Domain
-connections should be able to supply their context and actions without copying
-platform authorization into Instance. The shared [interface responsibilities](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/family.v1-candidate.md#interface-responsibilities)
-define how these parts combine.
+Instance's value is dependable hosting, not a second reasoning loop or universal
+conversation store. Clear interfaces let people improve engines, domain connections
+and experiences independently. The bundled administration screens are one client
+of those interfaces, not the intended design of every future experience.
 
-People building a new experience should be able to choose the services they need
-and design an appropriate interaction around them. The installation's exposed
-controls should make setup, operation and recovery understandable without
-requiring the bundled administration UI. Future products may look very different.
-
-## Return attention to the person
-
-Good hosting should reduce the effort of connecting, supervising and recovering
-an agent. Controls should expose consequential choices, meaningful outcomes and
-honest limits without demanding continuous administration. Routine coordination
-can remain observable while the experience brings back what matters to the
-person; the shared [interaction agreement](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/experience.v1-candidate.md)
-owns those meanings.
-
-Judge changes through an actual journey across the host, selected engine and
-relevant connection. Include setup and recovery effort, current authorization,
-continuity and truthful outcomes. Choose work from this intent, its contracts and
-fresh evidence, using the shared [Converge practice](https://github.com/microsoft/amplifier-constellation/blob/main/docs/working-together.md)
-to coordinate changes. Avoid a second maintained inventory of gaps or a separate
-method for each component.
+Judge improvement by the total effort to connect, understand, operate and recover
+an agent, including administrator effort. Check a real host–engine–connection
+journey, not just an attractive status display. Follow the umbrella's
+[shared promises](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
+and Instance's [hosting agreement](../contracts/hosting.md) when developing that
+journey.

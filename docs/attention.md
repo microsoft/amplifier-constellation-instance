@@ -67,7 +67,7 @@ Source delivery joins activity revisions exactly as it joins message revisions;
 incorporation is never completion. Existing offered/claimed/admitted distinctions,
 deduplication, cancellation and connection/session binding are unchanged.
 
-See the shared [human engagement contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/human-engagement.v1-candidate.md)
+See the shared [human engagement contract](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md)
 for action-sequence semantics and adapter fallback. This feature does not change
 Runtime model scheduling, install an activity source in adapters, or make an
 older host accept the new optional context field. No production activity-quality
