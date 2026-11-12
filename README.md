@@ -16,7 +16,7 @@ without a fleet service or the other Constellation components.
 | --- | --- |
 | Understand the value this service should provide | [Instance vision](docs/VISION.md) |
 | Design or change an interface | [Local contract map](contracts/README.md) |
-| Install an independent agent | [Linux installation](docs/install.md) or [native Windows/macOS](docs/native-platforms.md) |
+| Install an independent agent | [Consumer packages and native startup](docs/native-platforms.md) |
 | Connect a client or experience | [ACP boundary](docs/acp-boundary.md) and [technical interface map](contracts/README.md#technical-interfaces) |
 | Operate an installation programmatically | [Management API](docs/api.md) |
 | Change code and verify it | [Working here](AGENTS.md) and [validation](docs/validation.md) |
