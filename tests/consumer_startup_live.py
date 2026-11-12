@@ -47,7 +47,7 @@ def main():
         home = root / 'same installed individual'
         env = os.environ.copy()
         if os.name == 'nt':
-            system = Path(env['SystemRoot']) / 'System32'
+            system = Path(os.environ['SystemRoot']) / 'System32'
             env['PATH'] = str(system) + os.pathsep + str(system / 'WindowsPowerShell/v1.0')
         else:
             tools = root / 'os-tools'; tools.mkdir()
@@ -97,7 +97,7 @@ def main():
                 identifier = str(uuid.UUID(json.loads((home / 'config.json').read_text())['config']['instance_id']))
             if identifier:
                 if os.name == 'nt':
-                    tool = str(Path(env['SystemRoot']) / 'System32/schtasks.exe')
+                    tool = str(Path(os.environ['SystemRoot']) / 'System32/schtasks.exe')
                     for job in ('AgentInstance-' + identifier, 'constellation-updates-' + identifier):
                         subprocess.run([tool, '/End', '/TN', job], capture_output=True, timeout=30)
                         subprocess.run([tool, '/Delete', '/TN', job, '/F'], capture_output=True, timeout=30)

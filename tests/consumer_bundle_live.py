@@ -42,7 +42,7 @@ def main():
         env.pop('PYTHONPATH', None); env.pop('PYTHONHOME', None)
         if os.name == 'nt':
             # OS tools only, no Git/WSL/Python/Rust/Node/winget locations.
-            system = Path(env['SystemRoot']) / 'System32'
+            system = Path(os.environ['SystemRoot']) / 'System32'
             env['PATH'] = str(system) + os.pathsep + str(system / 'WindowsPowerShell/v1.0')
         else:
             tools = root / 'os-tools'; tools.mkdir()
