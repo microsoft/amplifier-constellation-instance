@@ -9,12 +9,13 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def load(name):
-    spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / (name + '.py'))
+def load(name, folder='scripts'):
+    spec = importlib.util.spec_from_file_location(name, ROOT / folder / (name + '.py'))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -23,9 +24,26 @@ def load(name):
 package = load('package-consumer')
 consumer = load('consumer-bundle')
 baseline = load('build-consumer-baseline')
+startup = load('consumer_startup_live', 'tests')
 
 
 class BundleTests(unittest.TestCase):
+    def test_fixture_cleanup_waits_for_actual_windows_sharing_release_only(self):
+        sharing = PermissionError('file still open'); sharing.winerror = 32
+        with patch.object(startup.shutil, 'rmtree', side_effect=[sharing, None]) as remove, patch.object(startup.time, 'sleep'):
+            startup.remove_stopped_fixture(Path('owned-fixture'))
+            self.assertEqual(remove.call_count, 2)
+        with patch.object(startup.shutil, 'rmtree', side_effect=PermissionError('ordinary access refusal')) as remove:
+            with self.assertRaises(PermissionError):
+                startup.remove_stopped_fixture(Path('owned-fixture'))
+            self.assertEqual(remove.call_count, 1)
+
+    def test_fixture_cleanup_does_not_hide_a_persistent_windows_lock(self):
+        sharing = PermissionError('persistent lock'); sharing.winerror = 32
+        with patch.object(startup.shutil, 'rmtree', side_effect=sharing), patch.object(startup.time, 'monotonic', side_effect=[0, 11]):
+            with self.assertRaisesRegex(PermissionError, 'persistent lock'):
+                startup.remove_stopped_fixture(Path('owned-fixture'))
+
     def test_version_fixture_preserves_lf_and_windows_crlf_and_unrelated_versions(self):
         for newline in ('\n', '\r\n'):
             with self.subTest(newline=repr(newline)):

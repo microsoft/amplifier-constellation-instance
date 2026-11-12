@@ -20,6 +20,19 @@ import uuid
 import zipfile
 
 
+def remove_stopped_fixture(path, timeout=10):
+    """SchTasks End is asynchronous; wait only for this verified fixture's files."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            shutil.rmtree(path)
+            return
+        except PermissionError as error:
+            if getattr(error, 'winerror', None) not in (32, 33) or time.monotonic() >= deadline:
+                raise
+            time.sleep(.1)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--bundle', required=True, type=Path)
@@ -113,7 +126,7 @@ def main():
                     registration = json.loads((state / 'registration.json').read_text())
                     if registration['instance_id'] != identifier or Path(registration['home']).resolve() != home.resolve():
                         raise ValueError('Disposable helper identity differs; files preserved')
-                    shutil.rmtree(state)
+                    remove_stopped_fixture(state)
                 time.sleep(1)
     print(json.dumps({'passed': len(checks), 'checks': checks,
                       'baseline': 'identical source with version-only fixture label',
