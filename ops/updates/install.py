@@ -47,13 +47,13 @@ def enroll(home,state,connector_homes,worker,container_manifest=None,container_i
             settings['uv']=shutil.which('uv')
             if not settings['uv']:raise ValueError('Install uv on this host to track Amplifier Agent updates')
         w.write(provider_config,settings)
-        components.append({'id':'engine','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I',str(state/'engine_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
+        components.append({'id':'engine','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I','-X','utf8',str(state/'engine_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
     if container_manifest:
         manifest=w.read(container_manifest)
         if not any(Path(entry['home']).resolve()==home for entry in manifest['homes']):raise ValueError('Container does not own this installation')
         provider_config=state/'container-image.json'
         w.write(provider_config,{'manifest':str(container_manifest.resolve()),'state':str(state/'container-image'),'installer':str(state/'container/install.py'),'image':container_image or manifest['image'],'pull':pull_container_image})
-        components.append({'id':'container-image','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I',str(state/'container_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
+        components.append({'id':'container-image','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I','-X','utf8',str(state/'container_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
     if previous:
         known={p['id'] for p in components}
         components.extend(p for p in previous['components'] if p['id'] not in known and p['id'] not in ('instance','runtime') and not (p['id'].startswith('slack-') and p.get('kind')=='slack'))
@@ -77,7 +77,7 @@ def enroll(home,state,connector_homes,worker,container_manifest=None,container_i
 
     if (worker.parent/'container').is_dir():shutil.copytree(worker.parent/'container',state/'container',dirs_exist_ok=True)
     name='constellation-updates-'+identifier
-    argv=[sys.executable,'-I',str(target),'--registration',str(path)]
+    argv=[sys.executable,'-I','-X','utf8',str(target),'--registration',str(path)]
     if system=='Linux':
         def quote(x):return '"'+x.replace('\\','\\\\').replace('"','\\"').replace('%','%%').replace('$','$$')+'"'
         unit=Path.home()/'.config/systemd/user'/(name+'.service');unit.parent.mkdir(parents=True,exist_ok=True)

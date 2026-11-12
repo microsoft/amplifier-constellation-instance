@@ -16,7 +16,7 @@ without a fleet service or the other Constellation components.
 | --- | --- |
 | Understand the value this service should provide | [Instance vision](docs/VISION.md) |
 | Design or change an interface | [Local contract map](contracts/README.md) |
-| Install an independent agent | [Linux installation](docs/install.md) or [native Windows/macOS](docs/native-platforms.md) |
+| Install an independent agent | [Consumer packages and native startup](docs/native-platforms.md) |
 | Connect a client or experience | [ACP boundary](docs/acp-boundary.md) and [technical interface map](contracts/README.md#technical-interfaces) |
 | Operate an installation programmatically | [Management API](docs/api.md) |
 | Change code and verify it | [Working here](AGENTS.md) and [validation](docs/validation.md) |
@@ -27,24 +27,27 @@ not define the UX of future products.
 
 ## Install
 
-On Debian/Ubuntu, install Git and run:
+Download the matching **consumer bundle** from a published release and keep its
+files together. It contains the native executable, a private Python interpreter,
+and fixed setup support; no WSL, compiler, Git, Node, or system Python is needed.
+An optional fleet client can invoke the same setup interface.
 
-```bash
-AGENT_INSTALL_SOURCE="$(mktemp -d)"
-git clone https://github.com/microsoft/amplifier-constellation-instance.git "$AGENT_INSTALL_SOURCE/source"
-bash "$AGENT_INSTALL_SOURCE/source/install.sh" --name "My agent"
+```sh
+./agent-instance setup --home "/path/to/my-agent" --name "My agent"
 ```
 
-The installer provisions Native Runtime by default, creates a private instance
-and starts its user service. It prints connection and certificate information
-for headless setup. Configure this installation's own provider credentials or
-account through its supported setup controls. Custom ACP engines remain an
-explicit installation choice; see the platform instructions for options.
+On Windows run `agent-instance.exe` with the same arguments. The native engine
+comes only from the checked release lock. An unavailable platform is reported;
+setup never substitutes another engine or builds source. Provider access remains
+an explicit account or credential connection after installation.
 
-[Installation](docs/install.md) defines version selection, persistence, certificate
-trust and removal. [Native platforms](docs/native-platforms.md) covers Windows
-and macOS. The running service uses its installed executable and private state,
-not the source checkout. Optional Linux containment has a separate
+[Native platforms](docs/native-platforms.md) describes package support, OS account
+requirements, startup and the fixed host recipe. Linux's custom PAM policy needs
+an explicit administrator installation; the consumer bundle does not silently
+write system authentication policy. [Development installation](docs/install.md)
+and the `install*.sh` / PowerShell scripts remain optional source-build paths.
+Every running installation keeps its own executable, interpreter and private state
+independently of the download folder. Optional Linux containment has a separate
 [per-installation recipe](ops/container/README.md).
 
 ## Use the interfaces

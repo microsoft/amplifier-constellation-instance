@@ -5,13 +5,48 @@ dashboard, setup, management API, and ACP attach command ship in the same binary
 Multiple instances can run under one account, each with its own folder, ports,
 identity, credentials, retained releases, and startup job. Adapters remain separate.
 
-Version 0.16.3 installs the independent **Constellation 0.10.1** Rust engine by
-default. Native model execution requires neither Codex nor Node. Connect a
-provider key or this agent's own ChatGPT account after installation; no existing
-provider account is copied by the native path. Choosing another ACP executable
-remains an advanced option.
+## Consumer packages
 
-## Install on a Mac
+A release consumer bundle contains the Instance executable, fixed setup support
+and its own CPython distribution. Setup copies that interpreter into this
+installation's `support/` directory. Backend setup and the independent updater
+use that fixed path, including after the original download is removed. The
+interpreter is installation support, not the selected reasoning engine.
+
+The package matrix is Windows x64 and ARM64, macOS Intel and Apple Silicon,
+and Linux x64 and ARM64. Build and native fixture results qualify the actual
+published artifacts; a platform name alone is not a launch or provider proof.
+Windows ARM64 uses a native Windows 11 ARM runner. Windows x64 CI uses Server
+2025, so consumer Windows 11 desktop account and startup behavior remains a
+separate qualification. Packages do not require WSL or developer tools. Windows
+Python carries its private VC runtime DLLs; no redistributable installer is run.
+Python's exact distributor hashes and license provenance live in
+[the source-pinned shared Python lock](../scripts/vendor/python/lock.json), and its notices
+ship with every copy. The Linux Python baseline is glibc 2.17; Instance's own
+Ubuntu build baseline and PAM dependency still apply. Mac executables are unsigned.
+
+Native CI also exercises actual current-user startup on Windows and macOS, then
+updates and rolls back the same installation with a version-only fixture build.
+It checks identity, configuration, credentials, CA and retained database contents.
+These fixtures do not call a model or establish provider-account compatibility.
+
+Run `agent-instance setup --home PATH --name NAME` from the extracted bundle,
+or let an authorized local fleet recipe invoke it. The default engine is the
+checksummed release in [`native-runtime-lock.json`](../scripts/native-runtime-lock.json).
+The consumer archive carries that exact published engine and its original notices,
+so default-engine setup needs no further download. Only that lock defines available
+engine platforms. A missing target is an
+explicit setup error; `--skip-runtime` can create a host whose engine remains
+unconfigured. It does not make that host a working agent. Account sign-in and
+provider credentials remain separate from installation.
+
+Linux uses an existing user systemd manager for automatic startup. The current
+`agent-instance` PAM policy must be installed by an explicit administrator step
+as documented in [Linux installation](install.md); setup does not modify `/etc`.
+Without startup registration, `--no-service` installs the same independent home
+and prints its actual non-running state.
+
+## Developer source installation on a Mac
 
 Install Git, then clone the public source:
 
@@ -36,7 +71,7 @@ Use `--home "/another/new/folder"` for another independent agent. Sign in with
 the owning Mac account's short username and password. macOS uses its existing
 `login` OpenPAM policy; the installer does not modify `/etc/pam.d`.
 
-## Install on Windows
+## Developer source installation on Windows
 
 Use native PowerShell under the account that will own the agent:
 
@@ -134,8 +169,24 @@ The native update helper does not adopt an older Linux installer layout.
 
 ## Host recipe contract
 
-Build/prerequisite wrappers can be replaced without changing the instance or ACP.
-For an automation system with a verified local binary and Python already present:
+An optional management client can use a verified complete consumer bundle without
+Python or a build tool on PATH. Its fixed entry is:
+
+```text
+agent-instance[.exe] setup install --home NEW_HOME --name NAME --bind ADDRESS --port PORT --no-browser
+agent-instance[.exe] setup update --home EXISTING_HOME --no-browser
+agent-instance[.exe] setup rollback --home EXISTING_HOME --no-browser
+agent-instance[.exe] setup inspect --home EXISTING_HOME
+```
+
+`install` accepts a new/empty home only and obtains the current OS owner. Engine
+selection is explicit (`--engine native|codex`); an update does not change it.
+`--runtime-binary` is an explicit verified local-engine input, never a URL or shell
+fragment. The complete package is checked before its private interpreter runs.
+This local OS-owner entry adds no remote command API or new ACP method.
+
+Developer wrappers can still call the same `native-install/1` implementation with
+an already available Python:
 
 ```sh
 python scripts/native-install.py install --home INSTANCE --binary BINARY --name NAME --no-browser
@@ -188,11 +239,13 @@ macOS, and Windows. [Validation](validation.md) gives reproducible commands and
 links to results for the published source. Real account sign-in, startup jobs,
 and provider access also need an installation check on the target machine.
 
-The pinned Constellation 0.10.1 runtime supports Linux x64/ARM64, Mac ARM64,
-and Windows x64 release assets. Other architectures need an explicitly supplied
-native build. Intel Mac and Windows ARM64 runtime assets are not supplied.
-Mac binaries are not signed or notarized for distribution. CI fixture success
-does not establish live provider access or every machine's account policy.
+The current runtime lock controls which native engine architectures can be
+provisioned. New Instance packages do not invent or infer unpublished runtime
+hashes. CI fixture success does not establish live provider access or every
+machine's account policy. `tests/consumer_bundle_live.py` exercises a real package
+with developer tools removed from PATH, actual TLS/SQLite support, same-home
+restart and preserved credentials/data. It deliberately excludes OS startup
+registration, provider calls and production installations.
 
 Platform references: [Apple LaunchAgents](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html),
 [Windows account logon](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-logonuserw),
