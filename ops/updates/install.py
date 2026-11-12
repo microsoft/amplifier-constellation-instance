@@ -95,8 +95,10 @@ def enroll(home,state,connector_homes,worker,container_manifest=None,container_i
         run('launchctl','bootstrap',domain,str(path))
     elif system=='Windows':
         import base64
-        encoded=base64.b64encode(json.dumps([name,sys.executable,subprocess.list2cmdline(argv[1:])]).encode()).decode()
-        script="$ErrorActionPreference='Stop'; $d=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"'))); $action=New-ScheduledTaskAction -Execute $d[1] -Argument $d[2]; $trigger=New-ScheduledTaskTrigger -AtLogOn; $settings=New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero); Register-ScheduledTask -TaskName $d[0] -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null; Start-ScheduledTask -TaskName $d[0]"
+        encoded=base64.b64encode(json.dumps([name,sys.executable,subprocess.list2cmdline(argv[1:]),config['owner']]).encode()).decode()
+        # Like the instance itself, this helper belongs to the logged-in owner.
+        # An unrestricted logon trigger needs elevation on ordinary desktops.
+        script="$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $d=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"'))); $action=New-ScheduledTaskAction -Execute $d[1] -Argument $d[2]; $trigger=New-ScheduledTaskTrigger -AtLogOn -User $d[3]; $principal=New-ScheduledTaskPrincipal -UserId $d[3] -LogonType Interactive -RunLevel Limited; $settings=New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; Register-ScheduledTask -TaskName $d[0] -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null; Start-ScheduledTask -TaskName $d[0]"
         run('powershell.exe','-NoProfile','-NonInteractive','-EncodedCommand',base64.b64encode(script.encode('utf-16-le')).decode())
     else:raise ValueError('Unsupported platform')
     return {'installed':True,'registration':str(state/'registration.json'),'service':name}
