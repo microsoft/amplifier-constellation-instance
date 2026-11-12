@@ -265,7 +265,7 @@ def install(args):
     # init establishes the native private directory policy before credentials exist.
     run([args.binary, "init", "--home", home, "--name", args.name, "--bind", args.bind, "--port", args.port], timeout=30)
     with install_lock(home):
-        stage_support(args)
+        private_python = stage_support(args)
         config = json.loads((home / "config.json").read_text())["config"]
         info = stage(home, args.binary)
         activate(home, info)
@@ -278,6 +278,8 @@ def install(args):
                     "owner": config["owner"], "platform": sys.platform, "architecture": platform.machine(),
                     "current": info, "previous": None, "service": None,
                     "installed_at": int(time.time() * 1000)}
+        if private_python is not None:
+            metadata["private_python"] = private_python
         # Record a usable installation even if host service registration fails.
         save(home / "install.json", metadata)
         healthy = None
@@ -299,7 +301,7 @@ def switch(args):
         config = json.loads((home / "config.json").read_text())["config"]
         if metadata.get("manager") != "native-install/1" or metadata.get("instance_id") != config["instance_id"]:
             raise ValueError("This installation is not managed by the native installer or its identity differs")
-        stage_support(args)
+        private_python = stage_support(args)
         old = metadata["current"]
         if args.command == "update":
             candidate = stage(home, args.binary)
@@ -329,6 +331,8 @@ def switch(args):
                 health(home, metadata["instance_id"], old["version"])
             raise
         metadata.update(current=candidate, previous=old, updated_at=int(time.time() * 1000), backup=backup)
+        if private_python is not None:
+            metadata["private_python"] = private_python
         healthy = None
         try:
             save(home / "install.json", metadata)
@@ -361,6 +365,7 @@ def stage_support(args):
     module.stage(args.home, bundle, manifest)
     if args.command == 'install' and not args.skip_runtime and args.engine == 'native' and not args.runtime_binary:
         args.runtime_binary = module.stage_native(args.home, bundle, manifest)
+    return {"directory": manifest["python_directory"], "executable": manifest["python_executable"]}
 
 
 def main():

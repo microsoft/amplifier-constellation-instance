@@ -68,6 +68,8 @@ def main():
         checks.append('actual native setup with developer tools absent and hostile Python environment')
         private = home / 'support' / manifest['python_directory'] / manifest['python_executable']
         assert private.is_file()
+        installed_support = json.loads((home / "install.json").read_text())["private_python"]
+        assert installed_support == {"directory": manifest["python_directory"], "executable": manifest["python_executable"]}
         output = subprocess.check_output([str(private), '-I', '-c',
             'import hashlib,json,sqlite3,ssl,sys; print(json.dumps({"python":sys.version_info[:3],"sqlite":sqlite3.sqlite_version,"tls":ssl.OPENSSL_VERSION}))'],
             env=env, text=True)
