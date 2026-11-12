@@ -5,6 +5,7 @@ Only UUID-named jobs created by this fixture are removed. No model calls or
 production installation. A version-only binary is labelled as a fixture.
 """
 import argparse
+import base64
 from contextlib import closing
 import hashlib
 import json
@@ -85,6 +86,29 @@ def main():
             identifier = str(uuid.UUID(installed['instance_id']))
             assert installed['running_verified'] and installed['service']
             checks.append('actual limited current-user startup reaches authenticated identity health')
+            if os.name == 'nt':
+                # Hosted runners can be elevated. Inspect the actual registered
+                # jobs as well, so a global logon trigger cannot pass unnoticed.
+                script = r'''$ErrorActionPreference='Stop';
+                  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
+                  function Resolve-Sid($value) { if($value -match '^S-1-') { return (New-Object Security.Principal.SecurityIdentifier($value)).Value }; return (New-Object Security.Principal.NTAccount($value)).Translate([Security.Principal.SecurityIdentifier]).Value };
+                  $scheduler=New-Object -ComObject Schedule.Service; $scheduler.Connect();
+                  foreach($name in @('AgentInstance-ID','constellation-updates-ID')) {
+                    $definition=$scheduler.GetFolder('\').GetTask($name).Definition;
+                    $owner=Resolve-Sid $definition.Principal.UserId;
+                    if($owner -ne $sid -or $definition.Principal.LogonType -ne 3 -or $definition.Principal.RunLevel -ne 0) { throw 'Startup principal is not the interactive limited owner' };
+                    if($definition.Triggers.Count -ne 1) { throw 'Expected one owner logon trigger' };
+                    $trigger=$definition.Triggers.Item(1);
+                    if($trigger.Type -ne 9 -or -not $trigger.UserId) { throw 'Logon trigger is not owner-scoped' };
+                    $triggerOwner=Resolve-Sid $trigger.UserId;
+                    if($triggerOwner -ne $sid) { throw 'Logon trigger belongs to another owner' };
+                  }; Write-Output 'owner-scoped startup verified'
+                '''.replace('ID', identifier)
+                powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+                verified = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                    base64.b64encode(script.encode('utf-16-le')).decode()], env=env, capture_output=True, text=True, timeout=30)
+                assert verified.returncode == 0, verified.stderr
+                checks.append('both actual Windows tasks use the limited owner and owner-only logon trigger')
             native = home / 'bin' / name
             before = run(native, 'status', '--home', home, '--json')
             files = {str(path.relative_to(home)): hashlib.sha256(path.read_bytes()).hexdigest()
