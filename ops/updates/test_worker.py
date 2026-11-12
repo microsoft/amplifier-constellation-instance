@@ -1,4 +1,4 @@
-import contextlib, importlib.util, io, json, pathlib, sqlite3, subprocess, sys, tarfile, tempfile, time, unittest, uuid, zipfile
+import contextlib, importlib.util, io, json, pathlib, queue, sqlite3, subprocess, sys, tarfile, tempfile, threading, time, unittest, uuid, zipfile
 from unittest.mock import patch
 ROOT=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('worker',ROOT/'worker.py');w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
@@ -275,5 +275,116 @@ class UpdateTests(unittest.TestCase):
  def test_invalid_explicit_service_binding_is_rejected(self):
   self.registration['components'][0]['service_name']='missing.service';w.write(self.path,self.registration)
   with self.assertRaisesRegex(ValueError,'unknown_component_service'):w.load_registration(self.path)
+
+class WorkerStartupLockTests(unittest.TestCase):
+ # Native lock-order tests with disposable files, not Windows sharing-error or
+ # TLS qualification. Actual API/service bodies are outside this boundary.
+ LOCK_PROCESS = """
+import importlib.util,json,pathlib,sys
+sys.dont_write_bytecode=True
+spec=importlib.util.spec_from_file_location('fixture_worker',sys.argv[1])
+w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
+try:
+ with w.single_worker(pathlib.Path(sys.argv[2])):
+  print(json.dumps({'acquired':True}),flush=True)
+  if sys.argv[3]=='hold' and sys.stdin.readline().strip()!='release':
+   raise RuntimeError('Missing fixture release')
+except OSError as error:
+ print(json.dumps({'acquired':False,'errno':error.errno}),flush=True)
+"""
+ def setUp(self):
+  self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
+  self.root=pathlib.Path(self.temporary.name);self.home=self.root/'home';self.state=self.root/'state'
+  (self.home/'bin').mkdir(parents=True);self.state.mkdir()
+  self.binary=self.home/'bin/agent-instance';self.binary.write_bytes(b'fixture never executed')
+  self.path=self.root/'external-registration.json'
+  self.registration={'schema':1,'instance_id':'startup-fixture','home':str(self.home),'state':str(self.state),'components':[{'id':'instance','kind':'instance','binary':str(self.binary)}],'services':[]}
+  self.original={'state':'idle','last_check':91,'marker':'before-lock','unknown_receipts':[{'id':'retained','settled':False}]}
+  w.write(self.path,self.registration);w.write(self.state/'state.json',self.original)
+
+ def lock_command(self,state,mode):
+  return [sys.executable,'-u','-c',self.LOCK_PROCESS,str(ROOT/'worker.py'),str(state),mode]
+
+ def probe_lock(self,state):
+  process=subprocess.run(self.lock_command(state,'probe'),capture_output=True,text=True,timeout=15)
+  self.assertEqual(process.returncode,0,process.stderr)
+  result=json.loads(process.stdout)
+  if not result['acquired']:self.assertIn(result['errno'],(11,13,35))
+  return result['acquired']
+
+ @contextlib.contextmanager
+ def other_worker(self):
+  process=subprocess.Popen(self.lock_command(self.state,'hold'),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  ready=queue.Queue()
+  reader=threading.Thread(target=lambda:ready.put(process.stdout.readline()),daemon=True);reader.start()
+  try:
+   # A reader thread handles Windows anonymous pipes as well as POSIX pipes.
+   acquired=json.loads(ready.get(timeout=15));self.assertTrue(acquired['acquired'])
+   self.assertIsNone(process.poll());yield process
+  finally:
+   if process.poll() is None:
+    try:process.stdin.write('release\n');process.stdin.flush()
+    except (BrokenPipeError,OSError):pass
+   try:output,error=process.communicate(timeout=15)
+   except subprocess.TimeoutExpired:
+    process.kill();output,error=process.communicate(timeout=5)
+    self.fail('Disposable lock holder failed to stop: '+error)
+   reader.join(timeout=5)
+   self.assertFalse(reader.is_alive());self.assertEqual(process.returncode,0,error)
+
+ def test_second_process_refuses_before_journal_read_or_api(self):
+  before={p:p.read_bytes() for p in (self.path,self.state/'state.json',self.binary)}
+  real_read=w.read;reads=[]
+  def recorded(path):reads.append(pathlib.Path(path).resolve());return real_read(path)
+  with self.other_worker() as holder,patch.object(w,'read',side_effect=recorded),patch.object(w.ssl,'create_default_context') as tls,patch.object(w.Worker,'api') as api,patch.object(w.Worker,'tick') as tick,patch.object(w.Worker,'serve') as serve:
+   with self.assertRaises(OSError) as refused:w.run_worker(self.path,once=True)
+   self.assertIn(refused.exception.errno,(11,13,35));self.assertIsNone(holder.poll())
+   self.assertNotIn((self.state/'state.json').resolve(),reads)
+   tls.assert_not_called();api.assert_not_called();tick.assert_not_called();serve.assert_not_called()
+  self.assertEqual({p:p.read_bytes() for p in before},before)
+  self.assertTrue(self.probe_lock(self.state))
+
+ def test_changed_registration_root_refuses_before_either_journal(self):
+  other=self.root/'other-state';other.mkdir();w.write(other/'state.json',{'state':'idle','marker':'other'})
+  journals=[self.state/'state.json',other/'state.json'];before={p:p.read_bytes() for p in journals}
+  real_lock=w.single_worker;real_read=w.read;reads=[]
+  @contextlib.contextmanager
+  def change_mapping(root):
+   self.assertEqual(root.resolve(),self.state.resolve())
+   w.write(self.path,{**self.registration,'state':str(other)})
+   with real_lock(root):yield
+  def recorded(path):reads.append(pathlib.Path(path).resolve());return real_read(path)
+  with patch.object(w,'single_worker',side_effect=change_mapping),patch.object(w,'read',side_effect=recorded),patch.object(w.ssl,'create_default_context') as tls,patch.object(w.Worker,'api') as api,patch.object(w.Worker,'tick') as tick,patch.object(w.Worker,'serve') as serve:
+   with self.assertRaisesRegex(ValueError,'helper_state_changed_before_lock'):w.run_worker(self.path,once=True)
+   self.assertFalse(set(reads)&{p.resolve() for p in journals})
+   tls.assert_not_called();api.assert_not_called();tick.assert_not_called();serve.assert_not_called()
+  self.assertEqual({p:p.read_bytes() for p in journals},before)
+  self.assertTrue(self.probe_lock(self.state));self.assertTrue(self.probe_lock(other))
+
+ def test_acquired_lock_loads_fresh_journal_and_spans_tick_or_serve(self):
+  self.assertNotEqual(self.path.parent,self.state)
+  real_lock=w.single_worker;real_read=w.read
+  for once in (True,False):
+   with self.subTest(once=once):
+    w.write(self.state/'state.json',self.original)
+    fresh={**self.original,'last_check':92,'marker':'written-after-lock'};reads=[];calls=[]
+    @contextlib.contextmanager
+    def publish_fresh(root):
+     with real_lock(root):
+      w.write(root/'state.json',fresh)
+      yield
+    def recorded(path):
+     if pathlib.Path(path).resolve()==(self.state/'state.json').resolve():
+      reads.append(path);self.assertFalse(self.probe_lock(self.state))
+     return real_read(path)
+    def body(worker):
+     self.assertEqual(worker.registration,self.path);self.assertEqual(worker.state,fresh)
+     self.assertFalse(self.probe_lock(self.state));calls.append(worker.state.copy())
+    with patch.object(w,'single_worker',side_effect=publish_fresh),patch.object(w,'read',side_effect=recorded),patch.object(w.ssl,'create_default_context'),patch.object(w.Worker,'api') as api,patch.object(w.Worker,'tick',autospec=True,side_effect=body) as tick,patch.object(w.Worker,'serve',autospec=True,side_effect=body) as serve:
+     w.run_worker(self.path,once=once)
+     api.assert_not_called();self.assertEqual(tick.call_count,int(once));self.assertEqual(serve.call_count,int(not once))
+    self.assertEqual(len(reads),1);self.assertEqual(calls,[fresh])
+    self.assertEqual(real_read(self.state/'state.json'),fresh)
+    self.assertTrue(self.probe_lock(self.state))
 
 if __name__=='__main__':unittest.main()
