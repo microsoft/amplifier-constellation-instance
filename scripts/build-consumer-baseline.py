@@ -15,6 +15,20 @@ import subprocess
 import tempfile
 
 
+def fixture_versions(source_bytes, lock_bytes, original):
+    """Change only the workspace version, retaining the checkout's newlines."""
+    fixture = original + '-consumer-fixture'
+    source_text = source_bytes.decode('utf-8')
+    replacement = source_text.replace('version = "' + original + '"', 'version = "' + fixture + '"', 1)
+    if replacement == source_text:
+        raise ValueError('Expected workspace package version was not found')
+    lock_text, count = re.subn(r'(name = "agent-instance"\r?\nversion = ")' + re.escape(original) + '"',
+                              lambda m: m.group(1) + fixture + '"', lock_bytes.decode('utf-8'), count=1)
+    if count != 1:
+        raise ValueError('Expected workspace lock version was not found')
+    return replacement.encode('utf-8'), lock_text.encode('utf-8')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--binary', required=True, type=Path)
@@ -26,21 +40,14 @@ def main():
     original_source = source.read_bytes(); original_lock = lock.read_bytes()
     original = subprocess.check_output([str(binary), '--version'], text=True).strip().split()[-1]
     fixture = original + '-consumer-fixture'
-    source_text = original_source.decode()
-    replacement = source_text.replace('version = "' + original + '"', 'version = "' + fixture + '"', 1)
-    if replacement == source_text:
-        raise ValueError('Expected workspace package version was not found')
-    lock_text, count = re.subn(r'(name = "agent-instance"\nversion = ")' + re.escape(original) + '"',
-                              lambda m: m.group(1) + fixture + '"', original_lock.decode(), count=1)
-    if count != 1:
-        raise ValueError('Expected workspace lock version was not found')
+    replacement, fixture_lock = fixture_versions(original_source, original_lock, original)
     a.output.mkdir(parents=True, exist_ok=True)
     target = a.output / binary.name
     with tempfile.TemporaryDirectory(prefix='consumer-baseline-build-') as temporary:
         backup = Path(temporary) / binary.name
         shutil.copy2(binary, backup)
         try:
-            source.write_bytes(replacement.encode()); lock.write_bytes(lock_text.encode())
+            source.write_bytes(replacement); lock.write_bytes(fixture_lock)
             subprocess.run(['cargo', '+1.93.0', 'build', '--release', '--locked'], cwd=root, check=True, timeout=1800)
             if subprocess.check_output([str(binary), '--version'], text=True).strip() != 'agent-instance ' + fixture:
                 raise ValueError('Version fixture did not build at the expected native path')

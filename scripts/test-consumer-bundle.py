@@ -22,9 +22,26 @@ def load(name):
 
 package = load('package-consumer')
 consumer = load('consumer-bundle')
+baseline = load('build-consumer-baseline')
 
 
 class BundleTests(unittest.TestCase):
+    def test_version_fixture_preserves_lf_and_windows_crlf_and_unrelated_versions(self):
+        for newline in ('\n', '\r\n'):
+            with self.subTest(newline=repr(newline)):
+                source = '[package]\nname = "agent-instance"\nversion = "0.22.0"\n'.replace('\n', newline).encode()
+                lock = ('[[package]]\nname = "agent-instance"\nversion = "0.22.0"\n'
+                        '\n[[package]]\nname = "other"\nversion = "0.22.0"\n').replace('\n', newline).encode()
+                changed_source, changed_lock = baseline.fixture_versions(source, lock, '0.22.0')
+                self.assertEqual(changed_source, source.replace(b'0.22.0', b'0.22.0-consumer-fixture', 1))
+                self.assertEqual(changed_lock, lock.replace(b'0.22.0', b'0.22.0-consumer-fixture', 1))
+
+    def test_version_fixture_refuses_wrong_lock_without_modification(self):
+        source = b'[package]\nname = "agent-instance"\nversion = "0.22.0"\n'
+        lock = b'[[package]]\r\nname = "agent-instance"\r\nversion = "0.21.3"\r\n'
+        with self.assertRaisesRegex(ValueError, 'workspace lock version'):
+            baseline.fixture_versions(source, lock, '0.22.0')
+
     def test_shared_support_is_vendored_from_one_exact_umbrella_revision(self):
         folder = ROOT / 'scripts/vendor/python'
         receipt = json.loads((folder / 'vendor.json').read_text())
