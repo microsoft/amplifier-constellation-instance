@@ -294,9 +294,11 @@ def candidate(component,channel,folder):
     return {'id':component['id'],'version':current,'target_version':new_version,'installed_sha256':installed,'sha256':digest(target_file),'available':digest(target_file)!=installed,**source}
 
 class Worker:
-    def __init__(self,registration):
+    def __init__(self,registration,*,locked_root=None):
         self.registration=Path(registration)
-        self.c=load_registration(registration);self.home=Path(self.c['home']);self.root=Path(self.c['state']);self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
+        self.c=load_registration(registration);self.home=Path(self.c['home']);self.root=Path(self.c['state'])
+        if locked_root is not None and self.root.resolve()!=Path(locked_root).resolve():raise ValueError('helper_state_changed_before_lock')
+        self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.file=self.root/'state.json';self.state=read(self.file) if self.file.exists() else {'state':'idle','components':[],'last_check':0}
         self.context=ssl.create_default_context(cafile=str(self.home/'tls/root-ca.crt'))
     def api(self,path='updates',body=None):
@@ -859,7 +861,14 @@ def single_worker(root):
             fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
         yield
 
+def run_worker(registration,once=False):
+    # Registration may live outside the state directory. Discover the lock root,
+    # then reload and check that binding before reading the mutable journal.
+    root=Path(load_registration(registration)['state']).resolve()
+    with single_worker(root):
+        w=Worker(registration,locked_root=root)
+        w.tick() if once else w.serve()
+
 if __name__=='__main__':
     os.umask(0o077);p=argparse.ArgumentParser(description=__doc__);p.add_argument('--registration',required=True,type=Path);p.add_argument('--once',action='store_true');a=p.parse_args()
-    w=Worker(a.registration)
-    with single_worker(w.root):w.tick() if a.once else w.serve()
+    run_worker(a.registration,a.once)
