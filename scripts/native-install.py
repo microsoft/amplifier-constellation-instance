@@ -359,6 +359,8 @@ def stage_support(args):
     spec.loader.exec_module(module)
     manifest = module.validate(bundle, args.binary)
     module.stage(args.home, bundle, manifest)
+    if args.command == 'install' and not args.skip_runtime and args.engine == 'native' and not args.runtime_binary:
+        args.runtime_binary = module.stage_native(args.home, bundle, manifest)
 
 
 def main():

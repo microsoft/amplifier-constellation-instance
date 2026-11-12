@@ -152,6 +152,12 @@ jobs:
           python scripts/package-release.py --binary "target/${{ matrix.target }}/release/agent-instance${suffix}" --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
           python scripts/package-consumer.py --binary "target/${{ matrix.target }}/release/agent-instance${suffix}" --output dist --target "${{ matrix.target }}" --commit "$(git rev-parse HEAD)" --cache "$RUNNER_TEMP/private-python"
           python tests/consumer_bundle_live.py --bundle "dist/agent-instance-consumer-${{ matrix.target }}.zip"
+      - name: Verify real current-user startup and same-home update/rollback
+        run: |
+          suffix=""; if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          binary="target/${{ matrix.target }}/release/agent-instance${suffix}"
+          python scripts/build-consumer-baseline.py --binary "$binary" --output "$RUNNER_TEMP/consumer-baseline"
+          python tests/consumer_startup_live.py --bundle "dist/agent-instance-consumer-${{ matrix.target }}.zip" --baseline "$RUNNER_TEMP/consumer-baseline/agent-instance${suffix}"
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}

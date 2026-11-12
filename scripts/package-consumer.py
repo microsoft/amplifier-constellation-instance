@@ -56,6 +56,27 @@ def package(binary, output, target, commit, cache):
         executable = 'agent-instance.exe' if 'windows' in target else 'agent-instance'
         (root / executable).write_bytes(binary.read_bytes())
         (root / executable).chmod(0o755)
+        runtime_lock = json.loads((ROOT / 'scripts/native-runtime-lock.json').read_text())
+        runtime_platform = family + '-' + target.split('-')[0]
+        runtime_asset = next((a for a in runtime_lock['assets'] if a['platform'] == runtime_platform), None)
+        runtime = None
+        if runtime_asset is not None:
+            spec = importlib.util.spec_from_file_location('provision_native', ROOT / 'scripts/provision-native.py')
+            provision = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(provision)
+            if provision.platform_key() != runtime_platform:
+                raise ValueError('Default engine packaging requires the matching native builder')
+            folder = root / 'engine/native'; folder.mkdir(parents=True)
+            name = 'agent-runtime.exe' if family == 'windows' else 'agent-runtime'
+            engine = provision.obtain(runtime_lock, folder, name)
+            actual = subprocess.check_output([str(engine), '--version'], text=True).strip()
+            if actual != 'agent-runtime ' + runtime_lock['version']:
+                raise ValueError('Pinned default engine version mismatch')
+            guard.inspect(engine.read_bytes(), runtime_platform)
+            # Retain the entire exact published archive, including its notices.
+            runtime = {'version': runtime_lock['version'], 'platform': runtime_platform,
+                       'binary': 'engine/native/' + name, 'binary_sha256': runtime_asset['binary_sha256'],
+                       'archive': 'engine/native/' + runtime_asset['asset'], 'archive_sha256': runtime_asset['asset_sha256']}
         for name in ('LICENSE', 'THIRD-PARTY-NOTICES.txt'):
             (root / name).write_bytes((ROOT / name).read_bytes())
         for name in ('native-install.py', 'consumer-bundle.py', 'native-runtime-lock.json'):
@@ -68,6 +89,7 @@ def package(binary, output, target, commit, cache):
         manifest = {'schema': 1, 'kind': 'instance-consumer-bundle', 'version': version.split()[1],
                     'target': target, 'source': commit, 'binary': executable,
                     'native_binary': native_metadata,
+                    'native_runtime': runtime,
                     'python_directory': lock['directory'], 'python_executable': asset['executable'],
                     'python_archive_sha256': asset['sha256'], 'files': files}
         (root / 'consumer-bundle.json').write_text(json.dumps(manifest, indent=2) + '\n')

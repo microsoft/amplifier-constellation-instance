@@ -25,10 +25,17 @@ Python's exact distributor hashes and license provenance live in
 ship with every copy. The Linux Python baseline is glibc 2.17; Instance's own
 Ubuntu build baseline and PAM dependency still apply. Mac executables are unsigned.
 
+Native CI also exercises actual current-user startup on Windows and macOS, then
+updates and rolls back the same installation with a version-only fixture build.
+It checks identity, configuration, credentials, CA and retained database contents.
+These fixtures do not call a model or establish provider-account compatibility.
+
 Run `agent-instance setup --home PATH --name NAME` from the extracted bundle,
 or let an authorized local fleet recipe invoke it. The default engine is the
 checksummed release in [`native-runtime-lock.json`](../scripts/native-runtime-lock.json).
-Only that lock defines available engine platforms. A missing target is an
+The consumer archive carries that exact published engine and its original notices,
+so default-engine setup needs no further download. Only that lock defines available
+engine platforms. A missing target is an
 explicit setup error; `--skip-runtime` can create a host whose engine remains
 unconfigured. It does not make that host a working agent. Account sign-in and
 provider credentials remain separate from installation.

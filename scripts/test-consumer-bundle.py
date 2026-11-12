@@ -163,6 +163,51 @@ class BundleTests(unittest.TestCase):
             target = consumer.stage(home, bundle, manifest)
             self.assertFalse((target / 'unexpected.py').exists())
 
+    def native_fixture(self, root, manifest):
+        name = 'agent-runtime.exe' if os.name == 'nt' else 'agent-runtime'
+        folder = root / 'engine/native'; folder.mkdir(parents=True)
+        (folder / name).write_bytes(b'verified fixture engine')
+        (folder / 'release.zip').write_bytes(b'verified complete published archive with notices')
+        runtime = {'platform': 'fixture-platform', 'version': '0.15.4', 'binary': 'engine/native/' + name,
+                   'archive': 'engine/native/release.zip', 'binary_sha256': consumer.sha(folder / name),
+                   'archive_sha256': consumer.sha(folder / 'release.zip')}
+        manifest['native_runtime'] = runtime
+        for field, digest in [('binary', 'binary_sha256'), ('archive', 'archive_sha256')]:
+            manifest['files'][runtime[field]] = runtime[digest]
+        (root / 'setup/native-runtime-lock.json').write_text(json.dumps({'version': '0.15.4', 'assets': [{
+            'platform': 'fixture-platform', 'asset': 'release.zip', 'binary_sha256': runtime['binary_sha256'],
+            'asset_sha256': runtime['archive_sha256']}]}))
+        return runtime
+
+    def test_native_engine_and_original_release_archive_are_private_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); bundle = root / 'bundle'; bundle.mkdir()
+            manifest = self.fixture(bundle); runtime = self.native_fixture(bundle, manifest)
+            home = root / 'home'; home.mkdir(); (home / 'config.json').write_bytes(b'existing selected engine')
+            target = consumer.stage_native(home, bundle, manifest)
+            self.assertEqual(consumer.sha(target), runtime['binary_sha256'])
+            self.assertEqual(consumer.sha(target.parent / 'release.zip'), runtime['archive_sha256'])
+            self.assertEqual(consumer.stage_native(home, bundle, manifest), target)
+            self.assertEqual((home / 'config.json').read_bytes(), b'existing selected engine')
+
+    def test_native_digest_path_escape_and_changed_existing_copy_are_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); bundle = root / 'bundle'; bundle.mkdir()
+            manifest = self.fixture(bundle); runtime = self.native_fixture(bundle, manifest)
+            home = root / 'home'; home.mkdir()
+            target = consumer.stage_native(home, bundle, manifest)
+            target.write_bytes(b'changed owner bytes')
+            with self.assertRaisesRegex(ValueError, 'preserved'):
+                consumer.stage_native(home, bundle, manifest)
+            self.assertEqual(target.read_bytes(), b'changed owner bytes')
+            runtime['binary_sha256'] = '../escape'
+            lock = json.loads((bundle / 'setup/native-runtime-lock.json').read_text())
+            lock['assets'][0]['binary_sha256'] = '../escape'
+            (bundle / 'setup/native-runtime-lock.json').write_text(json.dumps(lock))
+            with self.assertRaisesRegex(ValueError, 'digest'):
+                consumer.stage_native(home, bundle, manifest)
+            self.assertFalse((home / 'escape').exists())
+
     @unittest.skipIf(os.name == 'nt', 'Creating links requires Windows test-user privileges')
     def test_private_directory_links_refused(self):
         with tempfile.TemporaryDirectory() as temp:

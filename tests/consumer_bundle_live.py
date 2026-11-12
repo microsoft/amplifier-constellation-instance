@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Actual consumer setup/restart in a disposable home with no developer PATH.
 
-No startup registration, engine/model calls, production profiles or credentials.
+No startup registration, model calls, production profiles or credentials.
+The bundled default engine is initialized without copying an account.
 The runner's Python drives the test; only the package interpreter runs setup.
 """
 import argparse
@@ -35,6 +36,7 @@ def main():
                 if os.name != 'nt':
                     target.chmod((entry.external_attr >> 16) & 0o777)
         executable = bundle / ('agent-instance.exe' if os.name == 'nt' else 'agent-instance')
+        manifest = json.loads((bundle / 'consumer-bundle.json').read_text())
         home = root / 'installed agent with spaces'
         env = os.environ.copy()
         env.pop('PYTHONPATH', None); env.pop('PYTHONHOME', None)
@@ -59,11 +61,11 @@ def main():
             if result.returncode:
                 raise RuntimeError('Consumer command failed: ' + result.stderr[-3000:])
             return result
+        engine_args = [] if manifest.get('native_runtime') else ['--skip-runtime']
         installed = json.loads(command('setup', '--home', home, '--name', 'Disposable consumer',
-                                       '--bind', '127.0.0.1', '--no-service', '--no-browser', '--skip-runtime').stdout)
+                                       '--bind', '127.0.0.1', '--no-service', '--no-browser', *engine_args).stdout)
         assert installed['running_verified'] is False
         checks.append('actual native setup with developer tools absent and hostile Python environment')
-        manifest = json.loads((bundle / 'consumer-bundle.json').read_text())
         private = home / 'support' / manifest['python_directory'] / manifest['python_executable']
         assert private.is_file()
         output = subprocess.check_output([str(private), '-I', '-c',
@@ -71,6 +73,11 @@ def main():
             env=env, text=True)
         assert json.loads(output)['python'] == [3, 13, 18]
         checks.append('private interpreter loads actual SQLite and TLS without external Python')
+        if manifest.get('native_runtime'):
+            receipt = json.loads((home / 'engine/installation.json').read_text())
+            assert receipt['sha256'] == manifest['native_runtime']['binary_sha256']
+            assert receipt['credentials_copied'] is False
+            checks.append('published default native engine installed from verified bundle without setup download')
         executable = home / 'bin' / executable.name
         before = {name: hashlib.sha256((home / name).read_bytes()).hexdigest()
                   for name in ('config.json', 'secrets/control-token', 'tls/root-ca.crt')}
@@ -117,7 +124,8 @@ def main():
         assert private.is_file()
         checks.append('installed service and private interpreter remain independent of download folder')
     print(json.dumps({'passed': len(checks), 'checks': checks,
-                      'limits': ['no OS startup registration', 'no configured engine/model or production state']}, indent=2))
+                      'limits': ['no OS startup registration', 'no model calls or production state',
+                                 'engine omitted only when the published lock has no matching target']}, indent=2))
 
 
 if __name__ == '__main__':

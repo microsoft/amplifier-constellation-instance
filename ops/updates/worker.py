@@ -248,7 +248,7 @@ def extract(data,binary_name,limit=LIMIT):
     raise ValueError('unsupported_archive_layout')
 
 def platform_names():
-    osname=platform.system();arch={'arm64':'aarch64','aarch64':'aarch64','AMD64':'x86_64','x86_64':'x86_64'}[platform.machine()]
+    osname=platform.system();arch={'arm64':'aarch64','aarch64':'aarch64','amd64':'x86_64','x86_64':'x86_64'}[platform.machine().lower()]
     return osname,arch,{'Linux':arch+'-unknown-linux-gnu','Darwin':arch+'-apple-darwin','Windows':arch+'-pc-windows-msvc'}[osname]
 
 def candidate(component,channel,folder):

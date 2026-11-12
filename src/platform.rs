@@ -51,31 +51,6 @@ pub fn installation_python(home: &std::path::Path) -> anyhow::Result<std::path::
     Ok(python().into())
 }
 
-#[cfg(test)]
-mod private_python_tests {
-    use super::*;
-
-    #[test]
-    fn private_runtime_is_preferred_and_incomplete_copy_does_not_fall_back() {
-        let home = tempfile::tempdir().unwrap();
-        assert_eq!(
-            installation_python(home.path()).unwrap(),
-            std::path::PathBuf::from(python())
-        );
-        let root = home.path().join("support/python-3.13.18-20261110");
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(installation_python(home.path()).is_err());
-        let executable = root.join(if cfg!(windows) {
-            "python.exe"
-        } else {
-            "bin/python3.13"
-        });
-        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        std::fs::write(&executable, b"fixture only").unwrap();
-        assert_eq!(installation_python(home.path()).unwrap(), executable);
-    }
-}
-
 pub fn executable(name: &str) -> String {
     if cfg!(windows) {
         format!("{name}.exe")
@@ -575,5 +550,30 @@ pub mod windows {
                 "fixture-only".into()
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod private_python_tests {
+    use super::*;
+
+    #[test]
+    fn private_runtime_is_preferred_and_incomplete_copy_does_not_fall_back() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            installation_python(home.path()).unwrap(),
+            std::path::PathBuf::from(python())
+        );
+        let root = home.path().join("support/python-3.13.18-20261110");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(installation_python(home.path()).is_err());
+        let executable = root.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "bin/python3.13"
+        });
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"fixture only").unwrap();
+        assert_eq!(installation_python(home.path()).unwrap(), executable);
     }
 }

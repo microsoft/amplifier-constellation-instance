@@ -1,7 +1,8 @@
-"""Verified, private setup support for native-install/1. No engine selection."""
+"""Verified private setup support; existing engine selections remain unchanged."""
 import hashlib
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 import shutil
 import uuid
@@ -93,3 +94,48 @@ def stage(home, root, manifest):
         if temporary.exists():
             shutil.rmtree(temporary)
     return target
+
+
+def stage_native(home, root, manifest):
+    """Keep the exact published native engine/archive private to this home."""
+    runtime = manifest.get('native_runtime')
+    if not isinstance(runtime, dict):
+        raise ValueError('This package has no published native engine for this platform')
+    lock = json.loads(ordinary(root, 'setup/native-runtime-lock.json').read_text())
+    asset = next((a for a in lock['assets'] if a['platform'] == runtime.get('platform')), None)
+    if not asset or runtime.get('version') != lock['version'] or runtime.get('binary_sha256') != asset['binary_sha256'] or runtime.get('archive_sha256') != asset['asset_sha256']:
+        raise ValueError('Bundled native engine differs from its published lock')
+    if any(not isinstance(runtime.get(k), str) or not re.fullmatch(r'[a-f0-9]{64}', runtime[k])
+           for k in ('binary_sha256', 'archive_sha256')):
+        raise ValueError('Invalid native engine digest')
+    name = Path(runtime['binary']).name
+    expected_name = 'agent-runtime.exe' if os.name == 'nt' else 'agent-runtime'
+    if name != expected_name or runtime['binary'] != 'engine/native/' + expected_name or runtime['archive'] != 'engine/native/' + asset['asset']:
+        raise ValueError('Wrong bundled native executable')
+    support = home / 'support'
+    if support.is_symlink():
+        raise ValueError('Installation support must be an ordinary directory')
+    support.mkdir(mode=0o700, exist_ok=True)
+    destination = support / ('native-' + runtime['binary_sha256'])
+    if destination.is_symlink():
+        raise ValueError('Private native engine directory is a link')
+    destination.mkdir(mode=0o700, exist_ok=True)
+    for field, hash_field in (('binary', 'binary_sha256'), ('archive', 'archive_sha256')):
+        source = ordinary(root, runtime[field])
+        if sha(source) != runtime[hash_field] or manifest['files'].get(runtime[field]) != runtime[hash_field]:
+            raise ValueError('Bundled native engine checksum mismatch')
+        target = destination / source.name
+        if target.exists():
+            if target.is_symlink() or sha(target) != runtime[hash_field]:
+                raise ValueError('Private native engine differs; existing files were preserved')
+        else:
+            temporary = target.with_name('.native-' + uuid.uuid4().hex)
+            try:
+                shutil.copyfile(source, temporary)
+                temporary.chmod(0o700 if field == 'binary' else 0o600)
+                if sha(temporary) != runtime[hash_field]:
+                    raise ValueError('Native engine changed while copying')
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+    return destination / expected_name

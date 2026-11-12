@@ -4,6 +4,10 @@ ROOT=pathlib.Path(__file__).resolve().parent
 spec=importlib.util.spec_from_file_location('worker',ROOT/'worker.py');w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
 
 class UpdateTests(unittest.TestCase):
+ def test_native_windows_arm64_architecture_is_case_insensitive(self):
+  for reported,expected in [('ARM64','aarch64'),('arm64','aarch64'),('AMD64','x86_64')]:
+   with self.subTest(reported=reported),patch.object(w.platform,'system',return_value='Windows'),patch.object(w.platform,'machine',return_value=reported):
+    self.assertEqual(w.platform_names(),('Windows',expected,expected+'-pc-windows-msvc'))
  def setUp(self):
   self.t=tempfile.TemporaryDirectory();self.addCleanup(self.t.cleanup);self.root=pathlib.Path(self.t.name);self.home=self.root/'agent';self.home.mkdir();self.binary=self.home/'agent-instance';self.binary.write_bytes(b'old-binary');self.state=self.root/'host';self.state.mkdir()
   self.registration={'schema':1,'instance_id':'fixture','home':str(self.home),'state':str(self.state),'components':[{'id':'instance','kind':'instance','binary':str(self.binary)}],'services':[]}

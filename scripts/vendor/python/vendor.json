@@ -1,6 +1,6 @@
 {
   "repository": "microsoft/amplifier-constellation",
-  "commit": "27a61100b19ee9571d73489cde89b84b29a8de34",
+  "commit": "779fe5bdcc30aa0e65da288c77119729380851fb",
   "path": "packaging/python",
   "files": {
     ".gitattributes": "445d740fa259215f5fb392110d3b3cfcad758678eb8a1a0579f5dee68e2f0cf1",
