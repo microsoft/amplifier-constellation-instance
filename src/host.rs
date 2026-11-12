@@ -24,7 +24,7 @@ pub fn current_user() -> Result<String> {
     crate::platform::windows::current_user()
 }
 pub fn local_addresses() -> Vec<IpAddr> {
-    let mut addresses: Vec<_> = get_if_addrs::get_if_addrs()
+    let mut addresses: Vec<_> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
         .map(|i| i.ip())

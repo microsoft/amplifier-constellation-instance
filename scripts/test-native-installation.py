@@ -19,6 +19,35 @@ spec.loader.exec_module(native)
 
 
 class NativeInstallTests(unittest.TestCase):
+    def test_missing_published_engine_platform_refuses_before_creating_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / 'bundle'; (bundle / 'setup').mkdir(parents=True)
+            (bundle / 'setup/native-runtime-lock.json').write_text('{"assets":[]}')
+            home = root / 'never-created'
+            args = argparse.Namespace(home=home, bundle=bundle, skip_runtime=False,
+                                      engine='native', runtime_binary=None)
+            with mock.patch.object(native, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'no installation was created'):
+                    native.install(args)
+                run.assert_not_called()
+            self.assertFalse(home.exists())
+
+    def test_linux_user_startup_quotes_paths_without_expanding_dollar_or_percent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            owner = Path(temporary)
+            home = owner / 'agent $literal %test'
+            with mock.patch.object(native.sys, 'platform', 'linux'), mock.patch.object(native.Path, 'home', return_value=owner), mock.patch.object(native, 'run') as run:
+                service = native.make_service(home, {'instance_id': '96b452bc-47f1-4b6a-8bb9-697fc6ff27ae'})
+                text = (owner / '.config/systemd/user' / service['name']).read_text()
+                working = next(line for line in text.splitlines() if line.startswith('WorkingDirectory='))
+                command = next(line for line in text.splitlines() if line.startswith('ExecStart='))
+                self.assertIn('$literal %%test', working)
+                self.assertNotIn('$$literal', working)
+                self.assertIn('$$literal %%test', command)
+                self.assertEqual(service['kind'], 'systemd-user')
+                self.assertEqual([call.args[0][2] for call in run.call_args_list], ['daemon-reload', 'enable'])
+
     def instance(self, root):
         home = root / "agent space $literal"
         home.mkdir()

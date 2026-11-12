@@ -28,9 +28,9 @@ pub async fn install_codex(home: &Path, reuse_owner_account: bool) -> Result<Bac
         home.join("config.json").is_file(),
         "Initialize the instance first"
     );
-    let mut command = Command::new(crate::platform::python());
+    let mut command = Command::new(crate::platform::installation_python(home)?);
     command
-        .args(["-c", INSTALLER, "--home"])
+        .args(["-I", "-B", "-c", INSTALLER, "--home"])
         .arg(home)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -66,9 +66,11 @@ pub async fn install_native(home: &Path, binary: Option<&Path>) -> Result<Backen
         home.join("config.json").is_file(),
         "Initialize the instance first"
     );
-    let mut command = Command::new(crate::platform::python());
+    let mut command = Command::new(crate::platform::installation_python(home)?);
     command
         .args([
+            "-I",
+            "-B",
             "-c",
             include_str!("../scripts/provision-native.py"),
             "--home",

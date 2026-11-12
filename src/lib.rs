@@ -4,6 +4,7 @@ pub mod attention;
 pub mod attention_policy;
 pub mod auth;
 pub mod config;
+pub mod consumer;
 pub mod context;
 pub mod discovery;
 pub mod error;

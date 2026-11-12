@@ -22,6 +22,60 @@ pub fn python() -> &'static str {
     if cfg!(windows) { "python" } else { "python3" }
 }
 
+/// Consumer installations carry their interpreter. A damaged private copy is
+/// an installation error, never permission to silently use another Python.
+pub fn installation_python(home: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let lock: serde_json::Value =
+        serde_json::from_str(include_str!("../scripts/vendor/python/lock.json"))?;
+    let root = home
+        .join("support")
+        .join(lock["directory"].as_str().unwrap());
+    anyhow::ensure!(
+        !root.is_symlink(),
+        "The installation's private Python directory must not be a link"
+    );
+    if root.exists() {
+        let executable = root.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "bin/python3.13"
+        });
+        anyhow::ensure!(
+            executable.is_file(),
+            "The installation's private Python is incomplete; repair its consumer bundle"
+        );
+        return Ok(executable);
+    }
+    // Bare developer executables and established installations retain their
+    // existing setup. Consumer setup always stages the private copy first.
+    Ok(python().into())
+}
+
+#[cfg(test)]
+mod private_python_tests {
+    use super::*;
+
+    #[test]
+    fn private_runtime_is_preferred_and_incomplete_copy_does_not_fall_back() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            installation_python(home.path()).unwrap(),
+            std::path::PathBuf::from(python())
+        );
+        let root = home.path().join("support/python-3.13.18-20261110");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(installation_python(home.path()).is_err());
+        let executable = root.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "bin/python3.13"
+        });
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"fixture only").unwrap();
+        assert_eq!(installation_python(home.path()).unwrap(), executable);
+    }
+}
+
 pub fn executable(name: &str) -> String {
     if cfg!(windows) {
         format!("{name}.exe")

@@ -8,6 +8,7 @@ import argparse
 import base64
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -110,6 +111,24 @@ def powershell(code, *args):
 def make_service(home, config):
     identifier = str(uuid.UUID(config["instance_id"]))
     executable = home / "bin" / binary_name()
+    if sys.platform == "linux":
+        name = "agent-instance-" + identifier + ".service"
+        destination = Path.home() / ".config/systemd/user" / name
+        if destination.exists():
+            raise ValueError("A startup job already exists for this identity; it was preserved")
+        def quote(value, command=False):
+            value = str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
+            return '"' + (value.replace('$', '$$') if command else value) + '"'
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open('x') as output:
+            output.write('[Unit]\nDescription=One Constellation agent\nAfter=network-online.target\n'
+                         '[Service]\nExecStart=' + ' '.join(quote(x, command=True) for x in [executable, 'serve', '--home', home]) +
+                         '\nWorkingDirectory=' + quote(home) + '\nRestart=on-failure\nRestartSec=5\nUMask=0077\n'
+                         '[Install]\nWantedBy=default.target\n')
+        destination.chmod(0o600)
+        run(['systemctl', '--user', 'daemon-reload'], timeout=30)
+        run(['systemctl', '--user', 'enable', name], timeout=30)
+        return {'kind': 'systemd-user', 'name': name}
     if sys.platform == "darwin":
         label = "io.agent-instance." + identifier
         destination = Path.home() / "Library/LaunchAgents" / (label + ".plist")
@@ -142,7 +161,9 @@ def make_service(home, config):
 
 
 def service_command(service, action):
-    if service["kind"] == "launchd":
+    if service["kind"] == "systemd-user":
+        run(['systemctl', '--user', action, service['name']], timeout=30)
+    elif service["kind"] == "launchd":
         if action == "start":
             run(["launchctl", "bootstrap", service["domain"], service["file"]], timeout=30)
         elif action == "stop":
@@ -232,11 +253,19 @@ def install(args):
     validate_home(home)
     if home.exists() and any(home.iterdir()):
         raise ValueError("Choose a new or empty instance folder; use update for an existing installation")
+    if getattr(args, 'bundle', None) is not None and not args.skip_runtime and args.engine == 'native' and not args.runtime_binary:
+        lock = json.loads((args.bundle / 'setup/native-runtime-lock.json').read_text())
+        family = {'Linux': 'linux', 'Darwin': 'macos', 'Windows': 'windows'}.get(platform.system())
+        architecture = {'aarch64': 'aarch64', 'arm64': 'aarch64', 'x86_64': 'x86_64', 'amd64': 'x86_64'}.get(platform.machine().lower())
+        key = str(family) + '-' + str(architecture)
+        if not any(a['platform'] == key for a in lock['assets']):
+            raise ValueError('No published native engine is pinned for this platform; no installation was created. Configure a supported engine explicitly or use --skip-runtime for an unconfigured host.')
     info = release_info(args.binary)
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     # init establishes the native private directory policy before credentials exist.
     run([args.binary, "init", "--home", home, "--name", args.name, "--bind", args.bind, "--port", args.port], timeout=30)
     with install_lock(home):
+        stage_support(args)
         config = json.loads((home / "config.json").read_text())["config"]
         info = stage(home, args.binary)
         activate(home, info)
@@ -270,6 +299,7 @@ def switch(args):
         config = json.loads((home / "config.json").read_text())["config"]
         if metadata.get("manager") != "native-install/1" or metadata.get("instance_id") != config["instance_id"]:
             raise ValueError("This installation is not managed by the native installer or its identity differs")
+        stage_support(args)
         old = metadata["current"]
         if args.command == "update":
             candidate = stage(home, args.binary)
@@ -320,6 +350,17 @@ def switch(args):
         return result(home, metadata, healthy)
 
 
+def stage_support(args):
+    bundle = getattr(args, 'bundle', None)
+    if bundle is None:
+        return
+    spec = importlib.util.spec_from_file_location('consumer_bundle', Path(__file__).with_name('consumer-bundle.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    manifest = module.validate(bundle, args.binary)
+    module.stage(args.home, bundle, manifest)
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -335,6 +376,7 @@ def main():
     parser.add_argument("--skip-runtime", action="store_true")
     parser.add_argument("--engine", choices=["native", "codex"], default="native")
     parser.add_argument("--runtime-binary", type=Path)
+    parser.add_argument("--bundle", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     # Reject symbolic home before canonicalization discards that information.
     validate_home(args.home)
