@@ -7,7 +7,7 @@ class EnrollmentTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=pathlib.Path(tmp);home=root/'home';state=root/'owner';(home/'bin').mkdir(parents=True);state.mkdir();binary=home/'bin/agent-instance';binary.write_text('fixture');helper=home/'helper';helper.write_text('fixture')
    identity=str(uuid.uuid4());(home/'config.json').write_text(json.dumps({'config':{'instance_id':identity,'backend':None}}))
-   participant={'id':'game','protocol':1,'components':['instance','task-helpers'],'commands':{a:['/owner/helper',a] for a in ('prepare','verify','restore')}}
+   participant={'id':'game','protocol':1,'components':['instance','task-helpers'],'commands':{a:[str(helper),a] for a in ('prepare','verify','restore')}}
    old={'schema':1,'instance_id':identity,'home':str(home),'state':str(state),'components':[{'id':'instance','kind':'instance','binary':str(binary)},{'id':'task-helpers','kind':'runtime','binary':str(helper),'restart_scope':{'instance':False,'services':[],'slack_homes':[]}}],'services':[],'participants':[participant]}
    old['service_connections']={'schema':1,'services':[],'connections':[]}
    (state/'registration.json').write_text(json.dumps(old))

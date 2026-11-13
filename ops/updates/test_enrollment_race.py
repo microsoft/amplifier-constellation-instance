@@ -127,6 +127,8 @@ class EnrollmentRaceTests(unittest.TestCase):
             return ""
         with contextlib.ExitStack() as mocks:
             mocks.enter_context(patch.object(m.platform, "system", return_value=system))
+            if system == "Darwin":
+                mocks.enter_context(patch.object(m.os, "getuid", return_value=12345, create=True))
             mocks.enter_context(patch.object(m.Path, "home", return_value=self.root))
             mocks.enter_context(patch.object(m, "run", side_effect=command))
             mocks.enter_context(patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)))
