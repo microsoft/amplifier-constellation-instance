@@ -1,9 +1,11 @@
-# Agent Instance
+# Constellation Instance
 
-Instance gives an independently installed agent a persistent identity,
-configuration, authorized context and installation controls. A person can connect
-that individual to several experiences while its selected ACP engine handles
-reasoning and tool execution.
+A ready-to-use hosting implementation of the
+[Agent Instance boundary](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md).
+It keeps an installed agent's identity, configuration, authorized context and
+controls available across experiences. This implementation hosts a selected ACP
+engine for reasoning and tool execution; other agents can use different internal
+architectures while keeping the same outward promises.
 
 The [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md)
 explains the larger ambition. The [shared agreements](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)

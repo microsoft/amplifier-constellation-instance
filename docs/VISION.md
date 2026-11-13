@@ -1,38 +1,39 @@
-# A home for a continuing agent
+# Keep an agent available across places
 
-Instance gives an agent a lasting place in a person's work. Its identity,
-configuration, connections and responsibilities remain available as people
-return to it through different experiences. The person should not need to set
-up a new agent or narrate its commitments again for every conversation.
+Constellation Instance gives people a continuing agent they can reconnect with,
+inspect and direct without setting up a new collaborator for every conversation.
+Its installed identity, configuration, connections and accepted responsibilities
+remain available across the places where people work.
 
-The [Constellation vision](https://github.com/microsoft/amplifier-constellation/blob/main/docs/VISION.md)
-describes the larger team. Instance contributes the individual agent's home;
-its selected engine supplies reasoning and execution, while connected services
-supply their own conversations, context and actions.
+This repository supplies one implementation of the umbrella's
+[Agent Instance](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md)
+boundary: an independent host with a selected ACP engine. That is this service's
+design, not a requirement on every agent. Other implementations can use an inner
+team or a different architecture behind the same outward boundary.
 
 ## Make continuity useful
 
-Someone should be able to connect an individual, understand what it has agreed
-to do, inspect relevant evidence and redirect supported work. The home should
-make those capabilities accessible to experiences without turning every product
-into another installation manager. Useful memory and ongoing responsibilities
-should deepen that continuity while preserving their sources and meaning.
+A person returns to an agent through another experience. Instance exposes the
+same identity, configured connections and permitted responsibilities; its engine
+continues through supported execution sessions. The experience presents that
+work, while conversation sources retain their exchanges and audiences. Tools
+and connections provide their own capabilities through declared interfaces.
 
-For example, a person returns to an agent from a different experience. Instance
-makes its identity, connections and permitted responsibilities available; the
-experience presents them appropriately, and the engine continues through its
-supported session interface.
+People should be able to understand what the agent has accepted, inspect relevant
+evidence and redirect supported work. Useful memory and responsibility records
+support that continuity without becoming substitutes for source records or action
+authority. An experience need not become an installation manager to collaborate
+with the agent.
 
-## Keep the host focused
+## Keep this host focused
 
-Instance's value is dependable hosting, not a second reasoning loop or universal
-conversation store. Clear interfaces let people improve engines, domain connections
-and experiences independently. The bundled administration screens are one client
-of those interfaces, not the intended design of every future experience.
+Instance supplies hosting, routing and exposed controls; its selected engine owns
+reasoning and execution. Improving one should not require rebuilding the other.
+The bundled administration client uses those controls without prescribing the UX
+of future experiences. A fleet service remains optional.
 
-Judge improvement by the total effort to connect, understand, operate and recover
-an agent, including administrator effort. Check a real host–engine–connection
-journey, not just an attractive status display. Follow the umbrella's
-[shared promises](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
-and Instance's [hosting agreement](../contracts/hosting.md) when developing that
-journey.
+Judge improvement by the effort to connect, understand, operate and recover the
+same agent, including administrator effort. Exercise a complete client–host–engine–
+connection journey. The [hosting agreement](../contracts/hosting.md) defines this
+implementation's promises; the [umbrella](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md)
+owns shared composition, interaction, authority and continuity.
