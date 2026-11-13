@@ -33,6 +33,7 @@ jobs:
           python3 ops/updates/test_participants.py
           python3 ops/updates/test_engine_provider.py
           python3 ops/updates/test_install_updates.py
+          python3 ops/updates/test_enrollment_race.py
       - name: Check installation contracts
         run: python3 scripts/test-installation.py
       - name: Check release retries preserve published assets
@@ -137,6 +138,8 @@ jobs:
         run: |
           python ops/updates/test_worker.py
           python ops/updates/test_github_metadata.py
+          python ops/updates/test_install_updates.py
+          python ops/updates/test_enrollment_race.py
           python scripts/test-native-installation.py
           python scripts/test-provisioning.py
           python scripts/test-consumer-bundle.py
