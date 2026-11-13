@@ -39,6 +39,42 @@ def retained_helper(status):
             if key not in ('observed_at', 'drain_until')}
 
 
+class ReenrollmentUnknown(RuntimeError):
+    pass
+
+
+def observe_reenrollment(argv, env, root, ownership, timeout=90):
+    """One dispatch; inherited output handles cannot keep a pipe reader alive."""
+    output, errors = root / 'reenrollment.stdout', root / 'reenrollment.stderr'
+    with output.open('xb') as out, errors.open('xb') as err:
+        child = None
+        try:
+            ownership['unsettled'] = True
+            try:
+                child = subprocess.Popen(list(map(str, argv)), env=env, stdin=subprocess.DEVNULL,
+                                         stdout=out, stderr=err)
+            except OSError:
+                ownership['unsettled'] = False
+                raise
+            code = child.wait(timeout=timeout)
+            ownership['unsettled'] = False
+        except BaseException as error:
+            if not ownership['unsettled']:
+                raise
+            # No exit was observed: the native CLI may still own its installer
+            # child or an unsettled manager call. Never kill/retry or clean its
+            # unique home/jobs underneath that work.
+            receipt = {'outcome': 'unknown', 'reason': type(error).__name__,
+                       'pid': child.pid if child else None, 'fixture': str(root), 'dispatches': 1,
+                       'cleanup_skipped': True, 'stdout': str(output), 'stderr': str(errors)}
+            (root / 'reenrollment-unknown.json').write_text(json.dumps(receipt, indent=2))
+            print(json.dumps(receipt), flush=True)
+            raise ReenrollmentUnknown('Reenrollment exit unobserved; fixture and jobs retained') from error
+    if code:
+        raise RuntimeError('Disposable reenrollment failed: ' + errors.read_text(errors='replace')[-2500:])
+    return json.loads(output.read_text())
+
+
 def remove_stopped_fixture(path, timeout=10):
     """SchTasks End is asynchronous; wait only for this verified fixture's files."""
     deadline = time.monotonic() + timeout
@@ -60,7 +96,9 @@ def main():
     if os.name != 'nt' and sys.platform != 'darwin':
         raise ValueError('This fixture qualifies actual Windows/macOS per-user startup')
     checks = []
-    with tempfile.TemporaryDirectory(prefix='instance-native-startup-') as temporary:
+    temporary = tempfile.mkdtemp(prefix='instance-native-startup-')
+    preserve = False
+    try:
         root = Path(temporary); bundle = root / 'candidate'; bundle.mkdir()
         with zipfile.ZipFile(a.bundle) as archive:
             for member in archive.infolist():
@@ -174,7 +212,11 @@ except w.LockBusy:print(json.dumps({'owned':True}))
                 assert run(interpreter, '-I', '-c', code, state / 'worker.py', state, timeout=15)['owned'] is True
             helper_owned()
             started = time.monotonic()
-            enrolled = run(native, 'install-updates', '--home', home, timeout=90)
+            ownership = {'unsettled': False}
+            try:
+                enrolled = observe_reenrollment([native, 'install-updates', '--home', home], env, root, ownership)
+            finally:
+                preserve = ownership['unsettled']
             assert enrolled['installed'] and enrolled['service'] == 'constellation-updates-' + identifier
             helper_after = await_settled(int(time.time() * 1000))
             helper_owned()
@@ -203,7 +245,7 @@ except w.LockBusy:print(json.dumps({'owned':True}))
             # Even a partially failed install has an owner-generated UUID in config.
             if identifier is None and (home / 'config.json').exists():
                 identifier = str(uuid.UUID(json.loads((home / 'config.json').read_text(encoding='utf-8'))['config']['instance_id']))
-            if identifier:
+            if identifier and not preserve:
                 if os.name == 'nt':
                     tool = str(Path(os.environ['SystemRoot']) / 'System32/schtasks.exe')
                     for job in ('AgentInstance-' + identifier, 'constellation-updates-' + identifier):
@@ -221,6 +263,9 @@ except w.LockBusy:print(json.dumps({'owned':True}))
                         raise ValueError('Disposable helper identity differs; files preserved')
                     remove_stopped_fixture(state)
                 time.sleep(1)
+    finally:
+        if not preserve:
+            remove_stopped_fixture(temporary)
     print(json.dumps({'passed': len(checks), 'checks': checks,
                       'reenrollment': reenrollment,
                       'baseline': 'identical source with version-only fixture label',
