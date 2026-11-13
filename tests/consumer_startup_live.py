@@ -21,6 +21,60 @@ import uuid
 import zipfile
 
 
+def settled_helper(status, policy, observed_after, binary_digest):
+    """An API observation only; the installer independently owns admission."""
+    helper = status.get('helper', {})
+    return (status.get('policy') == policy and status.get('helper_connected') is True
+            and not status.get('active_prompts') and not status.get('draining')
+            and not (status.get('request') or {}).get('pending')
+            and helper.get('observed_at', 0) > observed_after
+            and helper.get('helper_instance_sha256') == binary_digest
+            and helper.get('state') in ('idle', 'available', 'up_to_date', 'check_failed', 'succeeded', 'rolled_back')
+            and not helper.get('transaction') and not helper.get('active_request')
+            and not helper.get('enrollment'))
+
+
+def retained_helper(status):
+    return {key: value for key, value in status['helper'].items()
+            if key not in ('observed_at', 'drain_until')}
+
+
+class ReenrollmentUnknown(RuntimeError):
+    pass
+
+
+def observe_reenrollment(argv, env, root, ownership, timeout=90):
+    """One dispatch; inherited output handles cannot keep a pipe reader alive."""
+    output, errors = root / 'reenrollment.stdout', root / 'reenrollment.stderr'
+    with output.open('xb') as out, errors.open('xb') as err:
+        child = None
+        try:
+            ownership['unsettled'] = True
+            try:
+                child = subprocess.Popen(list(map(str, argv)), env=env, stdin=subprocess.DEVNULL,
+                                         stdout=out, stderr=err)
+            except OSError:
+                ownership['unsettled'] = False
+                raise
+            code = child.wait(timeout=timeout)
+            ownership['unsettled'] = False
+        except BaseException as error:
+            if not ownership['unsettled']:
+                raise
+            # No exit was observed: the native CLI may still own its installer
+            # child or an unsettled manager call. Never kill/retry or clean its
+            # unique home/jobs underneath that work.
+            receipt = {'outcome': 'unknown', 'reason': type(error).__name__,
+                       'pid': child.pid if child else None, 'fixture': str(root), 'dispatches': 1,
+                       'cleanup_skipped': True, 'stdout': str(output), 'stderr': str(errors)}
+            (root / 'reenrollment-unknown.json').write_text(json.dumps(receipt, indent=2))
+            print(json.dumps(receipt), flush=True)
+            raise ReenrollmentUnknown('Reenrollment exit unobserved; fixture and jobs retained') from error
+    if code:
+        raise RuntimeError('Disposable reenrollment failed: ' + errors.read_text(errors='replace')[-2500:])
+    return json.loads(output.read_text())
+
+
 def remove_stopped_fixture(path, timeout=10):
     """SchTasks End is asynchronous; wait only for this verified fixture's files."""
     deadline = time.monotonic() + timeout
@@ -42,7 +96,9 @@ def main():
     if os.name != 'nt' and sys.platform != 'darwin':
         raise ValueError('This fixture qualifies actual Windows/macOS per-user startup')
     checks = []
-    with tempfile.TemporaryDirectory(prefix='instance-native-startup-') as temporary:
+    temporary = tempfile.mkdtemp(prefix='instance-native-startup-')
+    preserve = False
+    try:
         root = Path(temporary); bundle = root / 'candidate'; bundle.mkdir()
         with zipfile.ZipFile(a.bundle) as archive:
             for member in archive.infolist():
@@ -74,11 +130,12 @@ def main():
         env['PYTHONHOME'] = str(root / 'not-python'); env['PYTHONPATH'] = str(root / 'not-python')
         assert all(shutil.which(tool, path=env['PATH']) is None for tool in ('python', 'python3', 'node', 'cargo', 'git'))
         identifier = None
-        def run(executable, *words):
-            result = subprocess.run([str(executable), *map(str, words)], env=env, capture_output=True, text=True, timeout=240)
+        def run(executable, *words, timeout=240):
+            result = subprocess.run([str(executable), *map(str, words)], env=env, capture_output=True, text=True, timeout=timeout)
             if result.returncode:
                 raise RuntimeError('Disposable native command failed: ' + result.stderr[-2500:])
             return json.loads(result.stdout)
+        reenrollment = None
         try:
             engine_args = [] if manifest.get('native_runtime') else ['--skip-runtime']
             installed = run(baseline / name, 'setup', '--home', home, '--name', 'Startup café 日本',
@@ -110,6 +167,26 @@ def main():
                 assert verified.returncode == 0, verified.stderr
                 checks.append('both actual Windows tasks use the limited owner and owner-only logon trigger')
             native = home / 'bin' / name
+            # The initial setup may already have admitted its default hourly
+            # metadata check. Disable future checks through the supported API;
+            # observe the existing check to settlement rather than interrupt it.
+            update_status = run(native, 'updates', 'status', '--home', home)
+            policy = dict(update_status['policy'], check_minutes=0, install='on_request', agent_initiated=False)
+            policy_file = root / 'idle-update-policy.json'; policy_file.write_text(json.dumps(policy))
+            policy = run(native, 'updates', 'configure', '--home', home, '--file', policy_file)
+            assert policy['check_minutes'] == 0 and policy['install'] == 'on_request' and not policy['agent_initiated']
+            binary_digest = hashlib.sha256(native.read_bytes()).hexdigest()
+            def await_settled(observed_after):
+                deadline = time.monotonic() + 60
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError('Disposable helper did not reach a fresh settled observation; no reenrollment retry')
+                    value = run(native, 'updates', 'status', '--home', home, timeout=min(10, remaining))
+                    if settled_helper(value, policy, observed_after, binary_digest):
+                        return value
+                    time.sleep(min(.25, max(0, deadline - time.monotonic())))
+            helper_before = await_settled(update_status.get('helper', {}).get('observed_at', 0))
             before = run(native, 'status', '--home', home, '--json')
             files = {str(path.relative_to(home)): hashlib.sha256(path.read_bytes()).hexdigest()
                      for path in [home / 'config.json', home / 'secrets/control-token', home / 'tls/root-ca.crt']}
@@ -117,6 +194,40 @@ def main():
                 db.execute('CREATE TABLE native_consumer_continuity(value TEXT)')
                 db.execute('INSERT INTO native_consumer_continuity VALUES (?)', ('retained original work/unknown outcome fixture',))
                 db.commit()
+            state = Path.home() / '.local/share/constellation-updates' / identifier
+            registration_bytes = (state / 'registration.json').read_bytes()
+            registration = json.loads(registration_bytes)
+            assert registration['instance_id'] == identifier and Path(registration['home']).resolve() == home.resolve()
+            private = json.loads((home / 'install.json').read_text())['private_python']
+            interpreter = home / 'support' / private['directory'] / private['executable']
+            def helper_owned():
+                # Real flock/msvcrt contention from the packaged interpreter;
+                # no PID-only inference and no journal read outside ownership.
+                code = """import importlib.util,json,pathlib,sys
+spec=importlib.util.spec_from_file_location('fixture_worker',sys.argv[1]);w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
+try:
+ with w.single_worker(pathlib.Path(sys.argv[2])):raise RuntimeError('Helper lifetime lock was not owned')
+except w.LockBusy:print(json.dumps({'owned':True}))
+"""
+                assert run(interpreter, '-I', '-c', code, state / 'worker.py', state, timeout=15)['owned'] is True
+            helper_owned()
+            started = time.monotonic()
+            ownership = {'unsettled': False}
+            try:
+                enrolled = observe_reenrollment([native, 'install-updates', '--home', home], env, root, ownership)
+            finally:
+                preserve = ownership['unsettled']
+            assert enrolled['installed'] and enrolled['service'] == 'constellation-updates-' + identifier
+            helper_after = await_settled(int(time.time() * 1000))
+            helper_owned()
+            assert (state / 'registration.json').read_bytes() == registration_bytes
+            assert retained_helper(helper_after) == retained_helper(helper_before)
+            assert run(native, 'status', '--home', home, '--json')['instance_id'] == before['instance_id']
+            reenrollment = {'dispatches': 1, 'elapsed_seconds': round(time.monotonic() - started, 3),
+                'service': enrolled['service'], 'registration_sha256': hashlib.sha256(registration_bytes).hexdigest(),
+                'policy': policy, 'helper_lock_owned_before_and_after': True,
+                'retained_helper_state_equal': True, 'initial_setup_check_may_have_run': True}
+            checks.append('running idle helper reenrolls once through installed CLI with retained state, policy and lifetime lock')
             updated = run(bundle / name, 'setup', 'update', '--home', home, '--no-browser')
             assert updated['running_verified'] and updated['previous'] == installed['release']
             assert updated['release']['id'] != installed['release']['id']
@@ -134,7 +245,7 @@ def main():
             # Even a partially failed install has an owner-generated UUID in config.
             if identifier is None and (home / 'config.json').exists():
                 identifier = str(uuid.UUID(json.loads((home / 'config.json').read_text(encoding='utf-8'))['config']['instance_id']))
-            if identifier:
+            if identifier and not preserve:
                 if os.name == 'nt':
                     tool = str(Path(os.environ['SystemRoot']) / 'System32/schtasks.exe')
                     for job in ('AgentInstance-' + identifier, 'constellation-updates-' + identifier):
@@ -152,7 +263,11 @@ def main():
                         raise ValueError('Disposable helper identity differs; files preserved')
                     remove_stopped_fixture(state)
                 time.sleep(1)
+    finally:
+        if not preserve:
+            remove_stopped_fixture(temporary)
     print(json.dumps({'passed': len(checks), 'checks': checks,
+                      'reenrollment': reenrollment,
                       'baseline': 'identical source with version-only fixture label',
                       'limits': ['no model calls', 'no production state', 'native CI account policy only']}, indent=2))
 

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Private-runtime extraction, integrity and installer continuity boundaries."""
 import hashlib
+import contextlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -28,6 +31,69 @@ startup = load('consumer_startup_live', 'tests')
 
 
 class BundleTests(unittest.TestCase):
+    def observe_reenrollment_child(self, case):
+        real_popen = subprocess.Popen
+        with tempfile.TemporaryDirectory(prefix='reenrollment-observer-') as temporary:
+            root = Path(temporary); ownership = {'unsettled': False}
+            children = []; wait_patches = []
+            def spawn(*args, **kwargs):
+                child = real_popen(*args, **kwargs); children.append(child)
+                if case == 'interrupt':
+                    hook = patch.object(child, 'wait', side_effect=KeyboardInterrupt('fixture interrupt'))
+                    hook.start(); wait_patches.append(hook)
+                return child
+            argv = [sys.executable, '-c', 'import time;time.sleep(60)']
+            if case == 'success': argv = [sys.executable, '-c', 'print(\'{"installed":true}\')']
+            if case == 'failure': argv = [sys.executable, '-c', 'raise SystemExit(3)']
+            if case == 'spawn_refused': argv = [str(root / 'does-not-exist')]
+            try:
+                with patch.object(startup.subprocess, 'Popen', side_effect=spawn), contextlib.redirect_stdout(io.StringIO()):
+                    if case in ('timeout', 'interrupt'):
+                        with self.assertRaises(startup.ReenrollmentUnknown):
+                            startup.observe_reenrollment(argv, os.environ.copy(), root, ownership, timeout=.1)
+                        self.assertTrue(ownership['unsettled'])
+                        self.assertEqual(len(children), 1)
+                        self.assertIsNone(children[0].poll(), 'Unknown must not terminate the command')
+                        receipt = json.loads((root / 'reenrollment-unknown.json').read_text())
+                        self.assertEqual(receipt['dispatches'], 1)
+                        self.assertEqual(receipt['pid'], children[0].pid)
+                        self.assertTrue(receipt['cleanup_skipped'])
+                        self.assertTrue((root / 'reenrollment.stdout').exists())
+                        self.assertTrue((root / 'reenrollment.stderr').exists())
+                    elif case == 'spawn_refused':
+                        with self.assertRaises(OSError):
+                            startup.observe_reenrollment(argv, os.environ.copy(), root, ownership)
+                        self.assertFalse(ownership['unsettled']); self.assertEqual(children, [])
+                    elif case == 'failure':
+                        with self.assertRaisesRegex(RuntimeError, 'reenrollment failed'):
+                            startup.observe_reenrollment(argv, os.environ.copy(), root, ownership)
+                        self.assertFalse(ownership['unsettled']); self.assertEqual(children[0].poll(), 3)
+                    else:
+                        self.assertEqual(startup.observe_reenrollment(argv, os.environ.copy(), root, ownership), {'installed': True})
+                        self.assertFalse(ownership['unsettled']); self.assertEqual(children[0].poll(), 0)
+            finally:
+                for hook in wait_patches: hook.stop()
+                # Only these offline test children are terminated, after the
+                # assertions prove the native fixture retained unknown work.
+                for child in children:
+                    if child.poll() is None: child.terminate()
+                    child.wait(timeout=5)
+
+    def test_reenrollment_observer_actual_child_success(self):
+        self.observe_reenrollment_child('success')
+
+    def test_reenrollment_observer_actual_child_failure(self):
+        self.observe_reenrollment_child('failure')
+
+    def test_reenrollment_observer_spawn_refusal(self):
+        self.observe_reenrollment_child('spawn_refused')
+
+    def test_reenrollment_observer_timeout_retains_live_child(self):
+        self.observe_reenrollment_child('timeout')
+
+    def test_reenrollment_observer_interruption_retains_live_child(self):
+        self.observe_reenrollment_child('interrupt')
+
     def test_fixture_cleanup_waits_for_actual_windows_sharing_release_only(self):
         sharing = PermissionError('file still open'); sharing.winerror = 32
         with patch.object(startup.shutil, 'rmtree', side_effect=[sharing, None]) as remove, patch.object(startup.time, 'sleep'):

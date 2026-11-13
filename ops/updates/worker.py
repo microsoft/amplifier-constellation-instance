@@ -4,7 +4,7 @@
 The registration file is private operator input, never supplied by an agent.
 The authenticated instance API supplies only action/plan IDs and policy choices.
 """
-import argparse, contextlib, datetime, email.utils, hashlib, io, ipaddress, json, os, platform, re, shutil
+import argparse, contextlib, datetime, email.utils, errno, hashlib, io, ipaddress, json, os, platform, re, shutil
 import sqlite3, ssl, subprocess, sys, tarfile, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 from pathlib import Path
 
@@ -15,6 +15,26 @@ REPOSITORIES = {'instance': ('amplifier-constellation-instance','agent-instance'
 CRITICAL = {'stopping','swapping','verifying','rolling_back'}
 PARTICIPANT_ACTIONS = ('prepare','verify','restore')
 LIMIT = 256*1024*1024
+
+class LockBusy(BlockingIOError):
+    """The existing owner still holds a local installation lock."""
+
+class EnrollmentYield(RuntimeError):
+    """An idle helper is yielding to its installation's enrollment operation."""
+
+def enrollment_idle(state,root):
+    if state.get('transaction') or state.get('active_request') or state.get('state') in CRITICAL|{'waiting_for_idle','recovery_required'}:
+        return False
+    root=Path(root)
+    if (root/'connection-operation.json').exists():return False
+    outbox=root/'connection-report.json'
+    if outbox.exists():
+        # A terminal report awaiting delivery is retained, not new work. An
+        # unknown/unsettled report is still part of the original operation.
+        value=read(outbox)
+        if any(row.get('settled') is not True for row in value.get('connections',[])):return False
+        if value.get('add_result') and value['add_result'].get('settled') is not True:return False
+    return True
 
 def read(path): return json.loads(Path(path).read_text())
 def write(path,value):
@@ -301,6 +321,7 @@ class Worker:
         self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.file=self.root/'state.json';self.state=read(self.file) if self.file.exists() else {'state':'idle','components':[],'last_check':0}
         self.context=ssl.create_default_context(cafile=str(self.home/'tls/root-ca.crt'))
+        self._reporting_threads=[]
     def api(self,path='updates',body=None):
         config=read(self.home/'config.json')['config'];token=(self.home/'secrets/control-token').read_text().strip()
         return http_json(local_api_base(config)+path,body,{'Authorization':'Bearer '+token},self.context)
@@ -412,9 +433,17 @@ class Worker:
             while not stopped.wait(15):
                 try:self.report(drain=getattr(self,'_drain_active',False))
                 except Exception:pass  # An intentional Instance restart is expected.
-        thread=threading.Thread(target=heartbeat,daemon=True);thread.start()
+        thread=threading.Thread(target=heartbeat,daemon=True)
+        self._reporting_threads=[t for t in getattr(self,'_reporting_threads',[]) if t.is_alive()]+[thread]
+        thread.start()
         try:yield
         finally:stopped.set();thread.join(timeout=16)
+
+    def enrollment_ready(self):
+        # A timed heartbeat join can leave an already-dispatched report in
+        # flight. Keep this helper's lifetime ownership until it settles; the
+        # installer remains bounded and may refuse instead of restarting it.
+        return enrollment_idle(self.state,self.root) and not any(t.is_alive() for t in getattr(self,'_reporting_threads',[]))
     def plan(self,policy):
         if self.state.get('github_retry_at_ms',0)>int(time.time()*1000):
             raise GitHubRateLimited(self.state['github_retry_at_ms'])
@@ -775,6 +804,11 @@ class Worker:
         return bool(pending or journal.exists())
 
     def tick(self):
+        if self.state.get('enrollment'):
+            # A crashed installer may have published only part of its helper
+            # set. Report retained state, but admit nothing until the same
+            # explicit enrollment finishes its journaled publication.
+            self.report();return
         if self.state.get('transaction'):
             try:
                 self.recover_transaction()
@@ -844,30 +878,72 @@ class Worker:
     def serve(self):
         while True:
             try:
-                self.tick()
-                if not self.state.get('transaction') and not (self.root/'connection-operation.json').exists() and self.state["state"] not in CRITICAL|{"recovery_required"}:self.refresh_helper()
-            except Exception:self.save(last_error_at=int(time.time()*1000))
+                with enrollment_guard(self.root):
+                    try:
+                        self.tick()
+                        if not self.state.get('enrollment') and self.enrollment_ready():self.refresh_helper()
+                    except Exception:self.save(last_error_at=int(time.time()*1000))
+            except LockBusy:
+                # The installer has closed admission between whole cycles.
+                # Unsettled work retains this process and its singleton lock;
+                # the installer must refuse it without stopping the helper.
+                if self.enrollment_ready():raise EnrollmentYield('idle_helper_yielding_for_enrollment')
             time.sleep(5)
 
 @contextlib.contextmanager
-def single_worker(root):
+def _owner_lock(root,name):
     root.mkdir(parents=True,exist_ok=True,mode=0o700)
-    with (root/'worker.lock').open('a+b') as f:
+    with (root/name).open('a+b') as f:
         if os.name=='nt':
             import msvcrt
-            f.seek(0);f.write(b'0');f.flush();f.seek(0);msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)
+            f.seek(0);f.write(b'0');f.flush();f.seek(0)
         else:
             import fcntl
-            fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        try:
+            if os.name=='nt':
+                msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in (errno.EACCES,errno.EAGAIN):raise
+            raise LockBusy(error.errno,'installation_lock_busy') from error
         yield
+
+@contextlib.contextmanager
+def single_worker(root):
+    with _owner_lock(Path(root),'worker.lock'):yield
+
+@contextlib.contextmanager
+def enrollment_guard(root):
+    with _owner_lock(Path(root),'enrollment.lock'):yield
 
 def run_worker(registration,once=False):
     # Registration may live outside the state directory. Discover the lock root,
     # then reload and check that binding before reading the mutable journal.
     root=Path(load_registration(registration)['state']).resolve()
-    with single_worker(root):
-        w=Worker(registration,locked_root=root)
-        w.tick() if once else w.serve()
+    with contextlib.ExitStack() as ownership:
+        while True:
+            # A duplicate startup must refuse on the lifetime singleton before
+            # touching admission; otherwise it could make the existing helper
+            # mistake this startup for an installer and yield unnecessarily.
+            candidate=contextlib.ExitStack()
+            candidate.enter_context(single_worker(root))
+            try:
+                admission=enrollment_guard(root)
+                admission.__enter__()
+            except LockBusy:
+                # The installer has already retired the previous helper. Do
+                # not hold its singleton while waiting for publication/start.
+                candidate.close();time.sleep(.05);continue
+            except BaseException:
+                candidate.close();raise
+            ownership.callback(candidate.close)
+            try:
+                w=Worker(registration,locked_root=root)
+                if once:w.tick();return
+            finally:admission.__exit__(*sys.exc_info())
+            break
+        w.serve()
 
 if __name__=='__main__':
     os.umask(0o077);p=argparse.ArgumentParser(description=__doc__);p.add_argument('--registration',required=True,type=Path);p.add_argument('--once',action='store_true');a=p.parse_args()
