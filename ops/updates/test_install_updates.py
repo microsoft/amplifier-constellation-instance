@@ -1,8 +1,31 @@
-import importlib.util,json,pathlib,subprocess,tempfile,unittest,uuid
+import importlib.util,json,os,pathlib,subprocess,tempfile,unittest,uuid
 from unittest.mock import patch
 ROOT=pathlib.Path(__file__).parent
 spec=importlib.util.spec_from_file_location('enroll',ROOT/'install.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 class EnrollmentTests(unittest.TestCase):
+ def test_existing_native_relative_home_still_resolves(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=pathlib.Path(tmp).resolve();home=root/'agent-home';state=root/'owner';(home/'bin').mkdir(parents=True)
+   (home/'bin/agent-instance').write_text('fixture');identity=str(uuid.uuid4())
+   (home/'config.json').write_text(json.dumps({'config':{'instance_id':identity,'backend':None}}))
+   worker=ROOT.resolve()/'worker.py';previous=pathlib.Path.cwd()
+   try:
+    os.chdir(root)
+    with patch.object(m.platform,'system',return_value='Linux'),patch.object(m.Path,'home',return_value=root),patch.object(m,'run'),patch.object(m.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
+     m.enroll(pathlib.Path('agent-home'),state,[],worker)
+   finally:os.chdir(previous)
+   self.assertEqual(json.loads((state/'registration.json').read_text())['home'],str(home))
+ def test_existing_native_registration_resolves_equivalent_home(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=pathlib.Path(tmp).resolve();home=root/'home';state=root/'owner';(home/'bin').mkdir(parents=True)
+   (home/'bin/agent-instance').write_text('fixture');identity=str(uuid.uuid4())
+   (home/'config.json').write_text(json.dumps({'config':{'instance_id':identity,'backend':None}}))
+   with patch.object(m.platform,'system',return_value='Linux'),patch.object(m.Path,'home',return_value=root),patch.object(m,'run'),patch.object(m.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
+    m.enroll(home,state,[],ROOT/'worker.py')
+    registration=json.loads((state/'registration.json').read_text());registration['home']=str(home/'..'/'home')
+    (state/'registration.json').write_text(json.dumps(registration))
+    m.enroll(home,state,[],ROOT/'worker.py')
+   self.assertEqual(json.loads((state/'registration.json').read_text())['home'],str(home))
  def test_reenrollment_preserves_experience_and_separate_runtime_helper(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=pathlib.Path(tmp).resolve();home=root/'home';state=root/'owner';(home/'bin').mkdir(parents=True);state.mkdir();binary=home/'bin/agent-instance';binary.write_text('fixture');helper=home/'helper';helper.write_text('fixture')

@@ -42,62 +42,79 @@ def enrollment_owner(w,state,timeout=30):
         if not w.enrollment_idle(status,state):raise ValueError('Wait for the current update or connection before changing enrollment')
         yield worker_ownership.close
 
-def enroll(home,state,connector_homes,worker,container_manifest=None,container_image=None,pull_container_image=False):
-    home=home.resolve();state=state.resolve()
+def enroll(home,state,connector_homes,worker,container_manifest=None,container_image=None,pull_container_image=False,incus_config=None):
+    if incus_config and (platform.system()!='Linux' or connector_homes or container_manifest or container_image or pull_container_image):raise ValueError('incus_requires_linux_host_and_separate_participants')
+    if incus_config and not home.is_absolute():raise ValueError('absolute_home_required')
+    home=Path(os.path.normpath(home)) if incus_config else home.resolve();state=state.resolve()
     if state.is_relative_to(home):raise ValueError('Place the helper outside the agent directory')
     w=load_worker(worker)
     if not hasattr(w,'enrollment_guard'):raise ValueError('worker_does_not_support_serialized_enrollment')
     with enrollment_owner(w,state,timeout=ENROLLMENT_TIMEOUT) as release_singleton:
-        return enroll_owned(home,state,connector_homes,worker,w,release_singleton,container_manifest,container_image,pull_container_image)
+        return enroll_owned(home,state,connector_homes,worker,w,release_singleton,container_manifest,container_image,pull_container_image,incus_config)
 
-def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container_manifest=None,container_image=None,pull_container_image=False):
-    config=json.loads((home/'config.json').read_text())['config'];identifier=str(uuid.UUID(config['instance_id']))
+def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container_manifest=None,container_image=None,pull_container_image=False,incus_config=None):
+    remote=w.read(incus_config) if incus_config else None
+    if remote:
+        if remote['home']!=str(home) or Path(remote['state']).resolve()!=state/'incus':raise ValueError('incus_enrollment_paths_mismatch')
+        spec=importlib.util.spec_from_file_location('incus_provider',worker.parent/'incus_provider.py')
+        provider=importlib.util.module_from_spec(spec);spec.loader.exec_module(provider)
+        observed=provider.Provider(incus_config).probe()
+        if observed['instance_id']!=remote['instance_id']:raise ValueError('instance_identity_mismatch')
+        config={'instance_id':remote['instance_id']}
+    else:config=json.loads((home/'config.json').read_text())['config']
+    identifier=str(uuid.UUID(config['instance_id']))
     existing_path=state/'registration.json'
     previous=w.load_registration(existing_path) if existing_path.exists() else None
-    if previous and (previous['instance_id']!=identifier or Path(previous['home']).resolve()!=home):raise ValueError('Helper directory belongs to a different installation')
+    same_home=not previous or (previous['home']==str(home) if remote else Path(previous['home']).resolve()==home)
+    if previous and (previous['instance_id']!=identifier or not same_home or bool(previous.get('management'))!=bool(remote)):raise ValueError('Helper directory belongs to a different installation')
     status=w.read(state/'state.json') if (state/'state.json').exists() else {'state':'idle','components':[],'last_check':0}
     if not w.enrollment_idle(status,state):raise ValueError('Wait for the current update or connection before changing enrollment')
     configurations={}
     connector_homes=list(dict.fromkeys([Path(h) for h in (previous or {}).get('slack_homes',[])]+[h.resolve() for h in connector_homes]))
     services=[];components=[];system=platform.system()
-    def service(folder,kind,id):
-        if system=='Linux':return {'kind':'systemd-user','name':kind+'-'+id+'.service'}
-        info=json.loads((folder/'install.json').read_text());return info['service']
-    services.append(service(home,'agent-instance',identifier))
-    components.append({'id':'instance','kind':'instance','binary':str(home/'bin'/('agent-instance.exe' if system=='Windows' else 'agent-instance'))})
-    backend=(config.get('backend') or {}).get('command','').replace('${AGENT_HOME}',str(home))
-    if backend and Path(backend).name in ('agent-runtime','agent-runtime.exe'):
-        if not Path(backend).resolve().is_relative_to(home):raise ValueError('Runtime must belong to this installation')
-        components.append({'id':'runtime','kind':'runtime','binary':backend})
-    for n,folder in enumerate(connector_homes):
-        folder=folder.resolve();adapter=json.loads((folder/'adapter.json').read_text())
-        services.append(service(folder,'acp-slack-adapter',str(uuid.UUID(adapter['id']))))
-        components.append({'id':'slack-'+str(n+1),'kind':'slack','binary':str(folder/'bin/acp-slack-adapter'),'service_name':services[-1]['name']})
-    # Enroll supported upstream engines by their actual installed layout. No
-    # custom engine command is guessed, replaced, or converted to a native one.
-    command=Path(backend) if backend else None
-    engine_kind=None;runtime_root=None
-    if command:
-        candidates=[('codex',home/'backend/runtime'),('claude',home/'engine/releases'),('amplifier-agent',home/'engine/releases')]
-        for kind,root in candidates:
-            if not command.is_relative_to(root):continue
-            folder=command.relative_to(root).parts[0]
-            if (kind=='codex' and (root/folder/'runtime.json').is_file()) or (kind=='claude' and command.name in ('claude-agent-acp','claude-agent-acp.exe')) or (kind=='amplifier-agent' and command.name in ('amplifier-agent-acp','amplifier-agent-acp.exe')):
-                engine_kind=kind;runtime_root=root;break
-    if engine_kind:
-        provider_config=state/'engine.json'
-        settings={'kind':engine_kind,'home':str(home),'state':str(state/'engine'),'runtime_root':str(runtime_root),'python':sys.executable,'plans_directory':str(state/'plans')}
-        if engine_kind=='amplifier-agent':
-            settings['uv']=shutil.which('uv')
-            if not settings['uv']:raise ValueError('Install uv on this host to track Amplifier Agent updates')
-        configurations[provider_config]=settings
-        components.append({'id':'engine','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I','-X','utf8',str(state/'engine_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
-    if container_manifest:
-        manifest=w.read(container_manifest)
-        if not any(Path(entry['home']).resolve()==home for entry in manifest['homes']):raise ValueError('Container does not own this installation')
-        provider_config=state/'container-image.json'
-        configurations[provider_config]={'manifest':str(container_manifest.resolve()),'state':str(state/'container-image'),'installer':str(state/'container/install.py'),'image':container_image or manifest['image'],'pull':pull_container_image}
-        components.append({'id':'container-image','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I','-X','utf8',str(state/'container_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
+    if remote:
+        provider_config=state/'incus.json';configurations[provider_config]=remote
+        def command(action):return [sys.executable,'-I','-X','utf8',str(state/'incus_provider.py'),'--config',str(provider_config),'--action',action]
+        components.append({'id':'instance','provider':'command','protocol':2,'commands':{a:command(a) for a in ('status','plan','apply','rollback','verify')},'restart_scope':{'services':[],'instance':True,'slack_homes':[]}})
+    else:
+        def service(folder,kind,id):
+            if system=='Linux':return {'kind':'systemd-user','name':kind+'-'+id+'.service'}
+            info=json.loads((folder/'install.json').read_text());return info['service']
+        services.append(service(home,'agent-instance',identifier))
+        components.append({'id':'instance','kind':'instance','binary':str(home/'bin'/('agent-instance.exe' if system=='Windows' else 'agent-instance'))})
+        backend=(config.get('backend') or {}).get('command','').replace('${AGENT_HOME}',str(home))
+        if backend and Path(backend).name in ('agent-runtime','agent-runtime.exe'):
+            if not Path(backend).resolve().is_relative_to(home):raise ValueError('Runtime must belong to this installation')
+            components.append({'id':'runtime','kind':'runtime','binary':backend})
+        for n,folder in enumerate(connector_homes):
+            folder=folder.resolve();adapter=json.loads((folder/'adapter.json').read_text())
+            services.append(service(folder,'acp-slack-adapter',str(uuid.UUID(adapter['id']))))
+            components.append({'id':'slack-'+str(n+1),'kind':'slack','binary':str(folder/'bin/acp-slack-adapter'),'service_name':services[-1]['name']})
+        # Enroll supported upstream engines by their actual installed layout. No
+        # custom engine command is guessed, replaced, or converted to a native one.
+        command=Path(backend) if backend else None
+        engine_kind=None;runtime_root=None
+        if command:
+            candidates=[('codex',home/'backend/runtime'),('claude',home/'engine/releases'),('amplifier-agent',home/'engine/releases')]
+            for kind,root in candidates:
+                if not command.is_relative_to(root):continue
+                folder=command.relative_to(root).parts[0]
+                if (kind=='codex' and (root/folder/'runtime.json').is_file()) or (kind=='claude' and command.name in ('claude-agent-acp','claude-agent-acp.exe')) or (kind=='amplifier-agent' and command.name in ('amplifier-agent-acp','amplifier-agent-acp.exe')):
+                    engine_kind=kind;runtime_root=root;break
+        if engine_kind:
+            provider_config=state/'engine.json'
+            settings={'kind':engine_kind,'home':str(home),'state':str(state/'engine'),'runtime_root':str(runtime_root),'python':sys.executable,'plans_directory':str(state/'plans')}
+            if engine_kind=='amplifier-agent':
+                settings['uv']=shutil.which('uv')
+                if not settings['uv']:raise ValueError('Install uv on this host to track Amplifier Agent updates')
+            configurations[provider_config]=settings
+            components.append({'id':'engine','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I','-X','utf8',str(state/'engine_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
+        if container_manifest:
+            manifest=w.read(container_manifest)
+            if not any(Path(entry['home']).resolve()==home for entry in manifest['homes']):raise ValueError('Container does not own this installation')
+            provider_config=state/'container-image.json'
+            configurations[provider_config]={'manifest':str(container_manifest.resolve()),'state':str(state/'container-image'),'installer':str(state/'container/install.py'),'image':container_image or manifest['image'],'pull':pull_container_image}
+            components.append({'id':'container-image','provider':'command','protocol':2,'commands':{a:[sys.executable,'-I','-X','utf8',str(state/'container_provider.py'),'--config',str(provider_config),'--action',a] for a in ('status','plan','apply','rollback','verify')}})
     if previous:
         known={p['id'] for p in components}
         components.extend(p for p in previous['components'] if p['id'] not in known and p['id'] not in ('instance','runtime') and not (p['id'].startswith('slack-') and p.get('kind')=='slack'))
@@ -105,10 +122,17 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
         services.extend(s for s in previous['services'] if s['name'] not in service_names)
     registration={'schema':1,'instance_id':identifier,'home':str(home),'state':str(state),'components':components,'services':services,'slack_homes':[str(h.resolve()) for h in connector_homes]}
     registration['participants']=(previous or {}).get('participants',[])
+    if remote:
+        registration['management']={'protocol':1,'command':command('management')}
+        by_id={p['id']:p for p in registration['participants']}
+        for participant in remote.get('participants',[]):
+            if participant['id'] in by_id and by_id[participant['id']]!=participant:raise ValueError('existing_participant_changed')
+            by_id[participant['id']]=participant
+        registration['participants']=list(by_id.values())
     if (previous or {}).get('service_connections') is not None:registration['service_connections']=previous['service_connections']
     target=state/'worker.py'
     helpers={Path('worker.py'):worker.read_bytes()}
-    for name in ('engine_provider.py','container_provider.py','provision-backend.py'):
+    for name in ('engine_provider.py','container_provider.py','incus_provider.py','provision-backend.py'):
         source=worker.parent/name
         if source.is_file():helpers[Path(name)]=source.read_bytes()
     if (worker.parent/'container').is_dir():
@@ -172,7 +196,7 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
     return {'installed':True,'registration':str(state/'registration.json'),'service':name}
 
 if __name__=='__main__':
-    os.umask(0o077);p=argparse.ArgumentParser(description=__doc__);p.add_argument('--home',required=True,type=Path);p.add_argument('--state',type=Path);p.add_argument('--slack-home',type=Path,action='append',default=[]);p.add_argument('--container-manifest',type=Path);p.add_argument('--container-image');p.add_argument('--pull-container-image',action='store_true');p.add_argument('--worker',type=Path,default=Path(__file__).with_name('worker.py'));a=p.parse_args()
-    identity=json.loads((a.home/'config.json').read_text())['config']['instance_id']
+    os.umask(0o077);p=argparse.ArgumentParser(description=__doc__);p.add_argument('--home',required=True,type=Path);p.add_argument('--state',type=Path);p.add_argument('--slack-home',type=Path,action='append',default=[]);p.add_argument('--container-manifest',type=Path);p.add_argument('--container-image');p.add_argument('--pull-container-image',action='store_true');p.add_argument('--worker',type=Path,default=Path(__file__).with_name('worker.py'));p.add_argument('--incus-config',type=Path);a=p.parse_args()
+    identity=json.loads(a.incus_config.read_text())['instance_id'] if a.incus_config else json.loads((a.home/'config.json').read_text())['config']['instance_id']
     root=a.state or Path.home()/'.local/share/constellation-updates'/identity
-    print(json.dumps(enroll(a.home,root,a.slack_home,a.worker,a.container_manifest,a.container_image,a.pull_container_image)))
+    print(json.dumps(enroll(a.home,root,a.slack_home,a.worker,a.container_manifest,a.container_image,a.pull_container_image,a.incus_config)))
