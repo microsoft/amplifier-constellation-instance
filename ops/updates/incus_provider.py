@@ -258,7 +258,7 @@ class Provider:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def exec(self, argv, data=None, limit=MAX_EXPORT):
-        command = [self.c['incus'], '--force-local', 'exec', '-T', '--mode=non-interactive', '--project',
+        command = [self.c['incus'], '--force-local', 'exec', '--mode=non-interactive', '--project',
                    self.c['project'], self.c['guest'], '--', *argv]
         return bounded(command, data, limit)
 

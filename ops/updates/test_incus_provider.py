@@ -118,8 +118,9 @@ from pathlib import Path
 root=Path({str(self.root)!r});args=sys.argv[1:]
 assert args[0]=='--force-local';args=args[1:]
 if args==['config','get','--project','default','anchor','volatile.uuid']:print((root/'guest-id').read_text());raise SystemExit
-assert args[:7]==['exec','-T','--mode=non-interactive','--project','default','anchor','--']
-argv=args[7:];assert argv[:3]==[{sys.executable!r},'-I','-c']
+if ('-T' in args or '-t' in args) and any(a.startswith('--mode') for a in args):raise SystemExit(2)
+assert args[:6]==['exec','--mode=non-interactive','--project','default','anchor','--']
+argv=args[6:];assert argv[:3]==[{sys.executable!r},'-I','-c']
 argv[3]=argv[3].replace("SYSTEMCTL = '/bin/systemctl'",'SYSTEMCTL = '+repr(str(root/'systemctl'))).replace("PROC = '/proc'",'PROC = '+repr(str(root/'proc')))
 if (root/'short-lock-timeout').exists():argv[3]=argv[3].replace('time.monotonic()+10','time.monotonic()+.1')
 data=sys.stdin.buffer.read();request=json.loads(data)
