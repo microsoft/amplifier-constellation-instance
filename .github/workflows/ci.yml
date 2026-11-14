@@ -63,6 +63,11 @@ jobs:
         env:
           AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
         run: node ui/tests/updates.mjs && node ui/tests/service-connections.mjs
+      - name: Check client view intent across concurrent edits
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          UI_TEST_VIEW_INTENT_ONLY: '1'
+        run: node ui/tests/fixture.mjs
       - name: Check owner development setup and programmable view
         if: matrix.runner == 'ubuntu-24.04'
         env:

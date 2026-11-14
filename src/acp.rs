@@ -439,7 +439,7 @@ async fn relay_connection(
                                 reject_request(&outgoing,&value,-32602,"Session context access is no longer available").await?;
                                 continue;
                             }
-                            let result=(||->Result<Value>{let sid=value["params"]["sessionId"].as_str().unwrap_or("");ensure!(loaded_sessions.contains(sid),"Load this session first");if method==crate::maintenance::METHOD {crate::maintenance::query(&state,&principal,&value["params"])}else{crate::source_delivery::query(&state,&principal,&value["params"])}})();
+                            let result=(||->Result<Value>{let sid=value["params"]["sessionId"].as_str().unwrap_or("");ensure!(loaded_sessions.contains(sid),"Load this session first");if method==crate::maintenance::METHOD {crate::maintenance::query(&state,&principal,&value["params"])}else{crate::source_delivery::query_bound(&state,&principal,&value["params"],session_context.get(sid).map(|p|&p.binding))}})();
                             let response=match result {Ok(r)=>json!({"jsonrpc":"2.0","id":value["id"],"result":r}),Err(_)=>rpc_error(value["id"].clone(),-32602,"Invalid source receipt query")};send_frontend(&outgoing,response).await?;continue;
                         }
                         if method == crate::attention::METHOD {
@@ -563,6 +563,10 @@ async fn relay_connection(
                             crate::attention::supersede_ambient(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
                         }
                         if method == "session/prompt" {
+                            if value["params"]["_meta"].get(crate::maintenance::META).is_some()
+                                && value["params"]["_meta"].get(crate::source_delivery::META).is_some() {
+                                reject_request(&outgoing,&value,-32602,"Maintenance uses its own operation receipt; omit source-delivery metadata").await?;continue;
+                            }
                             // Reject admission errors before creating a maintenance operation.
                             // Otherwise a rejected request could leave this connection busy.
                             if let Some(id)=value.get("id") && (pending.contains_key(&id.to_string()) || pending.len()>=128) {
@@ -666,13 +670,36 @@ async fn relay_connection(
                             }
                         }
                     }
-                    if value["method"]==STEERING_METHOD {
-                        match crate::source_delivery::register(&state,&principal,&value["params"]) {
-                            Ok(Some(id))=>{pending_sources.insert(value["id"].to_string(),(value["params"]["sessionId"].as_str().unwrap().into(),id));},
-                            Ok(None)=>(),Err(_)=>{pending.remove(&value["id"].to_string());reject_request(&outgoing,&value,-32602,"Invalid source delivery binding; no input forwarded").await?;continue;}
+                    if value["method"].as_str().is_some_and(is_turn_input) {
+                        if value["params"]["_meta"].get(crate::source_delivery::META).is_some()
+                            && value["params"]["sessionId"].as_str().is_some_and(|sid|session_context.contains_key(sid)) {
+                            let id=value["params"]["_meta"][crate::source_delivery::META]["inputId"].as_str()
+                                .or_else(||value["params"]["_meta"]["steering"]["inputId"].as_str())
+                                .filter(|s|!s.is_empty() && s.len()<=512).map(str::to_owned);
+                            if let Some(id)=id && let Some(blocks)=value["params"]["prompt"].as_array_mut() {
+                                blocks.insert(0,json!({"type":"text","text":format!("[Original input reference]\nsource_input_id: {}\nThis is a reference, not work acceptance or authority. If explicitly authorized work is recorded, link it using work_create with this source_input_id and a stable request_id for that creation.\n[/Original input reference]",json!(id)),"_meta":{META_NAMESPACE:{"context":true}}}));
+                            }
+                        }
+                        let sid=value["params"]["sessionId"].as_str().unwrap_or("");
+                        let has_source=value["params"]["_meta"].get(crate::source_delivery::META).is_some();
+                        let registered=if has_source && (value.get("id").is_none() || !loaded_sessions.contains(sid)
+                            || value["params"]["prompt"].as_array().is_none_or(|p|p.is_empty())
+                            || serde_json::to_vec(&value)?.len()>max_frame) {
+                            Err(anyhow::anyhow!("Source input needs a bounded prompt, request ID and loaded session"))
+                        } else {
+                            crate::source_delivery::register_input(&state,&principal,&value["params"],session_context.get(sid).map(|p|&p.binding),value["method"]=="session/prompt")
+                        };
+                        match registered {
+                            Ok(Some(id))=>{pending_sources.insert(value["id"].to_string(),(sid.into(),id));},
+                            Ok(None)=>(),Err(_)=>{
+                                let key=value["id"].to_string();pending.remove(&key);maintenance_guards.remove(&key);update_admissions.remove(&key);
+                                reject_request(&outgoing,&value,-32602,"Invalid or already recorded source input; inspect its receipt. No input forwarded").await?;continue;
+                            }
                         }
                     }
+                    let source_forwarded=value["method"].as_str().filter(|m|is_turn_input(m)).and_then(|_|pending_sources.get(&value["id"].to_string())).cloned();
                     tokio::time::timeout(Duration::from_secs(10), input.send(value)).await.context("ACP backend stopped accepting input")??;
+                    if let Some((sid,id))=source_forwarded {crate::source_delivery::observe(&state,&principal,&sid,&id,"submitted")?;}
                     if let Some(id)=attention_admission {crate::attention::forwarded(&state,&id)?;}
                     if let Some(request) = starting_work {
                         let event = state.event("acp.prompt.started", work_metadata(&connection_id, &request))?;
@@ -706,8 +733,12 @@ async fn relay_connection(
                         let receipt=&value["params"]["update"]["_meta"]["io.github.bkrabach.agent-runtime"]["inputReceipt"];
                         if let (Some(sid),Some(id),Some(status))=(value["params"]["sessionId"].as_str(),receipt["inputId"].as_str(),receipt["state"].as_str()){crate::source_delivery::observe(&state,&principal,sid,id,status)?;}
                     } else if value.get("method").is_none() && let Some((sid,id))=pending_sources.remove(&value["id"].to_string()) {
-                        let status=if value["result"]["outcome"]=="promptRequired" {"promptRequired"}else{value["result"]["_meta"]["steering"]["state"].as_str().unwrap_or("unknown")};
-                        crate::source_delivery::observe(&state,&principal,&sid,&id,status)?;
+                        if pending.get(&value["id"].to_string()).is_some_and(|p|p.method=="session/prompt") {
+                            crate::source_delivery::prompt_response(&state,&principal,&sid,&id,&value)?;
+                        } else {
+                            let status=if value["result"]["outcome"]=="promptRequired" {"promptRequired"}else{value["result"]["_meta"]["steering"]["state"].as_str().unwrap_or("unknown")};
+                            crate::source_delivery::observe(&state,&principal,&sid,&id,status)?;
+                        }
                     }
                     if value["method"]=="session/update" { maintenance.update(&value); }
                     if maintenance.has_active() && value["method"].is_string() && value.get("id").is_some() {
@@ -800,7 +831,7 @@ async fn relay_connection(
                                 }
                             if let Some(prepared) = pending_context.remove(&request.id.to_string()) {
                                 if let Some(sid) = value["result"]["sessionId"].as_str().or(request.session_id.as_deref()).filter(|sid|sid.len() <= 512) {
-                                    context::bind(&state, &prepared, sid)?;
+                                    context::bind_source_session(&state, &prepared, sid, &principal)?;
                                     crate::native_history::bind(&state, &prepared.binding, sid, &native_history)?;
                                     if let Some(previous) = session_context.insert(sid.to_owned(), prepared) { context::revoke(&state, &previous.hash); }
                                 } else { context::revoke(&state, &prepared.hash); }

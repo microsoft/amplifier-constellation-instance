@@ -97,6 +97,288 @@ fn assignment(id: &str) -> Value {
     json!({"id":id,"name":id,"domain":id,"purpose":"Own this responsibility","template_id":"engineer","audience":{"kind":"owner"}})
 }
 
+#[tokio::test]
+async fn creation_retry_recovers_current_work_without_repeating_or_replacing_it() {
+    let f = Fixture::new();
+    let request = json!({"title":"First deliverable","goal":"Verify the result","request_id":"create-one",
+        "source":{"provider_id":"slack","conversation_id":"room","message_id":"message-one"}});
+    let created = f.api("POST", "work", request.clone()).await;
+    assert_eq!(created["state"], "proposed");
+    let accepted = f.command(&created, json!({"type":"accept"})).await;
+    let amended = f.command(&accepted, json!({"type":"amend","title":"Corrected deliverable","goal":"Use the corrected scope"})).await;
+    let recovered = f.api("POST", "work", request.clone()).await;
+    assert_eq!(recovered, amended);
+    assert_eq!(recovered["history"].as_array().unwrap().len(), 3);
+    let mut changed = request.clone();
+    changed["goal"] = json!("Another creation with the same key is a conflict");
+    let (status, _) = f.req("POST", "work", changed, Some(&f.token)).await;
+    assert_eq!(status, 409);
+
+    let mut separate = request.clone();
+    separate["request_id"] = json!("create-two");
+    let second = f.api("POST", "work", separate).await;
+    assert_ne!(created["id"], second["id"]);
+    assert_eq!(created["source"], second["source"]);
+    assert_eq!(
+        f.api("GET", "work", Value::Null).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let other = auth::issue_token(&f.state, "Other creator", &["work".into()], 3600).unwrap();
+    let (status, other_work) = f
+        .req("POST", "work", request, other["token"].as_str())
+        .await;
+    assert_eq!(status, 200);
+    assert_ne!(other_work["id"], created["id"]);
+    let legacy = json!({"title":"Legacy caller","goal":"No request key was supplied"});
+    let first = f.api("POST", "work", legacy.clone()).await;
+    assert_ne!(first["id"], f.api("POST", "work", legacy).await["id"]);
+}
+
+#[test]
+fn concurrent_creation_retries_commit_one_existing_work_record() {
+    let f = Fixture::new();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let results = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..8).map(|_| {
+            let state = f.state.clone();
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                let request = serde_json::from_value(json!({"title":"One operation","goal":"One creation despite concurrent retries","request_id":"same-creation"})).unwrap();
+                barrier.wait();
+                work::create_work(&state, request, "owner", None).unwrap()
+            })
+        }).collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert!(results.iter().all(|item| item == &results[0]));
+    assert_eq!(f.state.list_records("work").unwrap().len(), 1);
+}
+
+#[test]
+fn source_linked_creation_requires_a_verified_input_and_keeps_one_to_many_provenance() {
+    let f = Fixture::new();
+    let binding =
+        json!({"owner":false,"provider_id":"slack","conversation_id":"room","actor_id":"person"});
+    let input = json!({"principal":"token:connector","sessionId":"session-one","inputId":"input-one",
+        "sources":[{"id":"message-one","revision":"revision-one","occurredAt":now_ms()}],"binding":binding});
+    let request = json!({"title":"First part","goal":"Use the original request","source_input_id":"input-one","request_id":"part-one"});
+    assert!(work::mcp_call(&f.state, &binding, "work_create", &request).is_err());
+    let mut no_key = request.clone();
+    no_key.as_object_mut().unwrap().remove("request_id");
+    assert!(
+        work::mcp_call_with_input(&f.state, &binding, "work_create", &no_key, Some(&input))
+            .is_err()
+    );
+    let mut wrong_input = input.clone();
+    wrong_input["inputId"] = json!("another-input");
+    assert!(
+        work::mcp_call_with_input(
+            &f.state,
+            &binding,
+            "work_create",
+            &request,
+            Some(&wrong_input)
+        )
+        .is_err()
+    );
+    let mut injected = request.clone();
+    injected["source_input"] = input.clone();
+    assert!(
+        work::mcp_call_with_input(&f.state, &binding, "work_create", &injected, Some(&input))
+            .is_err()
+    );
+
+    let first =
+        work::mcp_call_with_input(&f.state, &binding, "work_create", &request, Some(&input))
+            .unwrap();
+    assert_eq!(first["state"], "proposed");
+    assert_eq!(first["source"]["message_id"], "message-one");
+    assert_eq!(first["source_input"], input);
+    let accepted = work::mcp_call(
+        &f.state,
+        &binding,
+        "work_command",
+        &json!({"id":first["id"],"expected_revision":1,"command":{"type":"accept"}}),
+    )
+    .unwrap();
+    let retried =
+        work::mcp_call_with_input(&f.state, &binding, "work_create", &request, Some(&input))
+            .unwrap();
+    assert_eq!(retried, accepted);
+    let mut refreshed = binding.clone();
+    refreshed["label"] = json!("Current display name");
+    refreshed["observed_at"] = json!(now_ms());
+    let refreshed_retry =
+        work::mcp_call_with_input(&f.state, &refreshed, "work_create", &request, Some(&input))
+            .unwrap();
+    assert_eq!(refreshed_retry, accepted);
+    assert_eq!(refreshed_retry["source_input"], input);
+    let mut second_request = request.clone();
+    second_request["request_id"] = json!("part-two");
+    let second = work::mcp_call_with_input(
+        &f.state,
+        &binding,
+        "work_create",
+        &second_request,
+        Some(&input),
+    )
+    .unwrap();
+    assert_ne!(first["id"], second["id"]);
+    assert_eq!(first["source_input"], second["source_input"]);
+    assert_eq!(f.state.list_records("work").unwrap().len(), 2);
+
+    let mut changed_revision = input.clone();
+    changed_revision["sources"][0]["revision"] = json!("revision-two");
+    assert_eq!(
+        work::mcp_call_with_input(
+            &f.state,
+            &binding,
+            "work_create",
+            &request,
+            Some(&changed_revision)
+        )
+        .unwrap_err()
+        .0,
+        409
+    );
+    let mut other_binding = binding.clone();
+    other_binding["conversation_id"] = json!("other-room");
+    assert!(
+        work::mcp_call_with_input(
+            &f.state,
+            &other_binding,
+            "work_create",
+            &request,
+            Some(&input)
+        )
+        .is_err()
+    );
+    assert_eq!(
+        work::get_work(
+            &f.state,
+            first["id"].as_str().unwrap(),
+            Some(&other_binding)
+        )
+        .unwrap_err()
+        .0,
+        404
+    );
+    let mut other_input = input.clone();
+    other_input["binding"] = other_binding.clone();
+    let other = work::mcp_call_with_input(
+        &f.state,
+        &other_binding,
+        "work_create",
+        &request,
+        Some(&other_input),
+    )
+    .unwrap();
+    assert_ne!(other["id"], first["id"]);
+
+    let mut other_actor = binding.clone();
+    other_actor["actor_id"] = json!("another-person");
+    let participant_work = work::mcp_call_with_input(
+        &f.state,
+        &other_actor,
+        "work_create",
+        &request,
+        Some(&input),
+    )
+    .unwrap();
+    assert_eq!(participant_work, accepted);
+    assert_eq!(
+        participant_work["source_input"]["binding"]["actor_id"],
+        "person"
+    );
+    assert_eq!(participant_work["creation_context"]["actor_id"], "person");
+    let mut participant_request = request.clone();
+    participant_request["request_id"] = json!("new-participant-creation");
+    let participant_creation = work::mcp_call_with_input(
+        &f.state,
+        &other_actor,
+        "work_create",
+        &participant_request,
+        Some(&input),
+    )
+    .unwrap();
+    assert_ne!(participant_creation["id"], first["id"]);
+    assert_eq!(participant_creation["source_input"], input);
+    assert_eq!(
+        participant_creation["creation_context"]["actor_id"],
+        "another-person"
+    );
+    let mut changed_by_participant = request.clone();
+    changed_by_participant["goal"] = json!("Changed intent is not a retry");
+    assert_eq!(
+        work::mcp_call_with_input(
+            &f.state,
+            &other_actor,
+            "work_create",
+            &changed_by_participant,
+            Some(&input)
+        )
+        .unwrap_err()
+        .0,
+        409
+    );
+
+    let unlinked = json!({"title":"Unlinked work","goal":"Per-caller operation","request_id":"unlinked-creation"});
+    let original_actor_work = work::mcp_call(&f.state, &binding, "work_create", &unlinked).unwrap();
+    let other_actor_work =
+        work::mcp_call(&f.state, &other_actor, "work_create", &unlinked).unwrap();
+    assert_ne!(original_actor_work["id"], other_actor_work["id"]);
+
+    let private_binding = json!({"owner":true,"actor_id":"owner-one"});
+    let private_input = json!({"principal":"owner","sessionId":"private-session","inputId":"input-one",
+        "sources":input["sources"],"binding":private_binding});
+    let another_owner = json!({"owner":true,"actor_id":"owner-two"});
+    assert!(
+        work::mcp_call_with_input(
+            &f.state,
+            &another_owner,
+            "work_create",
+            &request,
+            Some(&private_input)
+        )
+        .is_err()
+    );
+    assert!(
+        work::mcp_call_with_input(
+            &f.state,
+            &private_binding,
+            "work_create",
+            &request,
+            Some(&input)
+        )
+        .is_err()
+    );
+
+    let mut several = input.clone();
+    several["inputId"] = json!("input-several");
+    several["sources"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"message-two","revision":"revision-one","occurredAt":now_ms()}));
+    let several_request = json!({"title":"Combined input","goal":"Preserve every original source","source_input_id":"input-several","request_id":"combined-part"});
+    let combined = work::mcp_call_with_input(
+        &f.state,
+        &binding,
+        "work_create",
+        &several_request,
+        Some(&several),
+    )
+    .unwrap();
+    assert!(combined["source"]["message_id"].is_null());
+    assert_eq!(combined["source_input"]["sources"], several["sources"]);
+}
+
 fn review_command(item: &Value, outcome: &str) -> Value {
     json!({"type":"review_artifacts", "brief_sha256":item["completion_contract"]["brief"]["sha256"],
         "artifact_set_sha256":item["completion_contract"]["artifact_set"]["sha256"], "outcome":outcome,

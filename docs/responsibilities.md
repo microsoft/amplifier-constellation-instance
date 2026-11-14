@@ -41,6 +41,16 @@ For a personal/work setup, create independent work, personal, and coordinating i
 
 An assignment is optional. If present, it must be active and the work must retain its audience. A source, when supplied, is `{provider_id,conversation_id,message_id?,url?}`. It records provenance; it does not authenticate a person or grant access. `due_at` is a millisecond timestamp for observation, not a scheduled trigger.
 
+Creation accepts an optional `request_id` (1–512 bytes) for one operation. Repeating
+the same authenticated creation with the same content returns the existing work
+in its current state; different content under the same key returns 409. The
+original fingerprint stays on the work record even after amendment or Stop.
+Different creation keys can legitimately produce several responsibilities from
+one input. This does not make a human message globally unique or authorize execution.
+Unlinked keys are scoped to the current caller/context. Source-linked keys use
+the immutable input origin and agent caller, while rechecking current access;
+an authorized participant change in the same room does not duplicate that creation.
+
 The record has a stable UUID, monotonic revision, immutable `owner_agent_id`, captured role instructions, source/audience, progress, blocker, evidence, recorded verification, delegation references, timestamps, and change history. SQLite writes and optimistic revision checks make concurrent changes fail visibly. Records survive service restart and are independent of ACP working sessions.
 
 `POST /api/v1/work/{id}/commands` accepts `{expected_revision,command}`:
@@ -88,6 +98,20 @@ Retries with the same source agent and envelope ID return the same local work; c
 ## Agent access through ordinary MCP
 
 Backends supporting HTTP MCP receive `work_list`, `work_get`, `work_create`, and `work_command` alongside existing continuity tools. Every call rechecks the active ACP grant and conversation authorization. Private owner context can access this individual's work; a group context can only access work bound to its verified provider and conversation. Tool-created work derives its audience from the binding, not model-supplied metadata. The agent cannot edit sharing policy or export/import packets through these tools.
+
+`work_create` also accepts `source_input_id` together with `request_id`. The context
+lease supplies the authenticated principal/session; the host resolves the input
+from its [source receipt](harness.md#source-delivery-facts) or retained work origin.
+The caller cannot supply an audience or forge a `source_input` object. The work
+retains immutable original references, revisions and attribution in `source_input`,
+separate from the editable brief. A sole source ID also fills `source.message_id`;
+multiple source references remain in `source_input.sources`.
+
+Use the advertised source receipt query to recover linked work after a lost reply.
+Creation still yields `proposed`; `work_command accept` is a separate transition.
+After a lost command reply, inspect the current work/revision instead of assuming
+acceptance or replaying an effect. Cancellation remains the existing work command,
+distinct from cancelling one ACP turn. No automatic source publication is added.
 
 Prompt orientation provides at most 12 open, scoped responsibility summaries. Use `work_get` for the captured role instructions and evidence. Runtime profile context, prompts and MCP results remain ordinary model context, not an authority channel. Non-HTTP-MCP backends remain ACP compatible but cannot use these optional tools.
 
