@@ -24,6 +24,8 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 struct Source {
     revoked: Arc<AtomicBool>,
+    member: Arc<AtomicBool>,
+    history_pages: Arc<AtomicBool>,
     seen: Arc<std::sync::Mutex<Vec<Value>>>,
 }
 async fn source_query(
@@ -41,7 +43,8 @@ async fn source_query(
                 | "group-grant-canary"
                 | "group-robin-grant-canary"
                 | "other-grant-canary"
-        ) || source.revoked.load(Ordering::SeqCst))
+        ) || source.revoked.load(Ordering::SeqCst)
+            || !source.member.load(Ordering::SeqCst))
     {
         return (StatusCode::FORBIDDEN, Json(json!({"error":"invalid"})));
     }
@@ -67,6 +70,21 @@ async fn source_query(
         }
         "list" => {
             json!({"items":[{"id":"room","conversation_id":"team-room","label":"Team room","surface":"fixture"},{"id":"dm","conversation_id":"owner-dm","label":"Private owner discussion","surface":"fixture"}],"complete":true})
+        }
+        "read" if source.history_pages.load(Ordering::SeqCst) => {
+            let (id, seq, text, next) = match body.get("before") {
+                None => ("recent-20", 20, "Recent message only", json!(20)),
+                Some(position) if position == 20 => {
+                    ("older-10", 10, "Older source-only marker", Value::Null)
+                }
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error":"Unsupported position"})),
+                    );
+                }
+            };
+            json!({"conversation_id":body["conversation_id"],"thread_id":body["thread_id"],"messages":[{"id":id,"seq":seq,"text":text,"actor":"alex","at":1,"url":format!("https://source.example/message/{id}")}],"complete":false,"next_cursor":next,"coverage":"Bounded source messages","observed_at":1})
         }
         "read" => {
             json!({"conversation_id":body["conversation_id"],"thread_id":body["thread_id"],"messages":[{"id":"msg-1","text":"The chosen design is blue","actor":"alex","at":1,"url":"https://source.example/message/1"}],"complete":true,"observed_at":1})
@@ -130,6 +148,8 @@ impl Fixture {
         let state = Arc::new(AppState::open(dir.path().into()).unwrap());
         let source = Source {
             revoked: Arc::new(AtomicBool::new(false)),
+            member: Arc::new(AtomicBool::new(true)),
+            history_pages: Arc::new(AtomicBool::new(false)),
             seen: Arc::new(std::sync::Mutex::new(vec![])),
         };
         let source_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -842,6 +862,109 @@ async fn owner_native_clients_get_merged_mcp_and_cross_surface_context_without_c
     let records = json!(f.state.list_records("context_bindings").unwrap()).to_string();
     assert!(!records.contains("canary"));
 }
+#[tokio::test]
+async fn external_read_continues_source_pages_without_resetting_or_widening_access() {
+    let f = Fixture::new().await;
+    f.source.history_pages.store(true, Ordering::SeqCst);
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let read = json!({"name":"context_read","arguments":{"provider_id":"web:fixture","conversation_id":"team-room","limit":1}});
+    let first = client.prompt(&sid, read.clone()).await;
+    let first_source = &first["call"]["result"]["structuredContent"]["source"];
+    assert_eq!(first_source["messages"][0]["id"], "recent-20");
+    assert!(!first.to_string().contains("Older source-only marker"));
+    let first_request = f
+        .source
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|q| q["operation"] == "read")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        first_request,
+        json!({"operation":"read","access":{"mode":"grant","grant":"group-grant-canary"},"conversation_id":"team-room","thread_id":null,"limit":1})
+    );
+
+    let mut older = read.clone();
+    older["arguments"]["before"] = first_source["next_cursor"].clone();
+    let second = client.prompt(&sid, older.clone()).await;
+    let source = &second["call"]["result"]["structuredContent"]["source"];
+    assert_eq!(source["conversation_id"], "team-room");
+    assert_eq!(
+        source["messages"][0],
+        json!({"id":"older-10","seq":10,"text":"Older source-only marker","actor":"alex","at":1,"url":"https://source.example/message/older-10"})
+    );
+    assert_eq!(source["complete"], false);
+    assert_eq!(source["coverage"], "Bounded source messages");
+    assert!(source["next_cursor"].is_null());
+    let reads = || {
+        f.source
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|q| q["operation"] == "read")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(reads().len(), 2);
+    assert_eq!(reads()[1]["before"], first_source["next_cursor"]);
+
+    for (provider, conversation) in [("slack:fixture", "team-room"), ("web:fixture", "owner-dm")] {
+        let mut wrong = older.clone();
+        wrong["arguments"]["provider_id"] = json!(provider);
+        wrong["arguments"]["conversation_id"] = json!(conversation);
+        let denied = client.prompt(&sid, wrong).await;
+        assert_eq!(denied["call"]["result"]["isError"], true);
+    }
+    assert_eq!(reads().len(), 2, "A cursor cannot widen the source grant");
+    for before in [
+        json!(-1),
+        json!("20"),
+        Value::Null,
+        json!(i64::MAX as u64 + 1),
+    ] {
+        let mut invalid = older.clone();
+        invalid["arguments"]["before"] = before;
+        let denied = client.prompt(&sid, invalid).await;
+        assert_eq!(denied["call"]["result"]["isError"], true);
+    }
+    assert_eq!(
+        reads().len(),
+        2,
+        "Invalid positions must not become first-page reads"
+    );
+    let mut rejected = older.clone();
+    rejected["arguments"]["before"] = json!(21);
+    let denied = client.prompt(&sid, rejected).await;
+    assert_eq!(denied["call"]["result"]["isError"], true);
+    assert_eq!(
+        reads().len(),
+        3,
+        "Source rejection must not retry without before"
+    );
+    assert_eq!(reads()[2]["before"], 21);
+
+    for membership_removed in [false, true] {
+        f.source
+            .revoked
+            .store(!membership_removed, Ordering::SeqCst);
+        f.source.member.store(!membership_removed, Ordering::SeqCst);
+        let denied = client.request(20, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":format!("CONTEXT_TOOL {}", older)}]})).await.0;
+        assert!(
+            denied["error"].is_object(),
+            "Each page requires current source authority"
+        );
+        assert_eq!(reads().len(), 3);
+    }
+    client.close().await;
+}
+
 #[tokio::test]
 async fn private_owner_context_does_not_require_administration_and_revocation_is_immediate() {
     let mut f = Fixture::new().await;

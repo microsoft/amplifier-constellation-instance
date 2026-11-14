@@ -77,7 +77,25 @@ The agent posts JSON to `<provider base>/context/v1/query` using that provider's
 | `read` | `{conversation_id,thread_id?,messages:[{id,text,actor,label?,at,url?,thread_id?}],complete,observed_at,...}`. Returned conversation ID must match the request. |
 | `orientation` | A bounded object containing current conversation, surrounding parent excerpt, thread references and coverage. The provider decides which relationships can be shown. |
 
-Queries have a 20-second timeout and a 256 KiB response limit. Listing independent providers runs concurrently. Tools request at most 40 items; automatic orientation requests 12. Results retain source IDs, links and coverage; a partial listing or provider failure is visible to the agent rather than silently treated as no history. This first version returns bounded results, not an exhaustive history/search interface; cursor traversal is a later extension.
+Queries have a 20-second timeout and a 256 KiB response limit. Listing independent providers runs concurrently. Tools request at most 40 items; automatic orientation requests 12. Results retain source IDs, links and coverage; a partial listing or provider failure is visible to the agent rather than silently treated as no history.
+
+For external `context_read`, an explicitly supplied nonnegative 64-bit signed integer `before`
+is forwarded unchanged to the provider. A source supporting this continuation
+returns its numeric position as `source.next_cursor`; pass that value back only
+for the same provider and conversation (and thread, when present). The source
+owns the position's meaning. Conversations, for example, returns the oldest
+included message sequence and reads messages with a smaller sequence on the next
+request. This is not a timestamp or the native engine's `next_before` contract.
+Requests without `before` remain unchanged.
+
+Paging is opt-in per call: Instance does not crawl, retry a rejected continuation
+without its position, or cache another transcript. A provider that does not
+support `before` must reject it; its error remains visible to the caller. Instance
+cannot detect a provider that silently ignores the field. Each page retains the
+normal source/grant checks and source IDs, links, truncation and coverage. An
+absent next cursor ends available traversal; `complete: false` can still describe
+partial or truncated coverage. External listing cursors, search and attachment
+body retrieval are separate capabilities, not supplied by this extension.
 
 ## Audience and session boundaries
 
