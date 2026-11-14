@@ -65,7 +65,8 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
     identifier=str(uuid.UUID(config['instance_id']))
     existing_path=state/'registration.json'
     previous=w.load_registration(existing_path) if existing_path.exists() else None
-    if previous and (previous['instance_id']!=identifier or previous['home']!=str(home) or bool(previous.get('management'))!=bool(remote)):raise ValueError('Helper directory belongs to a different installation')
+    same_home=not previous or (previous['home']==str(home) if remote else Path(previous['home']).resolve()==home)
+    if previous and (previous['instance_id']!=identifier or not same_home or bool(previous.get('management'))!=bool(remote)):raise ValueError('Helper directory belongs to a different installation')
     status=w.read(state/'state.json') if (state/'state.json').exists() else {'state':'idle','components':[],'last_check':0}
     if not w.enrollment_idle(status,state):raise ValueError('Wait for the current update or connection before changing enrollment')
     configurations={}
