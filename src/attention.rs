@@ -28,17 +28,15 @@ pub struct Config {
     /// Ambient offers claimed or admitted per hour, not a human reply quota.
     #[serde(default = "turn_limit")]
     pub turns_per_hour: usize,
-    #[serde(default = "uncertain_limit")]
-    pub uncertain_turns_per_hour: usize,
+    /// Optional extra subquota for investigation. Omitted/null shares the overall turn budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertain_turns_per_hour: Option<usize>,
 }
 fn decision_limit() -> usize {
     600
 }
 fn turn_limit() -> usize {
     60
-}
-fn uncertain_limit() -> usize {
-    12
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
@@ -67,7 +65,9 @@ impl Config {
         ensure!(
             (1..=10000).contains(&self.decisions_per_hour)
                 && (1..=1000).contains(&self.turns_per_hour)
-                && self.uncertain_turns_per_hour <= self.turns_per_hour,
+                && self
+                    .uncertain_turns_per_hour
+                    .is_none_or(|limit| limit <= self.turns_per_hour),
             "Invalid attention budgets"
         );
         Ok(())
@@ -469,7 +469,10 @@ pub fn consume(
     let uncertain = recent.iter().filter(|r| r["investigate"] == true).count();
     if row["budget_class"] != "human_message"
         && (recent.len() >= config.turns_per_hour
-            || (row["investigate"] == true && uncertain >= config.uncertain_turns_per_hour))
+            || (row["investigate"] == true
+                && config
+                    .uncertain_turns_per_hour
+                    .is_some_and(|limit| uncertain >= limit)))
     {
         row["status"] = json!("budget_hold");
         save(state, &row)?;

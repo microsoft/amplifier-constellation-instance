@@ -1497,7 +1497,7 @@ fn enable_rebind_attention(f: &Fixture) {
         credential_secret: "context-source".into(),
         decisions_per_hour: 40,
         turns_per_hour: 1,
-        uncertain_turns_per_hour: 1,
+        uncertain_turns_per_hour: Some(1),
     });
 }
 fn rebind_event(sid: &str, id: &str) -> Value {

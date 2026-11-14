@@ -103,6 +103,23 @@ geometry/inventory/actions stay in Minecraft; Slack formatting and source
 membership stay in Slack. Existing task-condition watches are a distinct
 feature, not this social-event profile and not a second social gate.
 
+## Investigation budget
+
+Investigation shares `turns_per_hour` with other ambient turns. Uncertainty is a
+reason to let the agent inspect context, not a default second allowance that can
+run out while most of the overall budget remains unused. Omit
+`uncertain_turns_per_hour` (or set it to `null`) for no additional subquota.
+An explicit integer still applies that installation's chosen subquota; zero
+still disables investigation. Existing numeric configurations keep their policy.
+The settings example therefore does not introduce a separate 12-turn ceiling.
+
+Changing this setting through the revision-checked configuration API affects
+new offers. Previously held or consumed inputs stay held or consumed; the
+change does not reoffer them, reset spent allowance, bypass overall budgets,
+renew a task, or grant world/tool effects. Older Instance versions that require
+an integer can use the same value as `turns_per_hour` to eliminate the additional
+restriction while retaining the existing overall allowance.
+
 ## ACP and MCP boundaries
 
 Ordinary ACP initialization, authentication, session setup, prompts, streamed

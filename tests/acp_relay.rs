@@ -866,7 +866,7 @@ async fn optional_attention_is_intercepted_but_plain_acp_and_streaming_still_wor
         credential_secret: "provider-test".into(),
         decisions_per_hour: 20,
         turns_per_hour: 5,
-        uncertain_turns_per_hour: 1,
+        uncertain_turns_per_hour: Some(1),
     });
     let mut c = i.connect();
     let init = c.initialize().await;
@@ -1264,7 +1264,7 @@ async fn busy_steering_consumes_attention_only_for_the_bound_session_and_current
         credential_secret: "provider-test".into(),
         decisions_per_hour: 20,
         turns_per_hour: 5,
-        uncertain_turns_per_hour: 5,
+        uncertain_turns_per_hour: Some(5),
     });
     let mut c = i.connect();
     c.initialize().await;
@@ -1355,7 +1355,7 @@ fn one_attention_slot(i: &Installation) {
         credential_secret: "provider-test".into(),
         decisions_per_hour: 20,
         turns_per_hour: 1,
-        uncertain_turns_per_hour: 1,
+        uncertain_turns_per_hour: Some(1),
     });
 }
 

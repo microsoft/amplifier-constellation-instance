@@ -28,7 +28,7 @@ fn install_protocol(endpoint: String, limit: usize, protocol: &str) -> (TempDir,
         credential_secret: "decision".into(),
         decisions_per_hour: 20,
         turns_per_hour: 10,
-        uncertain_turns_per_hour: limit,
+        uncertain_turns_per_hour: Some(limit),
     });
     write_private(
         &home.path().join("config.json"),
@@ -730,4 +730,125 @@ fn activity_rejects_presence_forged_speech_stale_time_and_excess_context() {
         attention::reserve(&s, "p", "c", &serde_json::from_value(old).unwrap(), None).unwrap()["reason"],
         "stale"
     );
+}
+
+#[test]
+fn investigation_subquota_is_opt_in_and_explicit_limits_round_trip() {
+    let base = json!({"endpoint":"http://127.0.0.1:9/", "model":"fixture",
+        "protocol":"system_one", "auth":"bearer", "credential_secret":"decision"});
+    for value in [
+        base.clone(),
+        json!({"uncertain_turns_per_hour":null,
+        "endpoint":"http://127.0.0.1:9/", "model":"fixture", "protocol":"system_one",
+        "auth":"bearer", "credential_secret":"decision"}),
+    ] {
+        let config: Config = serde_json::from_value(value).unwrap();
+        config.validate().unwrap();
+        assert!(serde_json::to_value(&config).unwrap()["uncertain_turns_per_hour"].is_null());
+        assert_eq!(config.turns_per_hour, 60);
+    }
+    for limit in [0, 12, 60] {
+        let mut value = base.clone();
+        value["uncertain_turns_per_hour"] = json!(limit);
+        let config: Config = serde_json::from_value(value.clone()).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(config).unwrap()["uncertain_turns_per_hour"],
+            limit
+        );
+    }
+}
+
+#[tokio::test]
+async fn investigation_uses_overall_budget_without_a_hidden_twelve_turn_cutoff() {
+    let (url, _, server) = provider(answer("uncertain"), 0).await;
+    let (_home, s) = install(url, 1);
+    let mut value = serde_json::to_value(s.instance_config()).unwrap();
+    value["attention"]
+        .as_object_mut()
+        .unwrap()
+        .remove("uncertain_turns_per_hour");
+    let mut config: InstanceConfig = serde_json::from_value(value).unwrap();
+    config.enabled = true;
+    config.setup_complete = true;
+    config.backend = Some(agent_instance::config::BackendConfig {
+        command: "attention-fixture-no-engine-dispatch".into(),
+        args: vec![],
+        env: Default::default(),
+        secret_env: Default::default(),
+        working_directory: _home.path().to_string_lossy().into_owned(),
+        allowed_working_roots: vec![],
+    });
+    config.attention.as_mut().unwrap().turns_per_hour = 14;
+    agent_instance::server::replace_config(&s, 1, config, "fixture").unwrap();
+    for n in 0..14 {
+        let offered = offer(s.clone(), &format!("fresh-{n}")).await;
+        assert_eq!(offered["action"], "engage", "{offered}");
+        let id = attention::consume(&s, "p", "c", "session", &offered, None).unwrap();
+        attention::forwarded(&s, &id).unwrap();
+        assert!(attention::consume(&s, "p", "c", "session", &offered, None).is_err());
+    }
+    let extra = offer(s.clone(), "over-budget").await;
+    assert!(attention::consume(&s, "p", "c", "session", &extra, None).is_err());
+    assert_eq!(
+        attention::report(&s).unwrap()["counts"]["status:admitted"],
+        14
+    );
+    assert_eq!(
+        attention::report(&s).unwrap()["counts"]["status:budget_hold"],
+        1
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn removing_subquota_preserves_held_sources_and_spent_overall_allowance() {
+    let (url, _, server) = provider(answer("uncertain"), 0).await;
+    let (_home, s) = install(url, 1);
+    let one = offer(s.clone(), "original-admitted").await;
+    let id = attention::consume(&s, "p", "c", "session", &one, None).unwrap();
+    attention::forwarded(&s, &id).unwrap();
+    let held = offer(s.clone(), "original-held").await;
+    assert!(attention::consume(&s, "p", "c", "session", &held, None).is_err());
+    let before = s
+        .get_record("attention_events", held["id"].as_str().unwrap())
+        .unwrap();
+    let mut value = serde_json::to_value(s.instance_config()).unwrap();
+    value["attention"]
+        .as_object_mut()
+        .unwrap()
+        .remove("uncertain_turns_per_hour");
+    let mut config: InstanceConfig = serde_json::from_value(value).unwrap();
+    config.enabled = true;
+    config.setup_complete = true;
+    config.backend = Some(agent_instance::config::BackendConfig {
+        command: "attention-fixture-no-engine-dispatch".into(),
+        args: vec![],
+        env: Default::default(),
+        secret_env: Default::default(),
+        working_directory: _home.path().to_string_lossy().into_owned(),
+        allowed_working_roots: vec![],
+    });
+    config.attention.as_mut().unwrap().turns_per_hour = 2;
+    agent_instance::server::replace_config(&s, 1, config, "fixture").unwrap();
+    assert!(attention::consume(&s, "p", "c", "session", &held, None).is_err());
+    assert_eq!(
+        offer(s.clone(), "original-held").await["reason"],
+        "duplicate"
+    );
+    assert_eq!(
+        s.get_record("attention_events", held["id"].as_str().unwrap())
+            .unwrap(),
+        before
+    );
+    let fresh = offer(s.clone(), "fresh-after-change").await;
+    let id = attention::consume(&s, "p", "c", "session", &fresh, None).unwrap();
+    attention::forwarded(&s, &id).unwrap();
+    let excess = offer(s.clone(), "still-overall-bounded").await;
+    assert!(attention::consume(&s, "p", "c", "session", &excess, None).is_err());
+    assert_eq!(
+        attention::report(&s).unwrap()["counts"]["status:admitted"],
+        2
+    );
+    server.abort();
 }
