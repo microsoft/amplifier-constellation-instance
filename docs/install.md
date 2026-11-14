@@ -1,6 +1,6 @@
 # Install one agent
 
-For native macOS and Windows, including update/rollback and mobile browser access, see [Native platforms](native-platforms.md).
+For native downloads on Windows, macOS or Linux, see [Consumer packages](native-platforms.md#consumer-packages). The source installer below is a separate path for developers and server administrators.
 
 The installer creates one independent agent ready for identity setup. It gives that agent its own folder, executable, pinned Constellation Rust ACP runtime, state, TLS certificate, credentials, port and user service. It installs the working engine automatically; choosing executable paths and writing JSON are advanced options.
 
@@ -180,7 +180,7 @@ The command connects to the already running individual. The dashboard and `endpo
 - **PAM login denied:** use the installing user's account and inspect the host's account policy. Unsupported multi-step/MFA conversations require an authentication enhancement; disabling PAM policy is not a workaround.
 - **Certificate warning:** inspect the printed SHA-256 fingerprint and trust the intended certificate, or configure an appropriate certificate. A reachable port is not enough to establish the server's identity.
 - **Port unavailable:** inspect `config.json` through the configuration interface and choose an available port; update clients deliberately.
-- **Runtime missing:** select Install runtime in setup, or run `backend install`. Python 3 and HTTPS access to nodejs.org and registry.npmjs.org are needed. Other installed agents are unaffected.
+- **Runtime missing:** follow [default-runtime recovery](#default-runtime-and-account-recovery) for Constellation; it uses the pinned native release, not Node/npm packages. Native consumer bundles include setup Python; source installations need Python 3. Only the explicitly selected Codex backend needs the documented Node/npm downloads. Keep other selected ACP engines on their own installation path. Other installed agents are unaffected.
 - **ChatGPT connection missing or expired:** connect again from setup/dashboard. Device-code login needs the account/workspace setting enabled. Account readiness is separate from successful model execution and available quota.
 - **Backend tools fail under AppArmor:** the agent service may still be healthy while its selected backend lacks required host capabilities. Inspect that backend's diagnostics. Any host policy change is a separate reviewed administrator action; this installer does not relax global user-namespace restrictions or install AppArmor exceptions.
 - **Service stops after logout:** use the printed explicit linger command when persistent background operation is intended.

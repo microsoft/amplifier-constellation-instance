@@ -251,7 +251,7 @@ pub async fn organization_put(
     )?;
     Ok(Json(value))
 }
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NewWork {
     pub title: String,
@@ -260,6 +260,7 @@ pub struct NewWork {
     pub audience: Option<Audience>,
     pub source: Option<Source>,
     pub due_at: Option<i64>,
+    pub request_id: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -347,10 +348,72 @@ pub fn create_work(
     actor: &str,
     binding: Option<&Value>,
 ) -> ApiResult<Value> {
+    create_work_with_input(state, body, actor, binding, None)
+}
+
+fn creation_binding(binding: Option<&Value>) -> Value {
+    binding.map_or(Value::Null, |b| {
+        json!({"provider_id":b["provider_id"],"conversation_id":b["conversation_id"],"thread_id":b["thread_id"],"actor_id":b["actor_id"],"owner":b["owner"]})
+    })
+}
+
+fn create_work_with_input(
+    state: &AppState,
+    body: NewWork,
+    actor: &str,
+    binding: Option<&Value>,
+    input: Option<&Value>,
+) -> ApiResult<Value> {
+    if let Some(request_id) = &body.request_id {
+        text(request_id, 512)?;
+    }
+    // Keep the original request fingerprint separate from the mutable work.
+    // The key identifies one creation, not every responsibility from a message.
+    let creation = body.request_id.as_ref().map(|request_id| {
+        // A renewed room grant may name another participant. Current access is
+        // checked separately; it must not turn recovery of the same originating
+        // input and creation request into another responsibility.
+        let origin = input.map_or_else(
+            || json!({"binding":creation_binding(binding)}),
+            |i| json!({"principal":i["principal"],"binding":creation_binding(Some(&i["binding"]))}),
+        );
+        let input_fingerprint = input.map(|i| {
+            json!({"principal":i["principal"],"sessionId":i["sessionId"],"inputId":i["inputId"],"sources":i["sources"],"binding":creation_binding(Some(&i["binding"]))})
+        });
+        json!({"request_id":request_id,
+            "key":auth::digest(&json!([actor,origin,request_id]).to_string()),
+            "fingerprint":auth::digest(&json!({"request":body,"source_input":input_fingerprint}).to_string())})
+    });
     let value = {
-        let db = state.db.lock().unwrap();
-        let value = work_value(state, &db, body, actor, binding)?;
-        write(&db, "work", value["id"].as_str().unwrap(), &value)?;
+        let mut db = state.db.lock().unwrap();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(creation) = &creation {
+            let previous: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM records WHERE collection='work' AND json_extract(value,'$.creation_request.key')=?1 LIMIT 1",
+                    [creation["key"].as_str().unwrap()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(raw) = previous {
+                let previous: Value = serde_json::from_str(&raw)
+                    .map_err(|_| ApiError::bad("Invalid stored responsibility record"))?;
+                accessible(&previous, binding)?;
+                if previous["creation_request"]["fingerprint"] != creation["fingerprint"] {
+                    return Err(ApiError::conflict(json!({"error":"work_request_changed"})));
+                }
+                return Ok(previous);
+            }
+        }
+        let mut value = work_value(state, &tx, body, actor, binding)?;
+        if let Some(creation) = creation {
+            value["creation_request"] = creation;
+        }
+        if let Some(input) = input {
+            value["source_input"] = input.clone();
+        }
+        write(&tx, "work", value["id"].as_str().unwrap(), &value)?;
+        tx.commit()?;
         value
     };
     state.event("work.created", json!({"id":value["id"],"actor":actor}))?;
@@ -967,6 +1030,7 @@ pub async fn import(
                 audience: Some(assignment.audience.clone()),
                 source: None,
                 due_at: None,
+                request_id: None,
             },
             &actor,
             None,
@@ -1001,11 +1065,22 @@ pub fn mcp_tools() -> Vec<Value> {
         json!({"name":"work_execution","description":"Inspect authorized background runs and their reports for one accessible responsibility. Reports are unverified; this tool cannot authorize, retry, or approve work.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
         json!({"name":"work_list","description":"Find your durable responsibilities and assignments accessible to this conversation. This is local work state, not a scheduler or proof of external completion.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
         json!({"name":"work_get","description":"Read one accessible responsibility, its goal, captured role instructions, progress, evidence and recorded review.","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"openWorldHint":false}}),
-        json!({"name":"work_create","description":"Record a proposed responsibility explicitly authorized by the user. Creating a record does not execute work or make a promise on the user's behalf. Audience is automatically restricted to this conversation (or private owner context).","inputSchema":{"type":"object","properties":{"title":{"type":"string"},"goal":{"type":"string"},"assignment_id":{"type":"string"}},"required":["title","goal"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}),
+        json!({"name":"work_create","description":"Record a proposed responsibility explicitly authorized by the user. Creating a record does not execute work or make a promise on the user's behalf. Audience is automatically restricted to this conversation (or private owner context). Use a stable request_id for one creation so a lost response can be recovered without duplicate work. To link a registered original input, supply its source_input_id and a request_id; never invent input identities. Different responsibilities from the same input need different request IDs.","inputSchema":{"type":"object","properties":{"title":{"type":"string"},"goal":{"type":"string"},"assignment_id":{"type":"string"},"request_id":{"type":"string","maxLength":512},"source_input_id":{"type":"string","maxLength":512}},"required":["title","goal"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}),
         json!({"name":"work_command","description":"Update accessible work using expected_revision. Commands: accept/start/block(reason)/resume/progress(summary)/amend(title,goal)/evidence(label,uri,kind artifact|test|review|source)/review/verify(outcome pass|fail,evidence_ids,note)/complete/cancel(reason)/reopen(reason). Optional completion_contract requires artifact_version(artifact,label,uri,version,sha256), then review_artifacts(brief_sha256,artifact_set_sha256,outcome,criterion_indices,evidence_ids,note) by its named reviewers. Requester freeze_brief and close require management authentication, not this conversation tool. Inspect work_get for current hashes, review round and zero-based acceptance criteria. Never invent execution or approval; evidence and reviews are authenticated reports, not independently verified by this store.","inputSchema":{"type":"object","properties":{"id":{"type":"string"},"expected_revision":{"type":"integer"},"command":{"type":"object"}},"required":["id","expected_revision","command"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}),
     ]
 }
 pub fn mcp_call(state: &AppState, binding: &Value, name: &str, args: &Value) -> ApiResult<Value> {
+    mcp_call_with_input(state, binding, name, args, None)
+}
+
+/// `input` is resolved by the authenticated context lease, never supplied by a tool caller.
+pub fn mcp_call_with_input(
+    state: &AppState,
+    binding: &Value,
+    name: &str,
+    args: &Value,
+    input: Option<&Value>,
+) -> ApiResult<Value> {
     let actor = format!("agent:{}", state.instance_config().instance_id);
     match name {
         "work_execution" => crate::scheduler::inspect_work(
@@ -1025,16 +1100,49 @@ pub fn mcp_call(state: &AppState, binding: &Value, name: &str, args: &Value) -> 
         ),
         "work_create" => {
             let mut body = args.clone();
-            if body.get("audience").is_some() || body.get("source").is_some() {
+            if body.get("audience").is_some()
+                || body.get("source").is_some()
+                || body.get("source_input").is_some()
+            {
                 return Err(ApiError::bad(
                     "Work tool audience is derived from this session",
                 ));
             }
+            let source_input_id = body
+                .as_object_mut()
+                .and_then(|o| o.remove("source_input_id"));
+            let input = if let Some(id) = source_input_id {
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| ApiError::bad("source_input_id must be a string"))?;
+                text(id, 512)?;
+                if body["request_id"].as_str().is_none() {
+                    return Err(ApiError::bad(
+                        "Linking an original input requires a creation request_id",
+                    ));
+                }
+                let input = input
+                    .filter(|i| {
+                        i["inputId"] == id && crate::context::same_binding(&i["binding"], binding)
+                    })
+                    .ok_or_else(|| {
+                        ApiError::bad(
+                            "Original input is not registered for this authenticated session",
+                        )
+                    })?;
+                Some(input)
+            } else {
+                None
+            };
             body["audience"] = json!(Audience::for_binding(binding));
             if binding["provider_id"].is_string() && binding["conversation_id"].is_string() {
-                body["source"] = json!({"provider_id":binding["provider_id"],"conversation_id":binding["conversation_id"],"message_id":null,"url":null});
+                let message_id = input
+                    .and_then(|i| i["sources"].as_array())
+                    .filter(|sources| sources.len() == 1)
+                    .map(|sources| &sources[0]["id"]);
+                body["source"] = json!({"provider_id":binding["provider_id"],"conversation_id":binding["conversation_id"],"message_id":message_id,"url":null});
             }
-            create_work(state, decode(body)?, &actor, Some(binding))
+            create_work_with_input(state, decode(body)?, &actor, Some(binding), input)
         }
         "work_command" => {
             let mut body = args.clone();

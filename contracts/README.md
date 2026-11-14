@@ -5,6 +5,12 @@ Start with the [vision](../docs/VISION.md) and the local
 [Constellation contracts](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md);
 Instance links them rather than defining another family policy.
 
+This service implements the [Agent Instance boundary](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md)
+using a selected-engine host. Its [ACP hosting profile](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/profiles/acp-hosting.md)
+applies to that arrangement. Conversations remain source-owned; connections bring
+platform participation and tools; experiences consume the exposed interfaces.
+These are collaborating roles, not a required process or repository layout.
+
 ## Technical interfaces
 
 These documents specify operations, schemas and compatibility. Read the boundary

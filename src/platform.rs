@@ -22,6 +22,56 @@ pub fn python() -> &'static str {
     if cfg!(windows) { "python" } else { "python3" }
 }
 
+/// Consumer installations carry their interpreter. A damaged private copy is
+/// an installation error, never permission to silently use another Python.
+pub fn installation_python(home: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    let lock: serde_json::Value =
+        serde_json::from_str(include_str!("../scripts/vendor/python/lock.json"))?;
+    let expected_executable = if cfg!(windows) {
+        "python.exe"
+    } else {
+        "bin/python3.13"
+    };
+    let metadata = home.join("install.json");
+    let installed: serde_json::Value = if metadata.is_file() {
+        serde_json::from_slice(&std::fs::read(metadata)?)?
+    } else {
+        serde_json::Value::Null
+    };
+    let recorded = installed.get("private_python");
+    let directory = if let Some(recorded) = recorded {
+        let directory = recorded["directory"].as_str().unwrap_or("");
+        anyhow::ensure!(
+            directory.starts_with("python-")
+                && !directory.contains("..")
+                && directory
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-')
+                && recorded["executable"] == expected_executable,
+            "Invalid private interpreter metadata"
+        );
+        directory
+    } else {
+        lock["directory"].as_str().unwrap()
+    };
+    let root = home.join("support").join(directory);
+    anyhow::ensure!(
+        !home.join("support").is_symlink() && !root.is_symlink(),
+        "The installation's private Python directory must not be a link"
+    );
+    if recorded.is_some() || root.exists() {
+        let executable = root.join(expected_executable);
+        anyhow::ensure!(
+            executable.is_file() && !executable.is_symlink(),
+            "The installation's private Python is incomplete; repair its consumer bundle"
+        );
+        return Ok(executable);
+    }
+    // Bare developer executables and established installations retain their
+    // existing setup. Consumer setup always stages the private copy first.
+    Ok(python().into())
+}
+
 pub fn executable(name: &str) -> String {
     if cfg!(windows) {
         format!("{name}.exe")
@@ -521,5 +571,60 @@ pub mod windows {
                 "fixture-only".into()
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod private_python_tests {
+    use super::*;
+
+    #[test]
+    fn private_runtime_is_preferred_and_incomplete_copy_does_not_fall_back() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            installation_python(home.path()).unwrap(),
+            std::path::PathBuf::from(python())
+        );
+        let root = home.path().join("support/python-3.13.18-20261110");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(installation_python(home.path()).is_err());
+        let executable = root.join(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "bin/python3.13"
+        });
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"fixture only").unwrap();
+        assert_eq!(installation_python(home.path()).unwrap(), executable);
+    }
+    #[test]
+    fn recorded_interpreter_survives_new_binary_lock_and_never_falls_back() {
+        let home = tempfile::tempdir().unwrap();
+        let relative = if cfg!(windows) {
+            "python.exe"
+        } else {
+            "bin/python3.13"
+        };
+        let directory = "python-3.13.17-retained";
+        let executable = home.path().join("support").join(directory).join(relative);
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, b"retained interpreter").unwrap();
+        let metadata =
+            serde_json::json!({"private_python":{"directory":directory,"executable":relative}});
+        std::fs::write(
+            home.path().join("install.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(installation_python(home.path()).unwrap(), executable);
+        std::fs::remove_file(executable).unwrap();
+        assert!(installation_python(home.path()).is_err());
+        let invalid = serde_json::json!({"private_python":{"directory":"python-../../outside","executable":relative}});
+        std::fs::write(
+            home.path().join("install.json"),
+            serde_json::to_vec(&invalid).unwrap(),
+        )
+        .unwrap();
+        assert!(installation_python(home.path()).is_err());
     }
 }

@@ -17,6 +17,28 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Install or update from the complete native consumer package. No developer tools required.
+    Setup {
+        #[arg(default_value = "install", value_parser = ["install", "update", "rollback", "inspect"])]
+        action: String,
+        #[arg(long, default_value = "New agent")]
+        name: String,
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        no_service: bool,
+        #[arg(long)]
+        no_browser: bool,
+        /// Create the installation without configuring an engine yet.
+        #[arg(long)]
+        skip_runtime: bool,
+        #[arg(long, default_value = "native", value_parser = ["native", "codex"])]
+        engine: String,
+        #[arg(long)]
+        runtime_binary: Option<PathBuf>,
+    },
     Init {
         #[arg(long)]
         name: String,
@@ -215,6 +237,45 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     match cli.command {
+        Command::Setup {
+            action,
+            name,
+            bind,
+            port,
+            no_service,
+            no_browser,
+            skip_runtime,
+            engine,
+            runtime_binary,
+        } => {
+            let mut args = vec![
+                action,
+                "--name".into(),
+                name,
+                "--bind".into(),
+                bind,
+                "--port".into(),
+                port.to_string(),
+                "--engine".into(),
+                engine,
+            ];
+            for (enabled, option) in [
+                (no_service, "--no-service"),
+                (no_browser, "--no-browser"),
+                (skip_runtime, "--skip-runtime"),
+            ] {
+                if enabled {
+                    args.push(option.into());
+                }
+            }
+            if let Some(binary) = runtime_binary {
+                args.extend([
+                    "--runtime-binary".into(),
+                    binary.to_string_lossy().into_owned(),
+                ]);
+            }
+            agent_instance::consumer::run(&cli.home, args)
+        }
         Command::Init {
             name,
             owner,
@@ -352,9 +413,10 @@ async fn main() -> Result<()> {
                 &staging.join("install.py"),
                 include_bytes!("../ops/updates/install.py"),
             )?;
-            let python = if cfg!(windows) { "python" } else { "python3" };
+            let python = agent_instance::platform::installation_python(&cli.home)?;
             let mut cmd = std::process::Command::new(python);
-            cmd.arg("-I")
+            cmd.args(["-I", "-X", "utf8"])
+                .arg("-B")
                 .arg(staging.join("install.py"))
                 .arg("--home")
                 .arg(&cli.home);

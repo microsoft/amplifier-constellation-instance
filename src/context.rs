@@ -52,6 +52,7 @@ pub struct Lease {
     pub binding: Value,
     pub auth_headers: Option<HeaderMap>,
     pub expires_at: i64,
+    pub source_session: Option<(String, String)>,
 }
 #[derive(Clone)]
 pub struct Prepared {
@@ -321,7 +322,7 @@ async fn authorize(state: &AppState, access: &Access) -> Result<Value> {
         }
     }
 }
-fn same_binding(a: &Value, b: &Value) -> bool {
+pub(crate) fn same_binding(a: &Value, b: &Value) -> bool {
     ["provider_id", "conversation_id", "thread_id", "owner"]
         .iter()
         .all(|key| a[*key] == b[*key])
@@ -438,6 +439,7 @@ pub async fn prepare(
                 binding: binding.clone(),
                 auth_headers: auth_headers.cloned(),
                 expires_at: now_ms() + LEASE_MS,
+                source_session: None,
             },
         );
     }
@@ -457,6 +459,18 @@ pub fn revoke_connection(state: &AppState, connection: &str) {
 pub fn bind(state: &AppState, prepared: &Prepared, sid: &str) -> Result<()> {
     if state.get_record("context_bindings", sid)?.is_none() {
         state.set_record("context_bindings", sid, prepared.binding.clone())?;
+    }
+    Ok(())
+}
+pub fn bind_source_session(
+    state: &AppState,
+    prepared: &Prepared,
+    sid: &str,
+    principal: &str,
+) -> Result<()> {
+    bind(state, prepared, sid)?;
+    if let Some(lease) = state.context_leases.lock().unwrap().get_mut(&prepared.hash) {
+        lease.source_session = Some((principal.into(), sid.into()));
     }
     Ok(())
 }
@@ -704,7 +718,26 @@ async fn call_tool(state: &AppState, hash: &str, lease: &Lease, body: &Value) ->
             crate::memory::mcp_call(state, &lease.binding, name, args).map_err(|e| anyhow!(e.1))
         }
         Some(name) if name.starts_with("work_") => {
-            crate::work::mcp_call(state, &lease.binding, name, args).map_err(|e| anyhow!(e.1))
+            let input = if name == "work_create" && args.get("source_input_id").is_some() {
+                let id = args["source_input_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("Invalid source_input_id"))?;
+                let (principal, sid) = lease
+                    .source_session
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Load this session before linking source input"))?;
+                Some(crate::source_delivery::registered_input(
+                    state,
+                    principal,
+                    sid,
+                    id,
+                    &lease.binding,
+                )?)
+            } else {
+                None
+            };
+            crate::work::mcp_call_with_input(state, &lease.binding, name, args, input.as_ref())
+                .map_err(|e| anyhow!(e.1))
         }
         _ => Err(anyhow!("Unknown continuity tool")),
     }

@@ -1,6 +1,6 @@
 [package]
 name = "agent-instance"
-version = "0.21.3"
+version = "0.22.3"
 edition = "2024"
 rust-version = "1.88"
 publish = false
@@ -21,7 +21,7 @@ clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
 dunce = "1"
 futures-util = "0.3"
-get_if_addrs = "0.5"
+if-addrs = "0.15"
 libc = "0.2"
 rand = "0.8"
 rcgen = { version = "0.14", features = ["x509-parser"] }

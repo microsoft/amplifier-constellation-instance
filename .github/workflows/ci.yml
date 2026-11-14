@@ -33,12 +33,15 @@ jobs:
           python3 ops/updates/test_participants.py
           python3 ops/updates/test_engine_provider.py
           python3 ops/updates/test_install_updates.py
+          python3 ops/updates/test_enrollment_race.py
       - name: Check installation contracts
         run: python3 scripts/test-installation.py
       - name: Check release retries preserve published assets
         run: python3 scripts/test-upload-release.py
       - name: Check runtime provisioning boundaries
         run: python3 scripts/test-provisioning.py
+      - name: Check consumer bundle integrity boundaries
+        run: python3 scripts/test-consumer-bundle.py
       - name: Check formatting
         run: cargo +1.93.0 fmt --all -- --check
       - name: Test
@@ -60,6 +63,11 @@ jobs:
         env:
           AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
         run: node ui/tests/updates.mjs && node ui/tests/service-connections.mjs
+      - name: Check client view intent across concurrent edits
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          UI_TEST_VIEW_INTENT_ONLY: '1'
+        run: node ui/tests/fixture.mjs
       - name: Check owner development setup and programmable view
         if: matrix.runner == 'ubuntu-24.04'
         env:
@@ -82,6 +90,11 @@ jobs:
       - name: Package verified candidate
         run: |
           python3 scripts/package-release.py --binary target/release/agent-instance --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
+      - name: Package and verify consumer setup without developer tools
+        run: |
+          target="$(rustc +1.93.0 -vV | sed -n 's/^host: //p')"
+          python3 scripts/package-consumer.py --binary target/release/agent-instance --output dist --target "$target" --commit "$(git rev-parse HEAD)" --cache "$RUNNER_TEMP/private-python"
+          python3 tests/consumer_bundle_live.py --bundle "dist/agent-instance-consumer-$target.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
@@ -92,11 +105,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel, windows-2025]
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            python_arch: arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            python_arch: x64
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            python_arch: x64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            python_arch: arm64
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
         shell: bash
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
         with:
@@ -104,6 +133,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+          architecture: ${{ matrix.python_arch }}
       - name: Install Rust
         run: rustup toolchain install 1.93.0 --profile minimal --component clippy
       - name: Include the Windows OpenSSL test tool
@@ -113,8 +143,11 @@ jobs:
         run: |
           python ops/updates/test_worker.py
           python ops/updates/test_github_metadata.py
+          python ops/updates/test_install_updates.py
+          python ops/updates/test_enrollment_race.py
           python scripts/test-native-installation.py
           python scripts/test-provisioning.py
+          python scripts/test-consumer-bundle.py
       - name: Test native executable and process boundaries
         run: cargo +1.93.0 test --locked
       - name: Lint native code
@@ -124,7 +157,15 @@ jobs:
       - name: Package verified candidate
         run: |
           suffix=""; if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
-          python scripts/package-release.py --binary "target/release/agent-instance${suffix}" --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
+          python scripts/package-release.py --binary "target/${{ matrix.target }}/release/agent-instance${suffix}" --output dist --target "$(rustc +1.93.0 -vV | sed -n 's/^host: //p')" --commit "$(git rev-parse HEAD)"
+          python scripts/package-consumer.py --binary "target/${{ matrix.target }}/release/agent-instance${suffix}" --output dist --target "${{ matrix.target }}" --commit "$(git rev-parse HEAD)" --cache "$RUNNER_TEMP/private-python"
+          python tests/consumer_bundle_live.py --bundle "dist/agent-instance-consumer-${{ matrix.target }}.zip"
+      - name: Verify real current-user startup and same-home update/rollback
+        run: |
+          suffix=""; if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          binary="target/${{ matrix.target }}/release/agent-instance${suffix}"
+          python scripts/build-consumer-baseline.py --binary "$binary" --output "$RUNNER_TEMP/consumer-baseline"
+          python tests/consumer_startup_live.py --bundle "dist/agent-instance-consumer-${{ matrix.target }}.zip" --baseline "$RUNNER_TEMP/consumer-baseline/agent-instance${suffix}"
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}

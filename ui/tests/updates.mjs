@@ -40,7 +40,7 @@ try{
  value=await call('GET','updates');assert.equal(value.request.action,'check');assert.equal(value.request.pending,true);
  await call('POST','updates/report',{status:{state:'up_to_date'},finished_request:value.request.id});
  await page.evaluate(()=>window.agentInstanceControl.perform('refresh'));
- await page.locator('[data-action="updates.update"]').click();value=await call('GET','updates');assert.equal(value.request.action,'update');
+ const [queued]=await Promise.all([page.waitForResponse(r=>new URL(r.url()).pathname==='/api/v1/updates'&&r.request().method()==='POST'),page.locator('[data-action="updates.update"]').click()]);assert(queued.ok(),await queued.text());value=await call('GET','updates');assert.equal(value.request.action,'update');
  pass('Check and update use the durable service API');
  await page.setViewportSize({width:390,height:844});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
  const view=await page.evaluate(()=>window.agentInstanceControl.getState());

@@ -10,11 +10,14 @@ const artifacts = process.env.UI_TEST_ARTIFACTS || await fs.mkdtemp(path.join(os
 await fs.mkdir(artifacts, { recursive: true });
 const dir=fileURLToPath(new URL('../', import.meta.url));
 const prefix='/embedded/alpha/';
-const requests=[], streams=new Set(), events=[];
-const config={schema_version:1,instance_id:'fixture-instance',name:'New agent',purpose:'',instructions:'',owner:'fixture-owner',setup_complete:false,enabled:false,server:{bind:'0.0.0.0',port:41411,welcome_port:41412,public_url:null,pam_service:'agent-instance',embed_origins:[],certificate_file:null,private_key_file:null},backend:{command:'/agent/runtime/bin/codex-acp',args:[],env:{},secret_env:{},working_directory:'${AGENT_HOME}/workspace',allowed_working_roots:['${AGENT_HOME}/workspace']},limits:{max_connections:8,max_frame_bytes:4194304,backend_start_timeout_seconds:30,idle_timeout_seconds:1800,event_retention:10000}};
+const viewIntentOnly=process.env.UI_TEST_VIEW_INTENT_ONLY==='1';
+const requests=[], streams=new Set(), events=[], missingRoutes=[];
+const config={schema_version:1,instance_id:'fixture-instance',name:'New agent',purpose:'',instructions:'',attention:null,owner:'fixture-owner',setup_complete:false,enabled:false,server:{bind:'0.0.0.0',port:41411,welcome_port:41412,public_url:null,pam_service:'agent-instance',embed_origins:[],certificate_file:null,private_key_file:null},backend:{command:'/agent/runtime/bin/codex-acp',args:[],env:{},secret_env:{},working_directory:'${AGENT_HOME}/workspace',allowed_working_roots:['${AGENT_HOME}/workspace']},limits:{max_connections:8,max_frame_bytes:4194304,backend_start_timeout_seconds:30,idle_timeout_seconds:1800,event_retention:10000}};
 let revision=1, loggedIn=false, view=null, profiles={}, secrets={}, tokens=[], sequence=0, accountReady=false, accountState='idle', runtimeInstalled=true;
 let profilePackage={revision:0,active:null,previous:[]};
-let delayedProfileApply=null;
+let delayedProfileApply=null,delayedProfileWrite=null;
+let beforeViewWrite=null;
+if(viewIntentOnly){config.setup_complete=true;config.enabled=true;loggedIn=true;accountReady=true;}
 const profileSnapshots=new Map();
 const digest=text=>createHash('sha256').update(text).digest('hex');
 function saveProfileVersion(source=null,kind='manual'){
@@ -40,7 +43,7 @@ const server=http.createServer(async(req,res)=>{
  const send=(v,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(v));};
  if(!path.startsWith(prefix))return send({error:'Wrong prefix'},404);
  let endpoint=path.slice(prefix.length);
- if(!endpoint.startsWith('api/v1/')){const file=endpoint||'index.html';try{const text=await fs.readFile(`${dir}/${file}`);res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:"});return res.end(text);}catch{return send({error:'missing'},404);}}
+ if(!endpoint.startsWith('api/v1/')){const file=endpoint||'index.html';try{const text=await fs.readFile(file==='app.js'&&process.env.UI_TEST_APP_JS?process.env.UI_TEST_APP_JS:`${dir}/${file}`);res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:"});return res.end(text);}catch{return send({error:'missing'},404);}}
  endpoint=endpoint.slice(7);
  if(endpoint==='auth/login'){loggedIn=true;return send({owner:'fixture-owner',csrf:'fixture-csrf'});}
  if(endpoint==='auth/session')return send(loggedIn?{owner:'fixture-owner',csrf:'fixture-csrf'}:{error:'Sign in'},loggedIn?200:401);
@@ -48,6 +51,9 @@ const server=http.createServer(async(req,res)=>{
  if(req.method!=='GET'&&req.headers['x-csrf-token']!=='fixture-csrf')return send({error:'Missing CSRF'},403);
  if(endpoint==='auth/logout'){loggedIn=false;return send({ok:true});}
  if(endpoint==='config'){if(req.method==='PUT'){if(data.expected_revision!==revision)return send({error:'Config conflict'},409);Object.assign(config,data.config);revision++;}return send({revision,config});}
+ if(endpoint==='updates')return send({policy:{enabled:false},components:[],history:[]});
+ if(endpoint==='service-connections')return send({schema:1,services:[],connections:[],observed_at:0,helper_connected:false,request:null,last_operation:null});
+ if(endpoint==='development')return send({config_revision:revision,github:{configured:false,verification:null,local_clients_enabled:false,credential_boundary:'GitHub access follows the connected credential. Tool selection does not restrict repositories.'},environment:{kind:'external_acp_backend',build_verified:false,message:'Execution is provided by the connected agent. A project build has not been verified.'},ready_to_develop:false});
  if(endpoint==='schema')return send({type:'object'});
  if(endpoint==='identity')return send({avatar_revision:0,avatar:{kind:'default'}});
  if(endpoint==='identity/avatar'){res.writeHead(200,{'Content-Type':'image/png'});return res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8ZUAAAAASUVORK5CYII=','base64'));}
@@ -73,7 +79,7 @@ const server=http.createServer(async(req,res)=>{
  if(endpoint==='connections')return send([{id:'connection-one',client_name:'Example ACP client',transport:'stdio',state:'connected'}]);
  if(endpoint==='sessions')return send([{id:'session-one',title:'A useful task',last_connection_id:'connection-one',cwd:'/agent/work',status:'idle'}]);
  if(endpoint==='sessions/session-one')return send({id:'session-one',cwd:'/agent/work',state:'idle',model:'example'});
- if(endpoint.startsWith('profiles/')){const name=endpoint.slice(9);if(req.method==='PUT'){profiles[name]=data.text;if(name!=='identity')saveProfileVersion();}return send({text:profiles[name]||''});}
+ if(endpoint.startsWith('profiles/')){const name=endpoint.slice(9);if(req.method==='PUT'){if(delayedProfileWrite){const pending=delayedProfileWrite;delayedProfileWrite=null;pending.entered();await pending.resume;}profiles[name]=data.text;if(name!=='identity')saveProfileVersion();}return send({text:profiles[name]||''});}
  if(endpoint==='profile-package'||endpoint==='profile-package/restore'){
   if(req.method==='POST'){
    if(delayedProfileApply){const pending=delayedProfileApply;delayedProfileApply=null;pending.entered();await pending.resume;}
@@ -95,16 +101,19 @@ const server=http.createServer(async(req,res)=>{
  if(endpoint.startsWith('tokens/')){tokens=[];return send({ok:true});}
  if(endpoint==='lifecycle'){config.enabled=data.action==='start';revision++;return send({enabled:config.enabled});}
  if(endpoint==='views'&&req.method==='POST'){view={id:'view-one',revision:1,state:{route:config.setup_complete?'dashboard':'setup',step:0,selected_session:null,filters:{},draft:{},focus:null,scroll:{x:0,y:0},modal:null}};return send(view);}
+ if(beforeViewWrite && (endpoint==='views/view-one'&&req.method==='PATCH'||endpoint==='views/view-one/commands')){const hook=beforeViewWrite;if(!hook.matches||hook.matches(data,endpoint)){beforeViewWrite=null;await hook(data,endpoint);}}
  if(endpoint==='views/view-one'){if(req.method==='PATCH'){if(data.expected_revision!==view.revision)return send({error:'View conflict'},409);view.state=data.state;view.revision++;emit('view.changed',{id:view.id,revision:view.revision});}return send(view);}
  if(endpoint==='views/view-one/commands'){if(data.expected_revision!==view.revision)return send({error:'View conflict'},409);apply(data.command);return send(view);}
  if(endpoint==='views/view-one/ack'){view.ack=data;return send(view);}
- return send({error:`No fixture ${endpoint}`},404);
+ missingRoutes.push(endpoint);return send({error:`No fixture ${endpoint}`},404);
 });
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const origin=`http://127.0.0.1:${server.address().port}`;
 const browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE ? {executablePath:process.env.CHROMIUM_EXECUTABLE} : {}),args:['--no-sandbox']});
 const page=await browser.newPage({viewport:{width:1440,height:1050}});const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error'&&!m.text().includes('401')&&!m.text().includes('409'))errors.push(m.text());});
 try{
+ if(viewIntentOnly){await page.goto(origin+prefix);await page.locator('[data-control="nav.configuration"]').waitFor();for(let n=0;!streams.size&&n<100;n++)await page.waitForTimeout(20);assert(streams.size,'Fixture event stream connected');}
+ else {
  await page.goto(origin+prefix);assert.equal(await page.locator('[data-control="certificate.help"]').getAttribute('href'),'welcome');await page.locator('input[name=username]').fill('fixture-owner');await page.locator('input[name=password]').fill('fixture-login-password');await page.locator('[data-action="auth.login"]').click();
  assert.equal(await page.locator('[data-draft="config.backend.command"]').count(),0);
  await page.locator('[data-draft="config.name"]').fill('Atlas');await page.locator('[data-draft="config.purpose"]').fill('Explore useful ideas with a small team.');await page.locator('[data-action="setup.next"]').click();
@@ -155,8 +164,109 @@ try{
  await page.locator('[data-action="token.new"]').click();await page.locator('[data-draft="access.token_name"]').fill('My client');await page.locator('[data-draft="access.token_scopes.profiles"]').check();await page.locator('[data-draft="access.token_scopes.tools:use"]').check();await page.locator('[data-action="token.create"]').click();await page.locator('[data-token-once]').waitFor();assert.equal(await page.locator('[data-token-once]').inputValue(),'fixture-one-time-token');assert(tokens[0].scopes.includes('profiles'));assert(tokens[0].scopes.includes('tools:use'));await page.locator('[data-action="modal.close"]').last().click();
  const telemetry=JSON.stringify(requests.filter(r=>r.path.includes('/views')));assert(!telemetry.includes('fixture-secret-value'));assert(!telemetry.includes('fixture-login-password'));assert(!telemetry.includes('fixture-one-time-token'));assert(!telemetry.includes('FIXTURE-CODE'));assert(!telemetry.includes('fixture-login'));assert(requests.some(r=>r.path.endsWith('/backend/install')&&r.method==='POST'));assert(requests.some(r=>r.path.endsWith('/activity')&&r.query.includes('category=problems')));assert(!JSON.stringify(view).includes('fixture-secret-value'));assert(view.ack);
  assert(!telemetry.includes('private-import-evidence-marker'));assert(!telemetry.includes('Imported voice unique marker.'));assert(!telemetry.includes('Imported working guidance unique marker.'));
+ }
+ // Production client wrappers must preserve newer intent, even when a conflict arrives mid-command.
+ apply({type:'navigate',route:'configuration'});apply({type:'set_draft',path:'config.purpose',value:'Original purpose'});
+ await page.waitForFunction(revision=>window.agentInstanceControl.getState().revision===revision,view.revision);
+ const firstWrite=requests.length;
+ beforeViewWrite=()=>apply({type:'set_draft',path:'config.purpose',value:'Newer remote purpose'});
+ const staleCommand=await page.evaluate(async()=>{try{await window.agentInstanceControl.setDraft('config.purpose','Older queued purpose');return null;}catch(e){return e.message;}});
+ assert(staleCommand,'Conflicting old command must report the conflict');
+ assert.equal(view.state.draft.config.purpose,'Newer remote purpose','A stale command must not overwrite newer same-field intent');
+ assert.equal(requests.slice(firstWrite).filter(r=>r.body?.command?.value==='Older queued purpose').length,1,'Conflicting command must not be reposted');
+ // Unrelated newer changes are compatible with the original command's affected fields.
+ beforeViewWrite=()=>apply({type:'set_filter',key:'unrelated_fixture',value:'Keep this newer field'});
+ await page.evaluate(()=>window.agentInstanceControl.setDraft('config.purpose','Compatible purpose'));
+ assert.equal(view.state.draft.config.purpose,'Compatible purpose');assert.equal(view.state.filters.unrelated_fixture,'Keep this newer field');
+ // Focus is protected just like draft text; a fresh revision is not fresh intent.
+ beforeViewWrite=()=>apply({type:'focus',target:'config.instructions'});
+ const staleFocus=await page.evaluate(async()=>{try{await window.agentInstanceControl.command({type:'focus',target:'config.purpose'});return null;}catch(e){return e.message;}});
+ assert(staleFocus);assert.equal(view.state.focus,'config.instructions');
+ // patchView must not rerun an unguarded namespace cleanup on newer state.
+ beforeViewWrite=()=>apply({type:'set_draft',path:'config.instructions',value:'New draft during cleanup'});
+ const staleCleanup=await page.evaluate(async()=>{try{await window.agentInstanceControl.perform('draft.discard');return null;}catch(e){return e.message;}});
+ assert(staleCleanup,'A stale cleanup must report conflict');assert.equal(view.state.draft.config.instructions,'New draft during cleanup');
+ // A command waiting behind another local request retains its original observed intent.
+ let releaseViewWrite,enteredViewWrite;
+ const heldWrite=new Promise(resolve=>enteredViewWrite=resolve),releaseWrite=new Promise(resolve=>releaseViewWrite=resolve);
+ beforeViewWrite=async()=>{enteredViewWrite();await releaseWrite;};
+ const waiting=page.evaluate(()=>{
+  const first=window.agentInstanceControl.command({type:'set_filter',key:'queue_fixture',value:true});
+  const second=window.agentInstanceControl.setDraft('config.purpose','Old waiting purpose');
+  return Promise.allSettled([first,second]).then(rows=>rows.map(r=>({status:r.status,error:r.reason?.message})));
+ });
+ await heldWrite;apply({type:'set_draft',path:'config.purpose',value:'Newer purpose before queued dispatch'});
+ await page.waitForFunction(revision=>window.agentInstanceControl.getState().revision===revision,view.revision);
+ releaseViewWrite();const queueResults=await waiting;
+ assert.equal(queueResults[0].status,'fulfilled','Unrelated queued filter can reconcile');assert.equal(queueResults[1].status,'rejected','Queued intent must not acquire a fresh base silently');
+ assert.equal(view.state.draft.config.purpose,'Newer purpose before queued dispatch');
+ // Unrelated local fields may share a newly created draft namespace.
+ await page.evaluate(()=>Promise.all([window.agentInstanceControl.setDraft('access.secret_name','A reference name'),window.agentInstanceControl.setDraft('access.token_name','A token label')]));
+ assert.equal(view.state.draft.access.secret_name,'A reference name');assert.equal(view.state.draft.access.token_name,'A token label');
+ // Local edits keep their own causal order while still rejecting outside changes.
+ let releaseLocal,enteredLocal;const localEntered=new Promise(resolve=>enteredLocal=resolve),localRelease=new Promise(resolve=>releaseLocal=resolve);
+ beforeViewWrite=async()=>{enteredLocal();await localRelease;};
+ const localWrites=page.evaluate(()=>Promise.all([window.agentInstanceControl.setDraft('config.purpose','Local first'),window.agentInstanceControl.setDraft('config.purpose','Local second')]));
+ await localEntered;releaseLocal();await localWrites;assert.equal(view.state.draft.config.purpose,'Local second');
+ // Real typing can queue a newer value while its earlier save is in flight.
+ await page.evaluate(()=>window.agentInstanceControl.command({type:'focus',target:'config.purpose'}));
+ let releaseTyped,enteredTyped;const typedEntered=new Promise(resolve=>enteredTyped=resolve),typedRelease=new Promise(resolve=>releaseTyped=resolve);
+ beforeViewWrite=async()=>{enteredTyped();await typedRelease;};beforeViewWrite.matches=data=>data.command?.type==='set_draft'&&data.command.path==='config.purpose';
+ await page.locator('[data-draft="config.purpose"]').fill('Typed first');await typedEntered;
+ await page.locator('[data-draft="config.purpose"]').fill('Typed second');releaseTyped();
+ await page.waitForFunction(()=>window.agentInstanceControl.getState().state.draft.config.purpose==='Typed second');assert.equal(view.state.draft.config.purpose,'Typed second');
+ // A same-route selection/revision change cannot redirect a delayed draft to other work.
+ await page.evaluate(()=>window.agentInstanceControl.command({type:'set_filter',key:'work_id',value:'work-A'}));
+ beforeViewWrite=()=>apply({type:'set_filter',key:'work_id',value:'work-B'});
+ const changedWork=await page.evaluate(async()=>{try{await window.agentInstanceControl.setDraft('work.goal','Draft for work A');return null;}catch(e){return e.message;}});
+ assert(changedWork);assert.equal(view.state.filters.work_id,'work-B');assert.equal(view.state.draft.work?.goal,undefined);
+ await page.evaluate(()=>window.agentInstanceControl.command({type:'set_filter',key:'work_revision',value:1}));
+ beforeViewWrite=()=>apply({type:'set_filter',key:'work_revision',value:2});
+ const changedRevision=await page.evaluate(async()=>{try{await window.agentInstanceControl.setDraft('work.goal','Draft for revision 1');return null;}catch(e){return e.message;}});
+ assert(changedRevision);assert.equal(view.state.filters.work_revision,2);assert.equal(view.state.draft.work?.goal,undefined);
+ // A delayed typed draft remains local after conflict, without replacing the new shared value.
+ await page.locator('[data-draft="config.purpose"]').fill('Unsaved local purpose');
+ apply({type:'set_draft',path:'config.purpose',value:'Newest shared purpose'});
+ await page.waitForFunction(revision=>window.agentInstanceControl.getState().revision===revision,view.revision);
+ await page.waitForTimeout(650);
+ assert.equal(view.state.draft.config.purpose,'Newest shared purpose');
+ assert.equal(await page.locator('[data-draft="config.purpose"]').inputValue(),'Unsaved local purpose');
+ assert((await page.locator('[role="alert"]').allTextContents()).some(text=>text.includes('changed')),'Conflict must leave a visible explanation');
+ // Discard is a new explicit intent, and clears retained local drafts only after its view write succeeds.
+ await page.evaluate(()=>window.agentInstanceControl.perform('draft.discard'));
+ // Keep the existing expected-text profile cleanup: a new draft during package install wins.
+ apply({type:'navigate',route:'profiles'});await page.locator('[data-draft="profiles.communication"]').waitFor();
+ let releaseProfile,enteredProfile;const profileEntered=new Promise(resolve=>enteredProfile=resolve),profileRelease=new Promise(resolve=>releaseProfile=resolve);
+ delayedProfileApply={entered:enteredProfile,resume:profileRelease};
+ const packageRun=page.evaluate(({pkg,revision})=>window.agentInstanceControl.perform('profile.package.import',{package:pkg,expected_revision:revision}),{pkg:fixturePackage('intent-fixture','Installed profile text.','Working text.'),revision:profilePackage.revision});
+ await profileEntered;await page.evaluate(()=>window.agentInstanceControl.setDraft('profiles.communication','New draft during package install'));releaseProfile();await packageRun;
+ assert.equal(profiles.communication,'Installed profile text.');assert.equal(view.state.draft.profiles.communication,'New draft during package install');
+ await page.evaluate(()=>window.agentInstanceControl.perform('profile.discard',{profile:'communication'}));
+ // Ordinary profile save uses the same expected-text cleanup guard as package install.
+ await page.evaluate(()=>window.agentInstanceControl.setDraft('profiles.communication','Text being saved'));
+ let releaseSave,enteredSave;const saveEntered=new Promise(resolve=>enteredSave=resolve),saveRelease=new Promise(resolve=>releaseSave=resolve);
+ delayedProfileWrite={entered:enteredSave,resume:saveRelease};
+ const savingProfile=page.evaluate(()=>window.agentInstanceControl.perform('profile.save',{profile:'communication'}));
+ await saveEntered;await page.evaluate(()=>window.agentInstanceControl.setDraft('profiles.communication','New text while saving'));releaseSave();await savingProfile;
+ assert.equal(profiles.communication,'Text being saved');assert.equal(view.state.draft.profiles.communication,'New text while saving');
+ apply({type:'navigate',route:'access'});await page.waitForFunction(()=>window.agentInstanceControl.getState().state.route==='access');
+ // Saving a secret consumes its non-secret name draft before leaving that modal.
+ await page.evaluate(()=>window.agentInstanceControl.perform('secret.new'));
+ await page.locator('[data-draft="access.secret_name"]').fill('intent-fixture-secret');
+ await page.locator('[data-secret-input]').fill('fictional-secret-only-in-fixture');
+ await page.evaluate(()=>window.agentInstanceControl.perform('secret.save'));
+ assert.equal(secrets['intent-fixture-secret'],'fictional-secret-only-in-fixture');
+ // Debounce and a submit action can flush the very same draft while its first write waits.
+ await page.evaluate(()=>window.agentInstanceControl.perform('token.new'));
+ let releaseDuplicate,enteredDuplicate;const duplicateEntered=new Promise(resolve=>enteredDuplicate=resolve),duplicateRelease=new Promise(resolve=>releaseDuplicate=resolve);
+ beforeViewWrite=async()=>{enteredDuplicate();await duplicateRelease;};beforeViewWrite.matches=data=>data.command?.type==='set_draft'&&data.command.path==='access.token_name';
+ await page.locator('[data-draft="access.token_name"]').fill('One pending flush');await duplicateEntered;
+ const creatingToken=page.evaluate(()=>window.agentInstanceControl.perform('token.create'));
+ await page.waitForTimeout(40);releaseDuplicate();await creatingToken;
+ assert.equal(tokens.at(-1).name,'One pending flush');assert.equal(requests.filter(r=>r.body?.command?.value==='One pending flush').length,1);await page.locator('[data-token-once]').waitFor();
+ await page.evaluate(()=>window.agentInstanceControl.perform('modal.close'));
  // Untrusted postMessage cannot puppeteer the page.
  await page.evaluate(()=>window.postMessage({protocol:'agent-instance.ui/1',id:'untrusted',type:'command',command:{type:'navigate',route:'setup'}},location.origin));await page.waitForTimeout(250);assert.equal(view.state.route,'access');
  await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(artifacts, 'mobile.png'),fullPage:true});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1));
- assert(requests.every(r=>r.path.startsWith(prefix)));assert.equal(errors.length,0,JSON.stringify(errors));console.log(JSON.stringify({passed:true,checks:['prefix assets and API paths','account login flow against fixture','platform-appropriate sign-in description and settings','two-step default setup without technical fields','explicit account readiness and device sign-in','older setup-step and empty-runtime-draft migration with identity edits preserved','nonempty custom runtime draft preserved','missing runtime shown with one install action','optional advanced settings controlled locally and remotely','server-filtered meaningful activity despite 1200 newer diagnostics','category, search, problems and diagnostics filters','activity pagination','setup and runtime start','remote route and draft via SSE','configuration save','advanced connected-tool references and explicit use grant','remote session selection','empty persona reports not configured without a supplied badge','profile save','portable profile upload with malformed-file recovery','profile import and restore preserve separate identity','stale profile update requires explicit retry','restore protects unsaved profile edits','profile API actions work without native file picker','imported profiles and evidence absent from view telemetry','profiles-scoped token creation','profile version history remotely controlled and mobile layout','write-only secret','one-time token','no credentials in view telemetry','render acknowledgement','untrusted embedding rejected','mobile overflow','no browser exceptions'],screenshots:[path.join(artifacts, 'dashboard.png'),path.join(artifacts, 'mobile.png')]}));
-} finally {await browser.close();for(const r of streams)r.end();server.close();}
+ assert(requests.every(r=>r.path.startsWith(prefix)));assert.equal(errors.length,0,JSON.stringify(errors));console.log(JSON.stringify({passed:true,checks:viewIntentOnly?['production-wrapper same-field conflict without replay','unrelated-field reconciliation','namespace cleanup preserves newer drafts','queued intent keeps original base','delayed typed draft conflict preserves local text','newer focus retained','guarded profile cleanup retains newer draft','local queued same-field edits retain order','typing during in-flight draft save retains order','changed work selection and revision refuse stale draft','profile save retains newer draft','new draft namespace preserves separate local fields','debounce and submit coalesce the same draft flush','secret-name draft settles before opening token form','no browser exceptions']:['production-wrapper same-field conflict without replay','unrelated-field reconciliation','namespace cleanup preserves newer drafts','queued intent keeps original base','delayed typed draft conflict preserves local text','prefix assets and API paths','account login flow against fixture','platform-appropriate sign-in description and settings','two-step default setup without technical fields','explicit account readiness and device sign-in','older setup-step and empty-runtime-draft migration with identity edits preserved','nonempty custom runtime draft preserved','missing runtime shown with one install action','optional advanced settings controlled locally and remotely','server-filtered meaningful activity despite 1200 newer diagnostics','category, search, problems and diagnostics filters','activity pagination','setup and runtime start','remote route and draft via SSE','configuration save','advanced connected-tool references and explicit use grant','remote session selection','empty persona reports not configured without a supplied badge','profile save','portable profile upload with malformed-file recovery','profile import and restore preserve separate identity','stale profile update requires explicit retry','restore protects unsaved profile edits','profile API actions work without native file picker','imported profiles and evidence absent from view telemetry','profiles-scoped token creation','profile version history remotely controlled and mobile layout','write-only secret','one-time token','no credentials in view telemetry','render acknowledgement','untrusted embedding rejected','mobile overflow','no browser exceptions'],screenshots:viewIntentOnly?[path.join(artifacts,'mobile.png')]:[path.join(artifacts, 'dashboard.png'),path.join(artifacts, 'mobile.png')]}));
+} catch(error) {console.error(JSON.stringify({errors,missingRoutes,view,recentRequests:requests.slice(-10)},null,2));await page.screenshot({path:path.join(artifacts,"failure.png"),fullPage:true});throw error;} finally {await browser.close();for(const r of streams)r.end();server.close();}

@@ -496,6 +496,207 @@ impl Client {
 }
 
 #[tokio::test]
+async fn original_input_recovers_work_after_lost_replies_without_replay_or_widening_audience() {
+    use agent_instance::source_delivery as delivery;
+    let f = Fixture::new().await;
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let source = json!({"id":"message-17","revision":"edited-r2","occurredAt":agent_instance::state::now_ms()});
+    let args = json!({"title":"Check the proposal","goal":"Review the recorded proposal","source_input_id":"input-17","request_id":"creation-17-a"});
+    let prompt = json!({"sessionId":sid,"prompt":[{"type":"text","text":format!("CONTEXT_TOOL {}",json!({"name":"work_create","arguments":args}))}],"_meta":{delivery::META:{"version":1,"inputId":"input-17","sources":[source]}}});
+    // The fixture calls the actual HTTP MCP tool. The caller loses all response
+    // frames; only this test's independent record oracle waits for the commit.
+    client
+        .tx
+        .send(json!({"jsonrpc":"2.0","id":40,"method":"session/prompt","params":prompt}))
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(w) = f.state.list_records("work").unwrap().first() {
+                break w.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    client.close().await;
+    assert_eq!(first["state"], "proposed");
+    assert_eq!(first["source"]["message_id"], "message-17");
+    assert_eq!(first["source_input"]["sources"], json!([source]));
+
+    let mut client = f.client(false);
+    client.init().await;
+    let mut load = f.params(Some("group-grant-canary"));
+    load["sessionId"] = json!(sid);
+    assert!(client.request(41, "session/load", load).await.0["error"].is_null());
+    let query = json!({"sessionId":sid,"sources":[source]});
+    let r = client.request(42, delivery::METHOD, query.clone()).await.0;
+    assert_eq!(
+        r["result"]["receipts"][0]["work"][0]["id"], first["id"],
+        "{r}"
+    );
+    assert_eq!(r["result"]["receipts"][0]["work"][0]["state"], "proposed");
+    let before = f.state.list_records("work").unwrap();
+    let duplicate = client.request(43, "session/prompt", prompt).await.0;
+    assert!(duplicate["error"].is_object(), "{duplicate}");
+    assert_eq!(f.state.list_records("work").unwrap(), before);
+
+    // A specifically correlated creation can be inspected/retried through the
+    // existing tool; the original ACP input itself is never replayed.
+    let recovered = client
+        .prompt(&sid, json!({"name":"work_create","arguments":args}))
+        .await;
+    assert_eq!(
+        recovered["call"]["result"]["structuredContent"]["id"],
+        first["id"]
+    );
+    let mut changed = args.clone();
+    changed["goal"] = json!("Different intent under the same key");
+    let refused = client
+        .prompt(&sid, json!({"name":"work_create","arguments":changed}))
+        .await;
+    assert_eq!(refused["call"]["result"]["isError"], true);
+
+    let acceptance = json!({"name":"work_command","arguments":{"id":first["id"],"expected_revision":1,"command":{"type":"accept"}}});
+    client.tx.send(json!({"jsonrpc":"2.0","id":44,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":format!("CONTEXT_TOOL {acceptance}")}]}})).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if f.state
+                .get_record("work", first["id"].as_str().unwrap())
+                .unwrap()
+                .unwrap()["state"]
+                == "accepted"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    client.close().await;
+    let mut client = f.client(false);
+    client.init().await;
+    // Same room, another authorized participant: retain the original creation.
+    let mut load = f.params(Some("group-robin-grant-canary"));
+    load["sessionId"] = json!(sid);
+    assert!(client.request(45, "session/load", load).await.0["error"].is_null());
+    let r = client.request(46, delivery::METHOD, query.clone()).await.0;
+    assert_eq!(r["result"]["receipts"][0]["work"][0]["state"], "accepted");
+    assert_eq!(r["result"]["receipts"][0]["completion"], "not_established");
+
+    // Two authorized creations from the same original input remain two records.
+    let mut second_args = args.clone();
+    second_args["request_id"] = json!("creation-17-b");
+    let second = client
+        .prompt(&sid, json!({"name":"work_create","arguments":second_args}))
+        .await;
+    let second = &second["call"]["result"]["structuredContent"];
+    assert_ne!(second["id"], first["id"]);
+    assert!(second["id"].is_string());
+    // Another delivery of this exact source can establish another responsibility.
+    // Querying the source must union all origins, not only its preferred receipt.
+    let third_args = json!({"title":"Check another aspect","goal":"Separate authorized responsibility","source_input_id":"input-18","request_id":"creation-18"});
+    let (r,updates)=client.request(60,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":format!("CONTEXT_TOOL {}",json!({"name":"work_create","arguments":third_args}))}],"_meta":{delivery::META:{"version":1,"inputId":"input-18","sources":[source]}}})).await;
+    assert!(r["error"].is_null(), "{r}");
+    let detail: Value = serde_json::from_str(
+        updates.last().unwrap()["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(detail["orientation"].as_str().unwrap().contains("input-18"));
+    assert_eq!(detail["call"]["result"]["isError"], false, "{detail}");
+    assert!(detail["call"]["result"]["structuredContent"]["id"].is_string());
+    let amended=client.prompt(&sid,json!({"name":"work_command","arguments":{"id":first["id"],"expected_revision":2,"command":{"type":"amend","title":"Check updated proposal","goal":"Keep the same responsibility"}}})).await;
+    assert_eq!(
+        amended["call"]["result"]["structuredContent"]["revision"],
+        3
+    );
+    let stopped=client.prompt(&sid,json!({"name":"work_command","arguments":{"id":first["id"],"expected_revision":3,"command":{"type":"cancel","reason":"User stopped this responsibility"}}})).await;
+    assert_eq!(
+        stopped["call"]["result"]["structuredContent"]["state"],
+        "cancelled"
+    );
+    // Force the original delivery's retained uncertainty; a work control must
+    // not convert that separate fact into delivery, completion or rollback.
+    delivery::observe(&f.state, "fixture", &sid, "input-17", "unknown").unwrap();
+    let r = client.request(47, delivery::METHOD, query.clone()).await.0;
+    let receipt = &r["result"]["receipts"][0];
+    assert_eq!(receipt["work"].as_array().unwrap().len(), 3, "{r}");
+    assert!(
+        receipt["work"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["id"] == first["id"] && w["state"] == "cancelled")
+    );
+    assert_eq!(receipt["state"], "unknown");
+    assert_eq!(receipt["completion"], "not_established");
+    let mut wrong_revision = query.clone();
+    wrong_revision["sources"][0]["revision"] = json!("r1");
+    assert_eq!(
+        client.request(48, delivery::METHOD, wrong_revision).await.0["result"]["receipts"],
+        json!([])
+    );
+
+    // Work references survive the short receipt journal, but no delivery fact
+    // is reconstructed from work acceptance.
+    f.state
+        .db
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM records WHERE collection='source_delivery'", [])
+        .unwrap();
+    let r = client.request(49, delivery::METHOD, query.clone()).await.0;
+    assert_eq!(
+        r["result"]["receipts"][0]["work"].as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(r["result"]["receipts"][0]["state"], "unknown");
+    assert!(r["result"]["receipts"][0]["inputId"].is_null());
+    let retry = client
+        .prompt(&sid, json!({"name":"work_create","arguments":args}))
+        .await;
+    assert_eq!(
+        retry["call"]["result"]["structuredContent"]["id"],
+        first["id"]
+    );
+    assert_eq!(
+        retry["call"]["result"]["structuredContent"]["state"],
+        "cancelled"
+    );
+    assert!(delivery::register_input(&f.state,"fixture",&json!({"sessionId":sid,"_meta":{delivery::META:{"version":1,"inputId":"input-17","sources":[source]}}}),None,true).is_err());
+
+    let mut other = f.client(false);
+    other.init().await;
+    let mut wrong_load = f.params(Some("other-grant-canary"));
+    wrong_load["sessionId"] = json!(sid);
+    assert!(other.request(50, "session/load", wrong_load).await.0["error"].is_object());
+    assert!(other.request(51, delivery::METHOD, query.clone()).await.0["error"].is_object());
+    let other_sid = other
+        .new_session(f.params(Some("other-grant-canary")))
+        .await;
+    let denied = other
+        .prompt(
+            &other_sid,
+            json!({"name":"work_get","arguments":{"id":first["id"]}}),
+        )
+        .await;
+    assert_eq!(denied["call"]["result"]["isError"], true);
+    other.close().await;
+    f.source.revoked.store(true, Ordering::SeqCst);
+    assert!(client.request(52, delivery::METHOD, query).await.0["error"].is_object());
+    assert_eq!(f.state.list_records("work").unwrap().len(), 3);
+    client.close().await;
+}
+
+#[tokio::test]
 async fn steering_revalidates_context_and_cannot_borrow_another_connections_audience() {
     let f = Fixture::new().await;
     let mut client = f.client(false);
@@ -1303,14 +1504,14 @@ fn rebind_event(sid: &str, id: &str) -> Value {
     json!({"sessionId":sid,"occurredAt":agent_instance::state::now_ms(),"context":{"conversation_id":"team-room","agent":{"id":"a","name":"Agent"},"participants":[{"id":"a","name":"Agent"},{"id":"b","name":"Human"}],"messages":[{"id":id,"sender":"b","text":"Updated request"}],"trigger_id":id}})
 }
 async fn restored_offer(f: &Fixture, c: &mut Client, sid: &str, id: &str) -> (Value, Value) {
-    use agent_instance::attention;
+    use agent_instance::{attention, source_delivery};
     let offer = c
         .request(80, attention::METHOD, rebind_event(sid, id))
         .await
         .0["result"]
         .clone();
     assert_eq!(offer["action"], "engage");
-    let input = json!({"sessionId":sid,"prompt":[{"type":"text","text":"Update"}],"_meta":{"steering":{"inputId":id,"idleBehavior":"promptRequired"},attention::META:{"id":offer["id"],"ticket":offer["ticket"]}}});
+    let input = json!({"sessionId":sid,"prompt":[{"type":"text","text":"Update"}],"_meta":{"steering":{"inputId":id,"idleBehavior":"promptRequired"},attention::META:{"id":offer["id"],"ticket":offer["ticket"]},source_delivery::META:{"version":1,"sources":[{"id":id,"revision":"original-revision","occurredAt":agent_instance::state::now_ms()}]}}});
     let response = c.request(81, "_session/steering", input.clone()).await.0;
     assert_eq!(response["result"]["outcome"], "promptRequired");
     assert_eq!(
@@ -1337,6 +1538,15 @@ async fn restored_offer_survives_real_transport_handoff_once_with_unchanged_budg
         .new_session(f.params(Some("group-grant-canary")))
         .await;
     let (offer, input) = restored_offer(&f, &mut first, &sid, "cross-transport").await;
+    let original_source = f
+        .state
+        .list_records("source_delivery")
+        .unwrap()
+        .into_iter()
+        .find(|row| row["inputId"] == "cross-transport")
+        .unwrap();
+    assert_eq!(original_source["state"], "promptRequired");
+    assert_eq!(original_source["binding"]["actor_id"], "alex");
     let key = offer["id"].as_str().unwrap();
     let before = f
         .state
@@ -1379,6 +1589,25 @@ async fn restored_offer_survives_real_transport_handoff_once_with_unchanged_budg
         second.request(83, "session/prompt", input.clone()).await.0["result"]["stopReason"],
         "end_turn"
     );
+    let promoted_source = f
+        .state
+        .list_records("source_delivery")
+        .unwrap()
+        .into_iter()
+        .find(|row| row["inputId"] == "cross-transport")
+        .unwrap();
+    assert_eq!(
+        promoted_source["binding"], original_source["binding"],
+        "Promotion keeps the original participant attribution"
+    );
+    assert_eq!(promoted_source["sources"], original_source["sources"]);
+    assert_eq!(promoted_source["kind"], "prompt");
+    let recovered_source = second.request(87, agent_instance::source_delivery::METHOD,
+        json!({"sessionId":sid,"sources":input["_meta"][agent_instance::source_delivery::META]["sources"]})).await.0;
+    assert_eq!(
+        recovered_source["result"]["receipts"][0]["inputId"],
+        "cross-transport"
+    );
     let admitted = f
         .state
         .get_record("attention_events", key)
@@ -1413,7 +1642,61 @@ async fn restored_offer_survives_real_transport_handoff_once_with_unchanged_budg
         -32002,
         "Rebind must not renew capacity"
     );
+    assert_eq!(
+        f.state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind='acp.prompt.started'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
     second.close().await;
+}
+
+#[tokio::test]
+async fn source_promotion_keeps_uncertain_and_private_handoffs_closed() {
+    use agent_instance::source_delivery as delivery;
+    let f = Fixture::new().await;
+    for case in ["unknown", "incorporated", "other-room", "owner-actor"] {
+        let owner = case == "owner-actor";
+        let origin = json!({"owner":owner,"provider_id":"web:fixture","conversation_id":"team-room","actor_id":"alex","thread_id":null});
+        let mut current = origin.clone();
+        current["actor_id"] = json!("robin");
+        if case == "other-room" {
+            current["conversation_id"] = json!("other-room");
+        }
+        let params = json!({"sessionId":"source-test","_meta":{"steering":{"inputId":case},delivery::META:{"version":1,"sources":[{"id":case,"revision":"r1","occurredAt":agent_instance::state::now_ms()}]}}});
+        delivery::register_input(&f.state, "fixture", &params, Some(&origin), false).unwrap();
+        delivery::observe(
+            &f.state,
+            "fixture",
+            "source-test",
+            case,
+            if case == "unknown" {
+                "unknown"
+            } else if case == "incorporated" {
+                "incorporated"
+            } else {
+                "promptRequired"
+            },
+        )
+        .unwrap();
+        let before = f.state.list_records("source_delivery").unwrap();
+        assert!(
+            delivery::register_input(&f.state, "fixture", &params, Some(&current), true).is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            f.state.list_records("source_delivery").unwrap(),
+            before,
+            "{case}"
+        );
+    }
 }
 
 #[tokio::test]

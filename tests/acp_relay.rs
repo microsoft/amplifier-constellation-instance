@@ -1997,6 +1997,84 @@ fn source_delivery_is_a_private_revision_fact_not_completion_or_implicit_dedupli
 }
 
 #[tokio::test]
+async fn ordinary_prompt_retains_original_source_without_claiming_work_acceptance() {
+    use agent_instance::source_delivery as delivery;
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    let source = json!({"id":"ordinary-message","revision":"r1","occurredAt":agent_instance::state::now_ms()});
+    client.send(220, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"text","text":"Hello"}],"_meta":{delivery::META:{"version":1,"inputId":"ordinary-input","sources":[source]}}})).await;
+    let response = client.response(220).await.0;
+    assert!(response.get("error").is_none(), "{response}");
+    client
+        .send(
+            221,
+            delivery::METHOD,
+            json!({"sessionId":sid,"sources":[source]}),
+        )
+        .await;
+    let receipt = client.response(221).await.0;
+    assert_eq!(
+        receipt["result"]["receipts"][0]["inputId"], "ordinary-input",
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["result"]["receipts"][0]["completion"],
+        "not_established"
+    );
+    assert_eq!(receipt["result"]["receipts"][0]["work"], json!([]));
+    client.disconnect().await;
+}
+
+#[tokio::test]
+async fn source_input_promotes_only_explicit_steering_refusal_and_rejects_mixed_maintenance() {
+    use agent_instance::source_delivery as delivery;
+    let install = Installation::new();
+    let mut client = install.connect();
+    client.initialize().await;
+    let sid = client.new_session(&install.work).await;
+    let source = json!({"id":"fallback-source","revision":"r1","occurredAt":agent_instance::state::now_ms()});
+    let mut input = steering(&sid, "fallback-input");
+    input["_meta"][delivery::META] = json!({"version":1,"sources":[source]});
+    client.send(230, STEERING_METHOD, input.clone()).await;
+    assert_eq!(
+        client.response(230).await.0["result"]["outcome"],
+        "promptRequired"
+    );
+    client.send(231, "session/prompt", input.clone()).await;
+    assert!(client.response(231).await.0["error"].is_null());
+    client.send(232, "session/prompt", input).await;
+    assert!(client.response(232).await.0["error"].is_object());
+    let mixed = json!({"sessionId":sid,"prompt":[{"type":"text","text":"/compact"}],"_meta":{delivery::META:{"version":1,"inputId":"maintenance-source","sources":[source]},agent_instance::maintenance::META:{"version":1,"operation":"compact","operationId":"mixed-maintenance"}}});
+    client.send(233, "session/prompt", mixed).await;
+    assert!(client.response(233).await.0["error"].is_object());
+    client
+        .send(
+            234,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"text","text":"Still available"}]}),
+        )
+        .await;
+    assert!(client.response(234).await.0["error"].is_null());
+    assert!(
+        install
+            .state
+            .list_records("maintenance")
+            .unwrap()
+            .is_empty()
+    );
+    client.disconnect().await;
+
+    for status in ["unknown", "incorporated"] {
+        let params = json!({"sessionId":"s","_meta":{"steering":{"inputId":status},delivery::META:{"version":1,"sources":[source]}}});
+        delivery::register(&install.state, "p", &params).unwrap();
+        delivery::observe(&install.state, "p", "s", status, status).unwrap();
+        assert!(delivery::register_input(&install.state, "p", &params, None, true).is_err());
+    }
+}
+
+#[tokio::test]
 async fn source_facts_follow_real_steering_envelopes_without_replaying_or_settling_work() {
     use agent_instance::source_delivery as delivery;
     let install = Installation::new();

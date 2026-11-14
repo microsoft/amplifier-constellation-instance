@@ -1,8 +1,10 @@
-# Hosting one installed individual
+# The supplied agent host
 
 For engines, connectors, experiences and management clients using Instance.
-The promise: one installation exposes its agent and supported controls without
-requiring consumers to understand the host's private state.
+This is the supplied implementation of the [Agent Instance boundary](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/agent-instance.md):
+one installation exposes its agent and supported controls without requiring
+consumers to understand private host state. The selected-engine layout is local
+to this implementation, not part of the universal agent definition.
 
 **Example:** An experience attaches to an existing individual, obtains the
 backend's capabilities and uses a granted conversation source. Another management
@@ -32,13 +34,13 @@ client can inspect the installation without taking over the engine session.
    observations. The reference client's view state is a separate resource.
    Clients use these interfaces instead of opening the installation database.
 
-The umbrella owns the shared rules for [composition](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/composition.md),
-[interaction](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md),
-[work authority](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/work-authority.md),
-[continuity](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/work-continuity.md),
-[installations](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/installations.md)
-and [engine compatibility](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/engine-compatibility.md).
-This agreement identifies Instance's local boundary; it does not restate those rules.
+Shared behavior is authoritative in the umbrella's
+[contract map](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/README.md).
+Its [ACP hosting](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/profiles/acp-hosting.md),
+[managed installation](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/installations.md)
+and [engine compatibility](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/engine-compatibility.md)
+agreements apply to this implementation. This contract owns the host-specific
+responsibilities above; exact operations stay in their linked specifications.
 
 **Check:** Attach an ordinary ACP client and an optional management client to the
 same installation. Compare the backend and host capabilities, exercise a granted

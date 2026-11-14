@@ -70,7 +70,7 @@ class Provider:
             if w.version(v)<=w.version(current):return None
             result={'version':v,'repository':repo,'tag':r['tag_name'],'url':r['html_url']}
             if self.kind=='claude':
-                target={'Linux':'linux','Darwin':'darwin','Windows':'windows'}[platform.system()]+'-'+{'aarch64':'arm64','arm64':'arm64','x86_64':'x64','AMD64':'x64'}[platform.machine()]
+                target={'Linux':'linux','Darwin':'darwin','Windows':'windows'}[platform.system()]+'-'+{'aarch64':'arm64','arm64':'arm64','x86_64':'x64','amd64':'x64'}[platform.machine().lower()]
                 name='claude-agent-acp-'+target+('.tar.gz' if platform.system()=='Linux' else '.zip')
                 result['asset']=next((a for a in r['assets'] if a['name']==name),None)
                 if result['asset'] is None:result['unavailable_reason']='release_not_available_for_platform'

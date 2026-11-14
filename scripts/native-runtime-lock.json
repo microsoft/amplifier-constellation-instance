@@ -1,30 +1,42 @@
 {
-  "version": "0.12.0",
+  "version": "0.15.6",
   "repository": "microsoft/amplifier-constellation-runtime",
   "assets": [
     {
-      "platform": "linux-x86_64",
-      "binary_sha256": "cf246d62a94ff8b7a1f9159e4db9f5826989229e6b21920bfc4be1824e91965b",
-      "asset": "agent-runtime-0.12.0-linux-x86_64.tar.gz",
-      "asset_sha256": "6a8f32a9c5feb455f1be41f3e2a5abaa3cc889530074ccbd43fe7c2a6ac364a2"
-    },
-    {
       "platform": "linux-aarch64",
-      "binary_sha256": "83254932225ad797a2795a451176417791dfc35e0d04f8ce6480dfd2753b9005",
-      "asset": "agent-runtime-0.12.0-linux-aarch64.tar.gz",
-      "asset_sha256": "84ca38b911d001323d32ecd316984836ced1509571fb08eef845968e74d88755"
+      "binary_sha256": "dac0b4d31d879b8d242f42ac83dd6511fdd5ca0e0bdc61b454b7e96b48d906a0",
+      "asset": "agent-runtime-0.15.6-linux-aarch64.tar.gz",
+      "asset_sha256": "2e7a3ad60aa6244a49912be55500ddfc0df9c74d90dbad04bb37974368951b72"
     },
     {
-      "platform": "macos-aarch64",
-      "binary_sha256": "7d1a7d5ca9496c5321cacc602d304a56b8a6604990fb1075afa7f339f8bc0d0c",
-      "asset": "agent-runtime-0.12.0-macos-aarch64.tar.gz",
-      "asset_sha256": "217768eb66e08ff5257478e935a5a2a7fd0ca08921d929fb7f5b275349e9b64b"
+      "platform": "linux-x86_64",
+      "binary_sha256": "18c3c27ab7d4c4338dccf98bae6e3be3f3a11381ac7069c520d1e13947c52fb8",
+      "asset": "agent-runtime-0.15.6-linux-x86_64.tar.gz",
+      "asset_sha256": "030363e4bf7cd36d2e0df9057233d450961e5fe5ba12e6c284cfcea375b99c54"
+    },
+    {
+      "platform": "windows-aarch64",
+      "binary_sha256": "f57f4f8894ed09978bcb63d0f41874c719dca562c8725b135f12a5237afa10e5",
+      "asset": "agent-runtime-0.15.6-windows-aarch64.zip",
+      "asset_sha256": "53401f61969107d7d53855e9df6f9e4d0ff84543deeca5310ed2213f899bf6a8"
     },
     {
       "platform": "windows-x86_64",
-      "binary_sha256": "0a8c676336637e0b36b092270c8d8fd055f557f03ea1059f74ffa734ef6cfcf9",
-      "asset": "agent-runtime-0.12.0-windows-x86_64.zip",
-      "asset_sha256": "2efbf23378d2cc47c0d6818dbc8d83c8b5e0a08845d056dcc60e7da839c261e5"
+      "binary_sha256": "30949cad0ba20115ddb248d6f686817adeb1a94992d00f3c23f40c8fc22818c8",
+      "asset": "agent-runtime-0.15.6-windows-x86_64.zip",
+      "asset_sha256": "568314eaa68c338253ea7ade626c4c0a5ff0781b5a9cd0ab601864fb6fc91e15"
+    },
+    {
+      "platform": "macos-aarch64",
+      "binary_sha256": "bce1eb82491ce9f6ab170add4ade9ac658d195f157d54c588eb8efb68e0c3e6f",
+      "asset": "agent-runtime-0.15.6-macos-aarch64.tar.gz",
+      "asset_sha256": "9a82acffdb9536006a3b362107e19e24904e5cfb2f4817a4fab8e0a194ff6ede"
+    },
+    {
+      "platform": "macos-x86_64",
+      "binary_sha256": "7268c82490d2deccf29fb98cb37f3c86ac60456611eddc8cc49d936faa666c05",
+      "asset": "agent-runtime-0.15.6-macos-x86_64.tar.gz",
+      "asset_sha256": "a79293a381406665142c972ac2ba104b7f7c76dcd7d009def47c4f88130833dc"
     }
   ]
 }
