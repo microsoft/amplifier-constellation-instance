@@ -4,7 +4,7 @@
 The registration file is private operator input, never supplied by an agent.
 The authenticated instance API supplies only action/plan IDs and policy choices.
 """
-import argparse, contextlib, datetime, email.utils, errno, hashlib, io, ipaddress, json, os, platform, re, shutil
+import argparse, base64, contextlib, datetime, email.utils, errno, hashlib, io, ipaddress, json, os, platform, re, shutil
 import sqlite3, ssl, subprocess, sys, tarfile, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 from pathlib import Path
 
@@ -15,6 +15,48 @@ REPOSITORIES = {'instance': ('amplifier-constellation-instance','agent-instance'
 CRITICAL = {'stopping','swapping','verifying','rolling_back'}
 PARTICIPANT_ACTIONS = ('prepare','verify','restore')
 LIMIT = 256*1024*1024
+MANAGEMENT_PATHS = {'status','updates','updates/report','service-connections','service-connections/report'}
+HELPER_FILES = {'worker.py','engine_provider.py','container_provider.py','incus_provider.py',
+                'provision-backend.py','container/install.py','container/bridge.py',
+                'container/launch-service.py','container/seccomp.json'}
+
+def management_call(registration,action,**data):
+    """Owner-fixed transport; requests are JSON, never command arguments."""
+    request={'schema':1,'instance_id':registration['instance_id'],'action':action,**data}
+    payload=json.dumps(request).encode()
+    if len(payload)>2*1024*1024:raise ValueError('management_request_too_large')
+    with tempfile.TemporaryFile() as output:
+        process=subprocess.run(registration['management']['command'],input=payload,stdout=output,
+                               stderr=subprocess.DEVNULL,timeout=60)
+        if process.returncode or output.tell()>8*1024*1024:raise ValueError('management_transport_failed')
+        output.seek(0);result=json.load(output)
+    if not isinstance(result,dict) or set(result)!={'schema','instance_id','result'} or result['schema']!=1 or result['instance_id']!=registration['instance_id'] or not isinstance(result['result'],dict):raise ValueError('invalid_management_response')
+    return result['result']
+
+def validate_helper_files(root,files):
+    """Validate an export before recording publication intent or changing files."""
+    if not isinstance(files,dict) or set(files)!=HELPER_FILES:raise ValueError('invalid_helper_export_inventory')
+    decoded={}
+    for name,value in files.items():
+        content=base64.b64decode(value,validate=True)
+        if len(content)>2*1024*1024:raise ValueError('helper_export_too_large')
+        if name.endswith('.py'):compile(content,name,'exec')
+        decoded[name]=content
+        path=root/name
+        if path.parent.resolve()!=path.parent or path.is_symlink():raise ValueError('helper_export_symlink')
+    return decoded
+
+def publish_helper_files(root,files):
+    decoded=validate_helper_files(root,files)
+    # The intent is retained until all files are published. After a crash, either
+    # worker generation can finish the same export before processing new work.
+    for name in sorted(decoded,key=lambda n:n=='worker.py'):
+        path=root/name;path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+        if path.parent.resolve()!=path.parent or path.is_symlink():raise ValueError('helper_export_symlink')
+        with tempfile.NamedTemporaryFile(dir=path.parent,delete=False) as out:
+            out.write(decoded[name]);out.flush();os.fsync(out.fileno());temporary=Path(out.name)
+        try:temporary.chmod(0o700 if name=='worker.py' else 0o600);os.replace(temporary,path)
+        finally:temporary.unlink(missing_ok=True)
 
 class LockBusy(BlockingIOError):
     """The existing owner still holds a local installation lock."""
@@ -23,7 +65,7 @@ class EnrollmentYield(RuntimeError):
     """An idle helper is yielding to its installation's enrollment operation."""
 
 def enrollment_idle(state,root):
-    if state.get('transaction') or state.get('active_request') or state.get('state') in CRITICAL|{'waiting_for_idle','recovery_required'}:
+    if state.get('transaction') or state.get('active_request') or state.get('helper_refresh') or state.get('state') in CRITICAL|{'waiting_for_idle','recovery_required'}:
         return False
     root=Path(root)
     if (root/'connection-operation.json').exists():return False
@@ -124,6 +166,10 @@ def load_registration(path):
         if not Path(c[key]).is_absolute(): raise ValueError('absolute_paths_required')
     # The helper state and any host credentials must not be in an agent's mounted home.
     if Path(c['state']).resolve().is_relative_to(Path(c['home']).resolve()): raise ValueError('helper_state_must_be_outside_agent_home')
+    if 'management' in c:
+        transport=c['management'];argv=transport.get('command') if isinstance(transport,dict) else None
+        if not isinstance(transport,dict) or set(transport)!={'protocol','command'} or transport['protocol']!=1 or not isinstance(argv,list) or not argv or not all(isinstance(v,str) and '\x00' not in v for v in argv) or not Path(argv[0]).is_absolute():raise ValueError('fixed_management_transport_required')
+        if c.get('slack_homes') or any(p.get('provider','github')!='command' for p in c['components']):raise ValueError('remote_components_require_owner_providers')
     ids=set()
     for p in c['components']:
         if p['id'] in ids or not re.fullmatch('[a-z][a-z0-9-]{0,63}',p['id']):raise ValueError('invalid_component_id')
@@ -271,10 +317,12 @@ def platform_names():
     osname=platform.system();arch={'arm64':'aarch64','aarch64':'aarch64','amd64':'x86_64','x86_64':'x86_64'}[platform.machine().lower()]
     return osname,arch,{'Linux':arch+'-unknown-linux-gnu','Darwin':arch+'-apple-darwin','Windows':arch+'-pc-windows-msvc'}[osname]
 
-def candidate(component,channel,folder):
+def candidate(component,channel,folder,*,observed=None,inspect_candidate=None):
     kind=component['kind'];repo,binary,workflow=REPOSITORIES[kind];repo='microsoft/'+repo
-    osname,arch,target=platform_names();binary+=('.exe' if osname=='Windows' else '')
-    current=run([component['binary'],'--version']).decode().strip();installed=digest(component['binary'])
+    osname,arch,target=platform_names() if observed is None else observed['platform'];binary+=('.exe' if osname=='Windows' else '')
+    current=run([component['binary'],'--version']).decode().strip() if observed is None else observed['version']
+    installed=digest(component['binary']) if observed is None else observed['sha256']
+    if observed is not None and (inspect_candidate is None or not re.fullmatch('[0-9a-f]{64}',installed)):raise ValueError('remote_candidate_inspection_required')
     if channel=='stable':
         release=gh('repos/'+repo+'/releases/latest');tag=release['tag_name']
         if version(tag)<=version(current):return {'id':component['id'],'version':current,'installed_sha256':installed,'available':False,'reason':'installed_version_is_current_or_newer'}
@@ -309,7 +357,7 @@ def candidate(component,channel,folder):
         if 'sha256:'+digest(archive)!=a['digest']:raise ValueError('artifact_digest_mismatch')
         source={'repository':repo,'commit':build['head_sha'],'run_id':build['id'],'url':build['html_url'],'asset_digest':a['digest']}
     target_file=folder/(component['id']+'.candidate');target_file.write_bytes(extract(archive.read_bytes(),binary));target_file.chmod(0o700);archive.unlink()
-    new_version=run([target_file,'--version']).decode().strip()
+    new_version=run([target_file,'--version']).decode().strip() if inspect_candidate is None else inspect_candidate(target_file)
     if not new_version.startswith(binary.removesuffix('.exe')+' ') or version(new_version)<version(current):raise ValueError('candidate_identity_or_version_mismatch')
     return {'id':component['id'],'version':current,'target_version':new_version,'installed_sha256':installed,'sha256':digest(target_file),'available':digest(target_file)!=installed,**source}
 
@@ -320,14 +368,22 @@ class Worker:
         if locked_root is not None and self.root.resolve()!=Path(locked_root).resolve():raise ValueError('helper_state_changed_before_lock')
         self.root.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.file=self.root/'state.json';self.state=read(self.file) if self.file.exists() else {'state':'idle','components':[],'last_check':0}
-        self.context=ssl.create_default_context(cafile=str(self.home/'tls/root-ca.crt'))
+        self.context=None if self.c.get('management') else ssl.create_default_context(cafile=str(self.home/'tls/root-ca.crt'))
         self._reporting_threads=[]
+        if self.state.get('helper_refresh'):self.finish_helper_refresh()
     def api(self,path='updates',body=None):
+        if self.c.get('management'):
+            if path not in MANAGEMENT_PATHS or (body is not None)!=path.endswith('/report'):raise ValueError('unsupported_update_management_request')
+            result=management_call(self.c,'api',path=path,body=body)
+            if path=='status' and result.get('instance_id')!=self.c['instance_id']:raise ValueError('instance_identity_mismatch')
+            return result
         config=read(self.home/'config.json')['config'];token=(self.home/'secrets/control-token').read_text().strip()
         return http_json(local_api_base(config)+path,body,{'Authorization':'Bearer '+token},self.context)
     def save(self,**values):self.state.update(values,updated_at=int(time.time()*1000));write(self.file,self.state)
     def report(self,drain=False,finished=None):
         public=dict(self.state)
+        if public.get('helper_refresh'):
+            public['helper_refresh']={'pending':True,'binary_sha256':public['helper_refresh']['binary_sha256']}
         tx=public.get('transaction')
         if tx:
             public['transaction']={k:tx.get(k) for k in ('id','plan_id','phase','outcome','attempted','restored')}
@@ -400,7 +456,10 @@ class Worker:
             try:
                 status=self.api('status')
                 if status['instance_id']!=self.c['instance_id']:raise ValueError('instance_identity_mismatch')
-                if scope['instance'] and status['uptime_ms']>90000:raise ValueError('instance_not_restarted')
+                # A remote provider verifies its actual running executable and
+                # service generation. A pre-effect refusal may preserve the
+                # original process; do not force a restart just to reset uptime.
+                if scope['instance'] and not self.c.get('management') and status['uptime_ms']>90000:raise ValueError('instance_not_restarted')
                 for p in self.c['components']:
                     if p.get('provider','github')=='github' and digest(p['binary'])!=expected[p['id']]:raise ValueError('installed_binary_mismatch')
                 for home in scope['slack_homes']:
@@ -804,6 +863,8 @@ class Worker:
         return bool(pending or journal.exists())
 
     def tick(self):
+        if self.state.get('helper_refresh'):
+            self.finish_helper_refresh();return
         if self.state.get('enrollment'):
             # A crashed installer may have published only part of its helper
             # set. Report retained state, but admit nothing until the same
@@ -859,6 +920,19 @@ class Worker:
                     if self.state['state'] not in ['recovery_required','rolled_back']:self.save(state='failed')
                     self.save(error=type(e).__name__+': '+str(e)[:160]);self.report()
     def refresh_helper(self):
+        if self.c.get('management'):
+            exported=management_call(self.c,'export',known_sha256=self.state.get('helper_instance_sha256'))
+            current=exported.get('binary_sha256','')
+            if not re.fullmatch('[0-9a-f]{64}',current) or not isinstance(exported.get('supported'),bool):raise ValueError('invalid_helper_export')
+            if self.state.get('helper_instance_sha256')==current:return
+            if not exported['supported']:
+                self.save(helper_instance_sha256=current);return
+            files=exported.get('files')
+            validate_helper_files(self.root,files)
+            if all((self.root/name).is_file() and base64.b64encode((self.root/name).read_bytes()).decode()==content for name,content in files.items()):
+                self.save(helper_instance_sha256=current);return
+            self.save(helper_refresh={'binary_sha256':current,'files':files})
+            self.finish_helper_refresh();return
         component=next((c for c in self.c['components'] if c.get('kind')=='instance'),None)
         if component is None:return
         current=digest(component['binary'])
@@ -875,6 +949,18 @@ class Worker:
         if same:exported.unlink();return
         target=Path(__file__);os.replace(exported,target)
         os.execv(sys.executable,[sys.executable,'-I',str(target),'--registration',str(self.root/'registration.json')])
+    def finish_helper_refresh(self):
+        pending=self.state['helper_refresh']
+        if not self.c.get('management') or not re.fullmatch('[0-9a-f]{64}',pending.get('binary_sha256','')):raise ValueError('invalid_pending_helper_refresh')
+        publish_helper_files(self.root,pending['files'])
+        self.state.pop('helper_refresh')
+        self.save(helper_instance_sha256=pending['binary_sha256'])
+        try:os.execv(sys.executable,[sys.executable,'-I','-X','utf8',str(self.root/'worker.py'),'--registration',str(self.registration)])
+        except OSError as error:
+            # Publication is complete, but this process still runs the old
+            # module. Exit for the ordinary service manager to load the new
+            # helper; never catch this in serve() and admit mixed generations.
+            raise SystemExit('updated_helper_restart_required') from error
     def serve(self):
         while True:
             try:

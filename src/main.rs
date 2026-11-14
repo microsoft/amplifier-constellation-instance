@@ -122,6 +122,9 @@ enum Command {
         container_image: Option<String>,
         #[arg(long)]
         pull_container_image: bool,
+        /// Owner-selected mapping for an existing Incus guest (run on its host).
+        #[arg(long, conflicts_with_all = ["slack_home", "container_manifest", "container_image", "pull_container_image"])]
+        incus_config: Option<PathBuf>,
     },
     /// Write this version's update helper for the host installation.
     ExportUpdateHelper {
@@ -400,6 +403,7 @@ async fn main() -> Result<()> {
             container_manifest,
             container_image,
             pull_container_image,
+            incus_config,
         } => {
             let staging = std::env::temp_dir()
                 .join(format!("constellation-updater-{}", uuid::Uuid::new_v4()));
@@ -413,7 +417,13 @@ async fn main() -> Result<()> {
                 &staging.join("install.py"),
                 include_bytes!("../ops/updates/install.py"),
             )?;
-            let python = agent_instance::platform::installation_python(&cli.home)?;
+            let python = if incus_config.is_some() {
+                // The home is in the guest namespace; never discover host tools
+                // by looking for that path on this machine.
+                std::path::PathBuf::from(agent_instance::platform::python())
+            } else {
+                agent_instance::platform::installation_python(&cli.home)?
+            };
             let mut cmd = std::process::Command::new(python);
             cmd.args(["-I", "-X", "utf8"])
                 .arg("-B")
@@ -434,6 +444,9 @@ async fn main() -> Result<()> {
             }
             if pull_container_image {
                 cmd.arg("--pull-container-image");
+            }
+            if let Some(config) = incus_config {
+                cmd.arg("--incus-config").arg(config);
             }
             let result = cmd.status();
             let _ = std::fs::remove_dir_all(&staging);
@@ -632,6 +645,10 @@ fn export_update_support(directory: &std::path::Path) -> anyhow::Result<()> {
         (
             "container_provider.py",
             include_bytes!("../ops/updates/container_provider.py").as_slice(),
+        ),
+        (
+            "incus_provider.py",
+            include_bytes!("../ops/updates/incus_provider.py").as_slice(),
         ),
         (
             "provision-backend.py",

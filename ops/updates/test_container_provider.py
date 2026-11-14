@@ -11,7 +11,9 @@ class Tests(unittest.TestCase):
   self.p=m.Provider(self.root/'config.json');self.current={'Id':'container-original','Image':'sha256:'+'a'*64,'State':{'Running':True}}
   self.new={'Id':'sha256:'+'b'*64}
  def prepare(self):
-  with patch.object(m,'inspect',side_effect=[self.new,self.current]):plan=self.p.plan()
+  with patch.object(m,'inspect',side_effect=[self.new,self.current]),patch.object(m,'run',return_value='active') as run:
+   plan=self.p.plan()
+  run.assert_called_once_with('systemctl','--user','show','demo.service','--property=ActiveState','--value')
   file=self.root/'plan.json';m.write(file,{'id':'12345678-1234-1234-1234-123456789abc','component':'image','plan':plan})
   self.env=patch.dict(os.environ,CONSTELLATION_UPDATE_PLAN=str(file));self.env.start();self.addCleanup(self.env.stop)
   return plan

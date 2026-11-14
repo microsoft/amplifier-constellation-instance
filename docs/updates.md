@@ -157,6 +157,44 @@ Use `install-updates --container-manifest <existing manifest> --container-image
 tracks that exact image; add `--pull-container-image` to pull a registry tag when checking for a newer image.
 Without that flag the provider tracks a locally built tag. Enrollment does not build or publish container images.
 
+### Existing Incus guests
+
+On a Linux Incus host, `install-updates --incus-config /owner/guest.json`
+enrolls an existing Linux guest without creating a new agent or copying its home
+onto the host. `--home` names the **guest** home. The owner mapping supplies
+`schema: 1`, the absolute `incus` executable, local `project` and `guest`,
+the fixed Incus `guest_uuid`, the existing `instance_id`, guest `home`, `binary`
+and `guest_python` paths, the ordered system-service names in `services`, and
+`instance_service` as the first service. Its `state` is the host helper directory
+plus `/incus`. The host needs Python and access to that local Incus project;
+the guest needs Python and the existing Instance management CLI.
+
+This uses the same update requests, journal, frozen plans and recovery as other
+installations. The protocol-2 provider tracks the published stable Instance
+binary for the guest's architecture. It preserves its owner and permissions,
+records which services were active, and restores only those services. Custom
+engines, guest images, accounts, settings and session stores are not enrolled
+implicitly. Candidate files and executable-only rollback backups remain with the
+host's retained update plan. Both the Incus guest UUID and Instance identity must
+match; changing the guest behind its name does not retarget the enrollment.
+
+The private registration's optional `management` entry contains protocol `1` and
+one fixed `command` argv. It carries bounded JSON for the existing updater API
+resources, or an export of the installed binary's helper files. The Incus adapter
+invokes the existing guest management CLI; TLS trust and credentials remain in
+the guest. The host helper refreshes from the successfully installed version,
+retaining its registration and journal. Interrupted helper publication finishes
+before admitting another update. Older guests can use the newer host helper
+until their first supported update.
+
+Connected experiences belong in the existing protocol-1 `participants` array,
+which the owner mapping can supply at enrollment. They close admission, preserve
+their own state, and verify and restore their original connections. Guest Slack
+paths are not host-local `--slack-home` paths. Qualify each experience participant
+before enabling automatic installation; an Instance-only provider cannot infer
+whether an experience has pending or uncertain effects. Incus enrollment does
+not change the installation's update policy.
+
 Connected experiences can enroll protocol-1 `participants` in registration.json:
 
 ```json
