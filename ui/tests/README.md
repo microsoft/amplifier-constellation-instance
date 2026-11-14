@@ -53,3 +53,13 @@ it performs no provider calls or game actions.
 ```sh
 PLAYWRIGHT_MODULE=/tmp/agent-instance-browser-tests/node_modules/playwright/index.mjs node ui/tests/attention.mjs
 ```
+
+## View-intent conflicts
+
+`UI_TEST_VIEW_INTENT_ONLY=1 node ui/tests/fixture.mjs` starts the actual bundled
+client in a setup-complete disposable protocol fixture. It forces conflicting
+commands and patches, a queued edit overtaken by another client, and a delayed
+typed draft. The checks preserve newer shared values, local unsaved text, safe
+unrelated edits, successive local edits while a save is in flight, selected work/revision boundaries and expected-text profile cleanup. No engine or model runs.
+`UI_TEST_APP_JS=/absolute/path/to/app.js` can select an unmodified baseline script
+for the same regression; omit it to test the current source.

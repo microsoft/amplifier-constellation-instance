@@ -32,7 +32,7 @@
     development:null,developmentError:"",nativeConfig:null,nativeSchema:null,nativeObservations:null,nativeObservationsError:"",nativeError:"",nativeAccount:null,nativeAccountError:"",nativeAccountTimer:null,nativeModels:null,memory:null,memoryError:"",scheduler:null,execution:null,schedulerError:"",work:null,organization:null,workError:"",profileUse:null,profileUseError:"",workSaving:false,
     contextProviders:[], contextError:"", session:null, csrf:"", doc:null, status:null, schema:null, view:null, events:[], connections:[], sessions:[],
     secrets:[], tokens:[], profiles:{}, profilePackage:null, profilePackageError:"", profilePackageBusy:false, profilePackageImport:null, profilePackageImportError:"", profilePackageExpected:null, sessionDetail:null, source:null, online:true, streamOnline:false,
-    error:"", notice:"", busy:false, tokenOnce:null, draftPending:new Map(), timers:new Map(),
+    error:"", notice:"", busy:false, tokenOnce:null, draftPending:new Map(), draftOrigins:new Map(), deferredOrigins:new Map(), viewIntents:new Set(), timers:new Map(),
     commandQueue:Promise.resolve(), lastAck:0, initialScroll:true, poll:null, refreshTimer:null,
     focusRemote:null, scrollRemote:null, loading:true, latestEvent:0, renderError:null,
     backend:null, backendBusy:false, account:null, accountTimer:null, activity:[], activityRecent:[],
@@ -460,24 +460,74 @@
     if(view.state.route==="memory"&&before.route!=="memory")await loadMemory();
     if(["work","organization"].includes(view.state.route)&&(before.route!==view.state.route||before.filters?.work_id!==view.state.filters?.work_id))await loadWork();
   }
-  function command(commandValue) {
+  function viewOrigin() { return app.view ? clone(app.view) : null; }
+  function viewValue(value,path) { return path.reduce((node,key)=>node?.[key],value); }
+  function sameViewValue(a,b) { return JSON.stringify(a)===JSON.stringify(b); }
+  function viewConflict() { const error=new Error("This view changed elsewhere. Newer shared edits were kept."+(app.draftPending.size?" Your unsaved text is still here.":""));error.status=409;return error; }
+  const viewContext=[["route"],["step"],["selected_session"],["modal"],...["work_id","work_revision","work_action","memory_id","memory_revision","memory_action","memory_candidate","service_add","completion_action","completion_revision","completion_brief","completion_artifacts","execution_action","execution_revision","execution_run","execution_work_revision","scheduler_revision","scheduler_backend"].map(key=>["filters",key])];
+  function checkViewIntent(origin,paths) {
+    if(!origin || !app.view || origin.id!==app.view.id)throw viewConflict();
+    const kind=value=>value===null?"null":Array.isArray(value)?"array":typeof value;
+    for(const path of paths){
+      if(!sameViewValue(viewValue(origin.state,path),viewValue(state(),path)))throw viewConflict();
+      for(let n=1;n<path.length;n++){
+        const prior=viewValue(origin.state,path.slice(0,n)),current=viewValue(state(),path.slice(0,n));
+        if(kind(prior)!==kind(current)&&!((prior===undefined||prior===null)&&kind(current)==="object"))throw viewConflict();
+      }
+    }
+  }
+  function advanceLocalIntents(before,after) {
+    if(before.id!==after.id || after.revision!==before.revision+1)return;
+    const pending=new Set([...app.viewIntents,...app.draftOrigins.values(),...app.deferredOrigins.values()]);
+    for(const origin of pending){
+      if(!origin || origin.id!==before.id || origin.revision>before.revision)continue;
+      // Only a predecessor's changes to this intent's own fields may advance its base.
+      // A local navigation must not retarget an edit still made in the old resource.
+      for(const path of origin.writes||[]){
+        const prior=viewValue(before.state,path),value=viewValue(after.state,path);
+        if(sameViewValue(prior,value)||!sameViewValue(viewValue(origin.state,path),prior))continue;
+        let node=origin.state,compatible=true;for(const key of path.slice(0,-1)){if(node[key]!=null&&typeof node[key]!=="object"){compatible=false;break;}node=node[key]??={};}
+        if(compatible){if(value===undefined)delete node[path.at(-1)];else node[path.at(-1)]=clone(value);}
+      }
+    }
+  }
+  function commandWrites(c) {
+    switch(c.type){
+      case "navigate":return [["route"],...(Object.hasOwn(c,"step")?[["step"]]:[]),...(c.route==="work"&&Object.hasOwn(c,"work_id")?[["filters","work_id"]]:[])];
+      case "set_draft":return [["draft",...String(c.path).split(".")]];
+      case "set_filter":return [["filters",c.key]];
+      case "focus":return [["focus"]];
+      case "scroll":return [["scroll"]];
+      case "select_session":return [["selected_session"]];
+      case "open_modal":case "close_modal":return [["modal"]];
+      default:throw new Error("Unknown view command.");
+    }
+  }
+  // Keep the intent observed by the caller, not whichever revision the queue sees later.
+  function command(commandValue,origin=viewOrigin()) {
+    commandValue=clone(commandValue);
     if(commandValue?.type==="set_draft"){
       const path=String(commandValue.path||"");
       const allowed=(app.savedConnections?.services||[]).flatMap(s=>(s.add?.fields||[]).map(f=>`service_add.${f.name}`)).concat(Object.keys(configFields).map(k=>`config.${k}`).concat(Object.keys(profileNames).map(k=>`profiles.${k}`),workDrafts.concat(["updates.check_minutes","updates.install","updates.channel","updates.agent_initiated","updates.window_start_utc","updates.window_hours","access.secret_name","access.token_name","access.token_hours","access.token_scopes.observe","access.token_scopes.ui","access.token_scopes.acp","access.token_scopes.context:owner","access.token_scopes.tools:use","access.token_scopes.profiles","access.token_scopes.admin","access.token_scopes.work:read","access.token_scopes.work","access.token_scopes.work:execute","access.token_scopes.memory:read","access.token_scopes.memory"])));
       if(!allowed.includes(path))return Promise.reject(new Error("Use a supported non-secret draft field. Credentials have dedicated write-only APIs."));
     }
+    if(origin)origin.writes=commandWrites(commandValue);
+    app.viewIntents.add(origin);
     const work=async()=>{
-      if(!app.view)throw new Error("This browser has no registered view yet.");
+      const paths=[...viewContext,...commandWrites(commandValue),...(commandValue.type==="set_draft"?[["draft",String(commandValue.path)]]:[])];
       for(let attempt=0;attempt<2;attempt++){
-        try {const v=await api(`views/${encodeURIComponent(app.view.id)}/commands`,{method:"POST",body:{expected_revision:app.view.revision,command:commandValue}});await applyView(v,true);return clone(v);}
-        catch(e){if(e.status===409 && attempt===0){app.view=await api(`views/${encodeURIComponent(app.view.id)}`);continue;}throw e;}
+        checkViewIntent(origin,paths);
+        if(commandValue.type==="set_draft"&&Object.hasOwn(commandValue,"value")&&sameViewValue(viewValue(state(),["draft",...commandValue.path.split(".")]),commandValue.value))return clone(app.view);
+        const before=viewOrigin();
+        try {const v=await api(`views/${encodeURIComponent(origin.id)}/commands`,{method:"POST",body:{expected_revision:before.revision,command:commandValue}});advanceLocalIntents(before,v);await applyView(v,true);return clone(v);}
+        catch(e){if(e.status===409 && attempt===0){await applyView(await api(`views/${encodeURIComponent(origin.id)}`),true);continue;}throw e;}
       }
     };
-    const result=app.commandQueue.then(work,work);app.commandQueue=result.catch(()=>{});return result;
+    const result=app.commandQueue.then(work,work);app.commandQueue=result.catch(()=>{});return result.finally(()=>app.viewIntents.delete(origin));
   }
   function queueDraft(key,value) {
     if(key.startsWith("readonly."))return;
-    app.draftPending.set(key,value);markDirty();
+    app.draftPending.set(key,value);const origin=viewOrigin();if(origin)origin.writes=[["draft",...key.split(".")]];app.draftOrigins.set(key,origin);markDirty();
     clearTimeout(app.timers.get(`draft:${key}`));
     app.timers.set(`draft:${key}`,setTimeout(()=>flushDraft(key).catch(fail),450));
   }
@@ -485,23 +535,40 @@
     clearTimeout(app.timers.get(`draft:${key}`));app.timers.delete(`draft:${key}`);
     if(!app.draftPending.has(key))return;
     const value=app.draftPending.get(key);
-    await command({type:"set_draft",path:key,value});
-    if(app.draftPending.get(key)===value)app.draftPending.delete(key);
+    await command({type:"set_draft",path:key,value},app.draftOrigins.get(key));
+    if(app.draftPending.get(key)===value){app.draftPending.delete(key);app.draftOrigins.delete(key);}
   }
   async function flushDrafts() {for(const key of [...app.draftPending.keys()])await flushDraft(key);await app.commandQueue;}
+  function viewChanges(before,after,path=[]) {
+    if(sameViewValue(before,after))return [];
+    if(before&&after&&typeof before==="object"&&typeof after==="object"&&!Array.isArray(before)&&!Array.isArray(after)){
+      return [...new Set([...Object.keys(before),...Object.keys(after)])].flatMap(key=>viewChanges(before[key],after[key],[...path,key]));
+    }
+    return [{path,value:after}];
+  }
+  // Evaluate once: rerunning an old cleanup closure can delete a newer draft.
   function patchView(change) {
+    const origin=viewOrigin(),next=clone(origin?.state||state());change(next);
+    const changes=viewChanges(origin?.state||state(),next);
+    if(origin)origin.writes=changes.map(item=>item.path);
+    app.viewIntents.add(origin);
     const work=async()=>{
+      if(!changes.length)return clone(app.view);
       for(let attempt=0;attempt<2;attempt++){
-        const next=clone(state());change(next);
-        try{const view=await api(`views/${encodeURIComponent(app.view.id)}`,{method:"PATCH",body:{expected_revision:app.view.revision,state:next}});await applyView(view,true);return view;}
-        catch(e){if(e.status===409&&attempt===0){app.view=await api(`views/${encodeURIComponent(app.view.id)}`);continue;}throw e;}
+        checkViewIntent(origin,[...viewContext,...changes.map(item=>item.path)]);
+        const merged=clone(state());
+        for(const {path,value} of changes){let node=merged;for(const key of path.slice(0,-1))node=node[key]??={};if(value===undefined)delete node[path.at(-1)];else node[path.at(-1)]=clone(value);}
+        const before=viewOrigin();
+        try{const view=await api(`views/${encodeURIComponent(origin.id)}`,{method:"PATCH",body:{expected_revision:before.revision,state:merged}});advanceLocalIntents(before,view);await applyView(view,true);return view;}
+        catch(e){if(e.status===409&&attempt===0){await applyView(await api(`views/${encodeURIComponent(origin.id)}`),true);continue;}throw e;}
       }
     };
-    const result=app.commandQueue.then(work,work);app.commandQueue=result.catch(()=>{});return result;
+    const result=app.commandQueue.then(work,work);app.commandQueue=result.catch(()=>{});return result.finally(()=>app.viewIntents.delete(origin));
   }
   async function clearDraftNamespace(namespace) {
-    for(const key of [...app.draftPending.keys()])if(key===namespace || key.startsWith(`${namespace}.`))app.draftPending.delete(key);
+    const pending=[...app.draftPending].filter(([key])=>key===namespace || key.startsWith(`${namespace}.`));
     await patchView(next=>{next.draft=next.draft||{};delete next.draft[namespace];for(const key of Object.keys(next.draft))if(key.startsWith(`${namespace}.`))delete next.draft[key];});
+    for(const [key,value] of pending)if(app.draftPending.get(key)===value){clearTimeout(app.timers.get(`draft:${key}`));app.timers.delete(`draft:${key}`);app.draftPending.delete(key);app.draftOrigins.delete(key);}
   }
 
   const configFields={
@@ -556,8 +623,9 @@
     if(!Object.hasOwn(profileNames,key))throw new Error("Unknown profile.");
     const path=`profiles.${key}`;
     if(expectedText!==undefined&&String(draft(path,app.profiles[key]||""))!==expectedText)return;
-    clearTimeout(app.timers.get(`draft:${path}`));app.timers.delete(`draft:${path}`);app.draftPending.delete(path);
+    const pending=app.draftPending.get(path);
     await patchView(next=>{const drafts=next.draft||{},current=Object.hasOwn(drafts,path)?drafts[path]:(get(drafts,path)??app.profiles[key]??"");if(expectedText!==undefined&&String(current)!==expectedText)return;if(next.draft?.profiles)delete next.draft.profiles[key];delete next.draft?.[path];});
+    if(app.draftPending.get(path)===pending){clearTimeout(app.timers.get(`draft:${path}`));app.timers.delete(`draft:${path}`);app.draftPending.delete(path);app.draftOrigins.delete(path);}
   }
   async function prepareProfilePackage(value,expectedRevision) {
     app.profilePackageImport=null;app.profilePackageImportError="";
@@ -681,7 +749,7 @@
       case "draft.discard":await clearDraftNamespace("config");setNotice("Configuration draft discarded.");return;
       case "runtime.start":case "runtime.stop":await api("lifecycle",{method:"POST",body:{action:action.split(".")[1]}});app.doc=await api("config");await refresh(false);setNotice(action.endsWith("start")?"Agent enabled for ACP connections.":"Agent runtime stopped. Its management service remains available.");return;
       case "refresh":await refresh();setNotice("Agent observations refreshed.");return;
-      case "profile.save":{const key=payload.profile;if(!Object.hasOwn(profileNames,key))throw new Error("Unknown profile.");await flushDrafts();const text=String(draft(`profiles.${key}`,app.profiles[key]||""));await api(`profiles/${key}`,{method:"PUT",body:{text}});app.profiles[key]=text;await discardProfileDraft(key);await loadProfiles();setNotice(`${profileNames[key]} profile saved.`);return;}
+      case "profile.save":{const key=payload.profile;if(!Object.hasOwn(profileNames,key))throw new Error("Unknown profile.");await flushDrafts();const text=String(draft(`profiles.${key}`,app.profiles[key]||""));await api(`profiles/${key}`,{method:"PUT",body:{text}});app.profiles[key]=text;await discardProfileDraft(key,text);await loadProfiles();setNotice(`${profileNames[key]} profile saved.`);return;}
       case "profile.discard":await discardProfileDraft(payload.profile);setNotice(`${profileNames[payload.profile]} edits discarded.`);return;
       case "profile.package.open":app.profilePackageImport=null;app.profilePackageImportError="";await loadProfiles();app.profilePackageExpected=app.profilePackage?.revision;return command({type:"open_modal",modal:"profile-package"});
       case "profile.package.prepare":return prepareProfilePackage(payload.package,payload.expected_revision);
@@ -696,7 +764,7 @@
       case "modal.close":app.tokenOnce=null;return command({type:"close_modal"});
       case "secret.new":await command({type:"set_draft",path:"access.secret_name",value:""});return command({type:"open_modal",modal:"secret"});
       case "secret.edit":await command({type:"set_draft",path:"access.secret_name",value:payload.name});return command({type:"open_modal",modal:"secret"});
-      case "secret.save":{const name=payload.name??draft("access.secret_name","");const value=payload.value??root.querySelector("[data-secret-input]")?.value;if(!/^[A-Za-z0-9_-]{1,80}$/.test(name))throw new Error("Use 1–80 letters, numbers, hyphens, or underscores for the secret name.");if(!value)throw new Error("Enter a secret value.");await api(`secrets/${encodeURIComponent(name)}`,{method:"PUT",body:{value}});const input=root.querySelector("[data-secret-input]");if(input)input.value="";await command({type:"close_modal"});app.secrets=asArray(await api("secrets"));setNotice(`Secret “${name}” stored. Its value will not be shown again.`);return;}
+      case "secret.save":{const name=payload.name??draft("access.secret_name","");const value=payload.value??root.querySelector("[data-secret-input]")?.value;if(!/^[A-Za-z0-9_-]{1,80}$/.test(name))throw new Error("Use 1–80 letters, numbers, hyphens, or underscores for the secret name.");if(!value)throw new Error("Enter a secret value.");await flushDrafts();await api(`secrets/${encodeURIComponent(name)}`,{method:"PUT",body:{value}});const input=root.querySelector("[data-secret-input]");if(input)input.value="";await command({type:"close_modal"});app.secrets=asArray(await api("secrets"));setNotice(`Secret “${name}” stored. Its value will not be shown again.`);return;}
       case "secret.remove":await api(`secrets/${encodeURIComponent(payload.name)}`,{method:"DELETE"});app.secrets=asArray(await api("secrets"));setNotice(`Secret “${payload.name}” removed.`);return;
       case "token.new":return command({type:"open_modal",modal:"token"});
       case "token.create":{await flushDrafts();const name=payload.name??draft("access.token_name","");const scopes=payload.scopes??["observe","ui","acp","context:owner","tools:use","profiles","work:read","work","work:execute","memory:read","memory","admin"].filter(s=>draft(`access.token_scopes.${s}`,s==="observe"));const hours=Number(payload.hours??draft("access.token_hours",24));if(!name.trim())throw new Error("Give the token a recognizable name.");if(!scopes.length)throw new Error("Choose at least one token permission.");if(!Number.isFinite(hours)||hours<=0)throw new Error("Set a positive token lifetime.");const result=await api("tokens",{method:"POST",body:{name,scopes,expires_in_seconds:Math.round(hours*3600)}});app.tokenOnce=result.token||result.value||result.access_token;app.tokens=asArray(await api("tokens"));await command({type:"open_modal",modal:"token-created"});render();return {created:true,id:result.id};}
@@ -780,7 +848,7 @@
     clearInterval(app.poll);app.poll=setInterval(()=>refresh(false),15000);
   }
   function signedOut() {
-    app.source?.close();clearInterval(app.poll);clearTimeout(app.accountTimer);clearTimeout(app.nativeAccountTimer);app.nativeAccount=null;app.nativeModels=null;app.account=null;app.backend=null;app.source=null;app.streamOnline=false;app.session=null;app.csrf="";app.tokenOnce=null;app.profilePackage=null;app.profilePackageImport=null;app.profilePackageImportError="";app.profilePackageExpected=null;app.view=null;app.draftPending.clear();app.loading=false;render();
+    app.source?.close();clearInterval(app.poll);clearTimeout(app.accountTimer);clearTimeout(app.nativeAccountTimer);app.nativeAccount=null;app.nativeModels=null;app.account=null;app.backend=null;app.source=null;app.streamOnline=false;app.session=null;app.csrf="";app.tokenOnce=null;app.profilePackage=null;app.profilePackageImport=null;app.profilePackageImportError="";app.profilePackageExpected=null;app.view=null;app.draftPending.clear();app.draftOrigins.clear();app.deferredOrigins.clear();app.viewIntents.clear();app.loading=false;render();
   }
   async function migrateSetupDraft() {
     if(app.doc.config.setup_complete||app.backend?.kind!=="codex"||!app.backend.installed)return;
@@ -845,7 +913,7 @@
   root.addEventListener("input",event=>{
     const node=event.target;if(node.hasAttribute("data-sensitive"))return;
     if(node.dataset.draft)queueDraft(node.dataset.draft,node.type==="checkbox"?node.checked:node.value);
-    if(node.dataset.filter&&node.type!=="checkbox"&&node.tagName!=="SELECT"){clearTimeout(app.timers.get(`filter:${node.dataset.filter}`));app.timers.set(`filter:${node.dataset.filter}`,setTimeout(()=>command({type:"set_filter",key:node.dataset.filter,value:node.value}).catch(fail),250));}
+    if(node.dataset.filter&&node.type!=="checkbox"&&node.tagName!=="SELECT"){const origin=viewOrigin(),key=node.dataset.filter,value=node.value;if(origin)origin.writes=[["filters",key]];app.deferredOrigins.set(`filter:${key}`,origin);clearTimeout(app.timers.get(`filter:${key}`));app.timers.set(`filter:${key}`,setTimeout(()=>{app.deferredOrigins.delete(`filter:${key}`);command({type:"set_filter",key,value},origin).catch(fail);},250));}
   });
   root.addEventListener("change",event=>{
     const node=event.target;if(node.hasAttribute("data-sensitive"))return;
@@ -869,11 +937,12 @@
   root.addEventListener("focusin",event=>{
     const target=event.target.dataset.control;if(!target || !app.view || applyingFocus)return;
     if(state().focus===target)return;
-    clearTimeout(app.timers.get("focus"));app.timers.set("focus",setTimeout(()=>{applyingFocus=true;command({type:"focus",target}).catch(()=>{}).finally(()=>{applyingFocus=false;});},180));
+    const origin=viewOrigin();origin.writes=[["focus"]];app.deferredOrigins.set("focus",origin);clearTimeout(app.timers.get("focus"));app.timers.set("focus",setTimeout(()=>{app.deferredOrigins.delete("focus");applyingFocus=true;command({type:"focus",target},origin).catch(()=>{}).finally(()=>{applyingFocus=false;});},180));
   });
   window.addEventListener("scroll",()=>{
     if(!app.view)return;clearTimeout(app.timers.get("scroll"));
-    app.timers.set("scroll",setTimeout(()=>{const x=Math.round(window.scrollX),y=Math.round(window.scrollY);if(Math.abs((state().scroll?.y||0)-y)>3||Math.abs((state().scroll?.x||0)-x)>3)command({type:"scroll",x,y}).catch(()=>{});},250));
+    const origin=viewOrigin(),x=Math.round(window.scrollX),y=Math.round(window.scrollY);origin.writes=[["scroll"]];app.deferredOrigins.set("scroll",origin);
+    app.timers.set("scroll",setTimeout(()=>{app.deferredOrigins.delete("scroll");if(Math.abs((state().scroll?.y||0)-y)>3||Math.abs((state().scroll?.x||0)-x)>3)command({type:"scroll",x,y},origin).catch(()=>{});},250));
   },{passive:true});
   document.addEventListener("keydown",event=>{
     if(event.key==="Escape" && state().modal){perform("modal.close").catch(fail);}
