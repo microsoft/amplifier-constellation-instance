@@ -100,6 +100,10 @@ def main():
             # ':' disables environment expansion, preserving literal '$' in paths.
             "ExecStart=:" + unit_quote(str(home / "bin/agent-instance"), command=True) + " serve --home " + unit_quote(str(home), command=True),
             "Restart=on-failure",
+            # systemd counts a termination signal as a clean exit, so on-failure alone
+            # leaves the agent down after a low-memory daemon or another program ends it.
+            # A stop requested through systemd is never restarted.
+            "RestartForceExitStatus=SIGTERM",
             "RestartSec=5",
             "TimeoutStopSec=30",
             "KillMode=control-group",

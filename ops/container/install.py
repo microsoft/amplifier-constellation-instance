@@ -118,6 +118,7 @@ Wants={container}
 [Service]
 ExecStart=/usr/bin/python3 {state}/bridge.py {state}/bridge.json
 Restart=on-failure
+RestartForceExitStatus=SIGTERM
 RestartSec=2
 UMask=0077
 MemoryMax=128M
@@ -138,6 +139,7 @@ ExecStartPre=/usr/bin/test -S {state}/sockets/owner-login.sock
 ExecStart=/usr/bin/docker start --attach {name}
 ExecStop=/usr/bin/docker stop --time 35 {name}
 Restart=on-failure
+RestartForceExitStatus=SIGTERM
 RestartSec=3
 TimeoutStopSec=45
 [Install]

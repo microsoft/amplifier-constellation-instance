@@ -63,6 +63,8 @@ class NativeInstallTests(unittest.TestCase):
                 service = native.make_service(home, {'instance_id': 'd442aa2b-768e-4dc0-b60a-6964a413d40f'})
             path = owner / '.config/systemd/user' / service['name']
             text = path.read_text()
+            # on-failure alone leaves the agent down after an outside termination signal.
+            self.assertIn('Restart=on-failure\nRestartForceExitStatus=SIGTERM\n', text)
             text = '\n'.join('ExecStart=/usr/bin/true' if line.startswith('ExecStart=') else line for line in text.splitlines()) + '\n'
             path.write_text(text)
             result = subprocess.run(['systemd-analyze', 'verify', '--man=no', str(path)], capture_output=True, text=True)
