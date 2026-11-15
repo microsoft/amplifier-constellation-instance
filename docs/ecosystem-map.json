@@ -1,0 +1,104 @@
+{
+  "audience": "People installing an independent agent; administrators",
+  "citations": [
+    {
+      "path": "README.md",
+      "ref": "2178d36a4b987f15a0b70f2854cd530895f203b6",
+      "sha256": "2fed7a5c9d775b5f579303c85ad2c02f81785b956370b042e5ba5450896b7030",
+      "url": "https://github.com/microsoft/amplifier-constellation-instance/blob/2178d36a4b987f15a0b70f2854cd530895f203b6/README.md"
+    },
+    {
+      "path": "contracts/README.md",
+      "ref": "2178d36a4b987f15a0b70f2854cd530895f203b6",
+      "sha256": "d50fc5ea0607f20754c01390cf857e2e9acca9d8a48dea50c7b49410cec2e296",
+      "url": "https://github.com/microsoft/amplifier-constellation-instance/blob/2178d36a4b987f15a0b70f2854cd530895f203b6/contracts/README.md"
+    },
+    {
+      "path": "docs/acp-boundary.md",
+      "ref": "2178d36a4b987f15a0b70f2854cd530895f203b6",
+      "sha256": "e3d43df2ebfb29f5e862e428796912b3579127ad9775a3db2786eb26e9d8774e",
+      "url": "https://github.com/microsoft/amplifier-constellation-instance/blob/2178d36a4b987f15a0b70f2854cd530895f203b6/docs/acp-boundary.md"
+    }
+  ],
+  "display_name": "Constellation Instance",
+  "edges": [
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "identity"
+    },
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "management"
+    },
+    {
+      "from": "self",
+      "relation": "contains",
+      "to": "attach"
+    },
+    {
+      "from": "attach",
+      "relation": "uses",
+      "to": "engine"
+    },
+    {
+      "from": "self",
+      "relation": "integrates",
+      "to": "connections"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "self",
+      "kind": "self",
+      "label": "Constellation Instance",
+      "repository": "microsoft/amplifier-constellation-instance"
+    },
+    {
+      "id": "identity",
+      "kind": "internal",
+      "label": "Identity and private state"
+    },
+    {
+      "id": "management",
+      "kind": "internal",
+      "label": "Management and lifecycle"
+    },
+    {
+      "id": "attach",
+      "kind": "internal",
+      "label": "ACP attach boundary"
+    },
+    {
+      "id": "engine",
+      "kind": "external",
+      "label": "Selected ACP engine"
+    },
+    {
+      "id": "connections",
+      "kind": "external",
+      "label": "Independent connectors"
+    }
+  ],
+  "notes": [
+    "Constellation Runtime is one compatible engine choice, not a required internal module of every Agent Instance.",
+    "Connectors retain their own installations and platform credentials; Instance does not contain them.",
+    "Internal nodes are implementation responsibilities, not assertions that separate repositories exist."
+  ],
+  "page_kind": "agent installation",
+  "purpose": "Keep an agent’s identity, configuration and private work available across connected experiences.",
+  "ref": "2178d36a4b987f15a0b70f2854cd530895f203b6",
+  "repository": "microsoft/amplifier-constellation-instance",
+  "roles": [
+    "Agent Instance"
+  ],
+  "start_cta": {
+    "basis": "Existing approved README route; target release assets/availability not freshly audited in this plan.",
+    "label": "Download a consumer bundle",
+    "url": "https://github.com/microsoft/amplifier-constellation-instance/releases"
+  },
+  "summary": "One selected-engine implementation of Agent Instance, with its own identity and lifecycle.",
+  "supports_roles": [],
+  "visibility": "public"
+}
