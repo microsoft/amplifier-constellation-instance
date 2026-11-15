@@ -170,7 +170,7 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
     if system=='Linux':
         def quote(x):return '"'+x.replace('\\','\\\\').replace('"','\\"').replace('%','%%').replace('$','$$')+'"'
         unit=Path.home()/'.config/systemd/user'/(name+'.service');unit.parent.mkdir(parents=True,exist_ok=True)
-        unit.write_text('[Unit]\nDescription=Updates for one Constellation installation\nAfter=network-online.target\n[Service]\nExecStart='+' '.join(map(quote,argv))+'\nRestart=on-failure\nRestartSec=5\nUMask=0077\n[Install]\nWantedBy=default.target\n');unit.chmod(0o600)
+        unit.write_text('[Unit]\nDescription=Updates for one Constellation installation\nAfter=network-online.target\n[Service]\nExecStart='+' '.join(map(quote,argv))+'\nRestart=on-failure\nRestartForceExitStatus=SIGTERM\nRestartSec=5\nUMask=0077\n[Install]\nWantedBy=default.target\n');unit.chmod(0o600)
         active=subprocess.run(['systemctl','--user','is-active','--quiet',name+'.service'],capture_output=True).returncode==0
         run('systemctl','--user','daemon-reload');run('systemctl','--user','enable','--now',name+'.service')
         if active:run('systemctl','--user','restart',name+'.service')
