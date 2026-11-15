@@ -28,9 +28,48 @@ package = load('package-consumer')
 consumer = load('consumer-bundle')
 baseline = load('build-consumer-baseline')
 startup = load('consumer_startup_live', 'tests')
+live = load('consumer_bundle_live', 'tests')
 
 
 class BundleTests(unittest.TestCase):
+    def native_oracle_fixture(self, root):
+        manifest = self.fixture(root)
+        runtime = self.native_fixture(root, manifest)
+        runtime['platform'] = 'windows-x86_64'
+        runtime['binary'] = 'engine/native/agent-runtime.exe'
+        (root / runtime['binary']).write_bytes(b'verified fixture engine')
+        manifest['files'][runtime['binary']] = runtime['binary_sha256']
+        lock = {'version': runtime['version'], 'assets': [{'platform': runtime['platform'],
+                'asset': 'release.zip', 'binary_sha256': runtime['binary_sha256'],
+                'asset_sha256': runtime['archive_sha256']}]}
+        (root / 'setup/native-runtime-lock.json').write_text(json.dumps(lock))
+        return manifest, lock
+
+    def test_native_qualification_rejects_self_consistent_stale_bundle(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); manifest, lock = self.native_oracle_fixture(root)
+            self.assertEqual(live.verify_native_bundle(root, manifest, lock), manifest['native_runtime'])
+            with self.assertRaisesRegex(AssertionError, 'lock differs'):
+                live.verify_native_bundle(root, manifest, dict(lock, version='newer-release'))
+
+    def test_native_qualification_rejects_omitted_engine_and_wrong_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); manifest, lock = self.native_oracle_fixture(root)
+            with self.assertRaisesRegex(AssertionError, 'missing from bundle'):
+                live.verify_native_bundle(root, dict(manifest, native_runtime=None), lock)
+            for field in ('version', 'binary_sha256', 'archive_sha256'):
+                changed = dict(manifest, native_runtime=dict(manifest['native_runtime'], **{field: 'wrong'}))
+                with self.subTest(field=field), self.assertRaisesRegex(AssertionError, field + ' differs'):
+                    live.verify_native_bundle(root, changed, lock)
+
+    def test_native_qualification_checks_actual_bytes_not_only_manifest_hashes(self):
+        for field in ('binary', 'archive'):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); manifest, lock = self.native_oracle_fixture(root)
+                (root / manifest['native_runtime'][field]).write_bytes(b'other release')
+                with self.assertRaises(AssertionError):
+                    live.verify_native_bundle(root, manifest, lock)
+
     def observe_reenrollment_child(self, case):
         real_popen = subprocess.Popen
         with tempfile.TemporaryDirectory(prefix='reenrollment-observer-') as temporary:

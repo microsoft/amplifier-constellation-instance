@@ -19,6 +19,31 @@ import time
 import zipfile
 
 
+def verify_native_bundle(bundle, manifest, source_lock):
+    """Bind the packaged engine to the checked-out release input, not itself."""
+    bundled_lock = json.loads((bundle / 'setup/native-runtime-lock.json').read_text())
+    assert bundled_lock == source_lock, 'Bundled Native lock differs from this source'
+    target = manifest['target']
+    family = 'windows' if 'windows' in target else ('macos' if 'apple' in target else 'linux')
+    platform = family + '-' + target.split('-')[0]
+    asset = next((a for a in source_lock['assets'] if a['platform'] == platform), None)
+    runtime = manifest.get('native_runtime')
+    if asset is None:
+        assert runtime is None, 'Unadvertised bundled Native engine'
+        return None
+    assert runtime is not None, 'Published default Native engine missing from bundle'
+    expected = {'version': source_lock['version'], 'platform': platform,
+                'binary': 'engine/native/' + ('agent-runtime.exe' if family == 'windows' else 'agent-runtime'),
+                'binary_sha256': asset['binary_sha256'],
+                'archive': 'engine/native/' + asset['asset'], 'archive_sha256': asset['asset_sha256']}
+    for field, value in expected.items():
+        assert runtime.get(field) == value, 'Bundled Native ' + field + ' differs from this source'
+    for field, digest in [('binary', 'binary_sha256'), ('archive', 'archive_sha256')]:
+        assert manifest['files'][runtime[field]] == expected[digest]
+        assert hashlib.sha256((bundle / runtime[field]).read_bytes()).hexdigest() == expected[digest]
+    return expected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', required=True, type=Path)
@@ -38,6 +63,9 @@ def main():
                     target.chmod((entry.external_attr >> 16) & 0o777)
         executable = bundle / ('agent-instance.exe' if os.name == 'nt' else 'agent-instance')
         manifest = json.loads((bundle / 'consumer-bundle.json').read_text())
+        source_lock = json.loads((Path(__file__).resolve().parents[1] / 'scripts/native-runtime-lock.json').read_text())
+        expected_native = verify_native_bundle(bundle, manifest, source_lock)
+        checks.append('packaged Native lock, version and archive/binary hashes match the checked-out release inputs')
         home = root / 'installed agent café 日本'
         env = os.environ.copy()
         env.pop('PYTHONPATH', None); env.pop('PYTHONHOME', None)
@@ -79,7 +107,11 @@ def main():
         checks.append('private interpreter loads actual SQLite and TLS without external Python')
         if manifest.get('native_runtime'):
             receipt = json.loads((home / 'engine/installation.json').read_text())
-            assert receipt['sha256'] == manifest['native_runtime']['binary_sha256']
+            assert receipt['sha256'] == expected_native['binary_sha256']
+            assert receipt['version'] == expected_native['version']
+            installed_engine = home / receipt['backend']['command'].removeprefix('${AGENT_HOME}/')
+            assert hashlib.sha256(installed_engine.read_bytes()).hexdigest() == expected_native['binary_sha256']
+            assert subprocess.check_output([str(installed_engine), '--version'], env=env, text=True).strip() == 'agent-runtime ' + expected_native['version']
             assert receipt['credentials_copied'] is False
             assert json.loads((home / 'engine/runtime.json').read_text(encoding='utf-8'))['name'] == 'Disposable café 日本'
             checks.append('published default native engine installed from verified bundle without setup download')

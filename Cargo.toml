@@ -1,6 +1,6 @@
 [package]
 name = "agent-instance"
-version = "0.22.6"
+version = "0.22.7"
 edition = "2024"
 rust-version = "1.88"
 publish = false
