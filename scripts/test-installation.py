@@ -68,7 +68,7 @@ class InstallationTests(unittest.TestCase):
                 self.assertIn(str(home / "bin/agent-instance"), unit)
                 self.assertIn("ExecStart=:", unit)
                 self.assertIn("KillMode=control-group", unit)
-                self.assertIn("Restart=on-failure\nRestartForceExitStatus=SIGTERM\n", unit)
+                self.assertIn("\nRestart=always\n", unit)
                 self.assertEqual((home / "agent-instance.service").stat().st_mode & 0o777, 0o600)
             self.assertNotEqual(*unit_names)
 
