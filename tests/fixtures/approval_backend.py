@@ -19,7 +19,7 @@ def prompt(req):
         while not pathlib.Path("release-permission").exists() and time.monotonic()<deadline:
             time.sleep(.005)
     event=threading.Event()
-    row={"event":event,"req":req}
+    row={"event":event,"req":req,"stop_order_required":spec.get("stop_order_required",False)}
     waiting[sid]=row
     descriptor={"version":1,"producer":spec.get("producer",producer),"key":spec.get("key","a"*64),"description":"Write the fixture’s fixed disposable report","allowOptionId":"permit","authorityLifetime":spec.get("lifetime","request")}
     descriptor.update(spec.get("descriptor",{}))
@@ -29,6 +29,8 @@ def prompt(req):
     if spec.get("ambiguous"):
         options.append({"optionId":"other-permit","kind":"allow_once","name":"Other permission"})
     emit({"jsonrpc":"2.0","id":1,"method":"_fixture/question" if spec.get("question") else "session/request_permission","params":{"sessionId":sid,"toolCall":{"toolCallId":"call-1","title":"Disposable fixture effect","rawInput":{"secret":"raw-arguments-canary"},"_meta":{NS:descriptor}},"options":options}})
+    if spec.get("withdraw"):
+        emit({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}})
     if not event.wait(5):
         result(req,{"stopReason":"cancelled","fixtureError":"callback did not settle"})
     elif not row.get("cancelled"):
@@ -55,6 +57,13 @@ for line in sys.stdin:
         if "id" in req: result(req,{})
     elif method is None:
         for row in list(waiting.values()):
+            if row.get("stop_order_required") and not row.get("cancelled"):
+                # A refusal is not a Stop: an engine may immediately continue.
+                # Keep this deterministic rather than depending on thread timing.
+                row["cancelled"]=True
+                result(row["req"],{"stopReason":"end_turn","fixtureOrder":"permission-resolved-before-stop"})
+                row["event"].set()
+                continue
             row["decision"]=req.get("result",{}).get("outcome")
             row["event"].set()
     elif "id" in req:

@@ -700,3 +700,73 @@ async fn one_policy_owner_maps_remember_to_once_and_does_not_answer_questions() 
     c.recv().await;
     c.close().await;
 }
+
+#[tokio::test]
+async fn stop_reaches_engine_without_first_resolving_permission_as_refusal() {
+    let f = Fixture::new();
+    f.configure("ask", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(&sid, json!({"stop_order_required":true})).await;
+    let request = c.recv().await;
+    c.tx.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
+        .await
+        .unwrap();
+    let terminal = c.recv().await;
+    assert_eq!(terminal["id"], 102);
+    assert_eq!(terminal["result"]["stopReason"], "cancelled", "{terminal}");
+    c.answer(&request, "allow_always").await;
+    c.tx.send(
+        json!({"jsonrpc":"2.0","id":103,"method":"session/close","params":{"sessionId":sid}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.recv().await["id"], 103);
+    assert_eq!(f.policy().await["rules"], json!([]));
+    assert!(
+        f.state
+            .list_records("approval_decisions")
+            .unwrap()
+            .is_empty()
+    );
+    c.close().await;
+}
+
+#[tokio::test]
+async fn backend_withdrawal_uses_frontend_id_and_retires_only_that_offer() {
+    let f = Fixture::new();
+    f.configure("ask", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(&sid, json!({"withdraw":true})).await;
+    let request = c.recv().await;
+    let withdrawn = c.recv().await;
+    assert_eq!(withdrawn["method"], "$/cancel_request");
+    assert_eq!(
+        withdrawn["params"]["requestId"], request["id"],
+        "{withdrawn}"
+    );
+    c.answer(&request, "allow_always").await;
+    c.tx.send(
+        json!({"jsonrpc":"2.0","id":103,"method":"session/cancel","params":{"sessionId":sid}}),
+    )
+    .await
+    .unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let v = c.recv().await;
+        ids.insert(v["id"].as_u64().unwrap());
+        if v["id"] == 102 {
+            assert_eq!(v["result"]["stopReason"], "cancelled");
+        }
+    }
+    assert_eq!(ids, std::collections::BTreeSet::from([102, 103]));
+    assert_eq!(f.policy().await["rules"], json!([]));
+    assert!(
+        f.state
+            .list_records("approval_decisions")
+            .unwrap()
+            .is_empty()
+    );
+    c.close().await;
+}

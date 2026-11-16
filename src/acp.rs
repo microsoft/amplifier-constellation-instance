@@ -498,8 +498,10 @@ async fn relay_connection(
                         if matches!(method.as_str(),"session/cancel"|"session/close")
                             && let Some(sid)=value["params"]["sessionId"].as_str() {
                             crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
-                            let ids:Vec<_>=permission_offers.iter().filter(|(_,o)|o.session==sid).map(|(id,_)|id.clone()).collect();
-                            for id in ids {let offer=permission_offers.remove(&id).unwrap();input.send(offer.cancelled()).await?;}
+                            // Retire local choices, then let the engine receive Stop.
+                            // A synthesized permission refusal first can resume its
+                            // provider loop before cancellation reaches that engine.
+                            permission_offers.retain(|_,offer|offer.session!=sid);
                             pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                             for request in pending.values_mut().filter(|request| request.method == "session/prompt" && request.session_id.as_deref() == Some(sid)) { request.cancelled = true; }
                         }
@@ -756,6 +758,15 @@ async fn relay_connection(
                         data.remove(crate::attention::META);
                     }
                     idle_deadline = Instant::now() + idle_duration;
+                    if value["method"]=="$/cancel_request" {
+                        let backend_id=&value["params"]["requestId"];
+                        if let Some(key)=permission_offers.iter().find(|(_,offer)|offer.id==*backend_id).map(|(key,_)|key.clone()) {
+                            let offer=permission_offers.remove(&key).unwrap();
+                            // Cancellation names the request on this hop, just as
+                            // its original permission request did. Retire only it.
+                            value["params"]["requestId"]=json!(offer.frontend_id);
+                        }
+                    }
                     if value["method"]=="session/update" {
                         let receipt=&value["params"]["update"]["_meta"]["io.github.bkrabach.agent-runtime"]["inputReceipt"];
                         if let (Some(sid),Some(id),Some(status))=(value["params"]["sessionId"].as_str(),receipt["inputId"].as_str(),receipt["state"].as_str()){crate::source_delivery::observe(&state,&principal,sid,id,status)?;}

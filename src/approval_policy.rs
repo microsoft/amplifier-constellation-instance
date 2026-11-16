@@ -22,7 +22,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 pub const META: &str = "com.microsoft.amplifier.approval-policy";
 pub const CAPABILITY: &str = "agent-instance.approval-policy/1";
-pub const REVOCATION_NOTICE: &str = "Future matching requests will ask again; already approved work or conversation grants can remain valid until completed/stopped/revoked in engine.";
+pub const REVOCATION_NOTICE: &str = "In Ask mode, future matching requests will ask again. Automatic mode continues approving permitted current requests until changed to Ask. Already approved work or conversation grants can remain valid until completed/stopped/revoked in engine.";
 const MAX_RULES: usize = 256;
 const MAX_CLIENTS: usize = 128;
 
