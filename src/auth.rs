@@ -65,6 +65,88 @@ fn authenticate_os(_service: &str, username: &str, password: String) -> bool {
     crate::platform::windows::authenticate(username, password)
 }
 
+pub fn login_owner(config: &crate::config::InstanceConfig) -> &str {
+    config
+        .server
+        .host_pam
+        .as_ref()
+        .map_or(&config.owner, |bridge| &bridge.owner)
+}
+
+pub fn method(config: &crate::config::InstanceConfig) -> &'static str {
+    if config.server.host_pam.is_some() {
+        "host_pam"
+    } else {
+        crate::platform::auth_method()
+    }
+}
+
+fn binding(config: &crate::config::InstanceConfig) -> String {
+    digest(
+        &json!({"owner":config.owner,"pam_service":config.server.pam_service,
+        "host_pam":config.server.host_pam})
+        .to_string(),
+    )
+}
+
+fn generation(
+    db: &rusqlite::Connection,
+    config: &crate::config::InstanceConfig,
+) -> ApiResult<String> {
+    let row: Option<String> = db
+        .query_row(
+            "SELECT value FROM records WHERE collection='authentication' AND id='binding'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let row: Value = row
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .ok_or_else(ApiError::unauthorized)?;
+    if row["fingerprint"] != binding(config) {
+        return Err(ApiError::unauthorized());
+    }
+    row["epoch"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(ApiError::unauthorized)
+}
+
+/// Called at startup and under the managed config write lock. Epoch and cookie
+/// invalidation commit together; changing away and back never revives an old login.
+pub(crate) fn reconcile_sessions(
+    db: &rusqlite::Connection,
+    config: &crate::config::InstanceConfig,
+) -> anyhow::Result<()> {
+    let fingerprint = binding(config);
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT value FROM records WHERE collection='authentication' AND id='binding'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if previous
+        .as_deref()
+        .and_then(|v| serde_json::from_str::<Value>(v).ok())
+        .is_some_and(|v| {
+            v["fingerprint"] == fingerprint && v["epoch"].as_str().is_some_and(|s| !s.is_empty())
+        })
+    {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    // An upgrade with unchanged legacy local sign-in retains its existing cookies.
+    // Opting into a bridge, or any later authentication change, invalidates them.
+    if previous.is_some() || config.server.host_pam.is_some() {
+        tx.execute("DELETE FROM browser_sessions", [])?;
+    }
+    let value = json!({"fingerprint":fingerprint,"epoch":random_token()});
+    tx.execute("INSERT INTO records(collection,id,value,updated_at) VALUES('authentication','binding',?1,?2) ON CONFLICT(collection,id) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", params![value.to_string(),now_ms()])?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -139,12 +221,15 @@ pub fn check(
             session_hash: None,
         });
     }
-    let token = cookie_value(headers, &cookie_name(state)).ok_or_else(ApiError::unauthorized)?;
+    // Config -> database is also the config mutation/session publication order.
+    let current = state.config.read().unwrap();
+    let config = &current.config;
+    let name = format!("ai_{}", config.instance_id.replace('-', ""));
+    let token = cookie_value(headers, &name).ok_or_else(ApiError::unauthorized)?;
     let hash = digest(&token);
-    let row: Option<(String, String)> = state
-        .db
-        .lock()
-        .unwrap()
+    let db = state.db.lock().unwrap();
+    generation(&db, config)?;
+    let row: Option<(String, String)> = db
         .query_row(
             "SELECT owner,csrf FROM browser_sessions WHERE hash=?1 AND expires_at>?2",
             params![hash, now_ms()],
@@ -152,6 +237,9 @@ pub fn check(
         )
         .optional()?;
     let (owner, csrf) = row.ok_or_else(ApiError::unauthorized)?;
+    if owner != login_owner(config) {
+        return Err(ApiError::unauthorized());
+    }
     if mutation {
         same_origin(headers)?;
         if !headers
@@ -281,8 +369,8 @@ pub async fn login(
             None,
         )
     })?;
-    let config = state.instance_config();
-    {
+    let (config, expected_generation) = {
+        let current = state.config.read().unwrap();
         let db = state.db.lock().unwrap();
         let locked: Option<i64> = db
             .query_row(
@@ -302,10 +390,14 @@ pub async fn login(
             "DELETE FROM browser_sessions WHERE expires_at<=?1",
             [now_ms()],
         )?;
-    }
-    let owner = config.owner.clone();
-    let service = config.server.pam_service;
-    let success = if crate::platform::owner_matches(&owner, &login.username) {
+        (current.config.clone(), generation(&db, &current.config)?)
+    };
+    let owner = login_owner(&config).to_owned();
+    let service = config.server.pam_service.clone();
+    let success = if let Some(bridge) = &config.server.host_pam {
+        let _permit = permit;
+        crate::host_pam::authenticate(bridge, &login.username, &login.password).await
+    } else if crate::platform::owner_matches(&owner, &login.username) {
         let authenticated_owner = owner.clone();
         let worker = tokio::task::spawn_blocking(move || {
             // The permit stays with a timed-out PAM call, bounding blocked workers too.
@@ -322,16 +414,17 @@ pub async fn login(
     };
     if !success {
         state.db.lock().unwrap().execute("INSERT INTO login_attempts(key,failures,locked_until) VALUES('owner',1,0) ON CONFLICT(key) DO UPDATE SET failures=CASE WHEN locked_until>0 AND locked_until<?1 THEN 1 ELSE failures+1 END, locked_until=CASE WHEN failures>=4 THEN ?1+60000 ELSE 0 END",[now_ms()])?;
-        state.event(
-            "auth.failed",
-            json!({"method":crate::platform::auth_method()}),
-        )?;
+        state.event("auth.failed", json!({"method":method(&config)}))?;
         return Err(ApiError::unauthorized());
     }
     let token = random_token();
     let csrf = random_token();
     {
+        let current = state.config.read().unwrap();
         let db = state.db.lock().unwrap();
+        if generation(&db, &current.config)? != expected_generation {
+            return Err(ApiError::unauthorized());
+        }
         db.execute("DELETE FROM login_attempts WHERE key='owner'", [])?;
         db.execute(
             "INSERT INTO browser_sessions(hash,owner,csrf,expires_at) VALUES(?1,?2,?3,?4)",
@@ -340,7 +433,7 @@ pub async fn login(
     }
     state.event(
         "auth.signed_in",
-        json!({"actor":owner,"method":crate::platform::auth_method()}),
+        json!({"actor":owner,"method":method(&config)}),
     )?;
     let cookie = format!(
         "{}={}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800",
@@ -358,9 +451,13 @@ pub async fn session(
     headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {
     let p = check(&state, &headers, "observe", false)?;
-    Ok(Json(
-        json!({"owner":state.instance_config().owner,"csrf":p.csrf}),
-    ))
+    let owner = if p.session_hash.is_some() {
+        p.actor
+    } else {
+        // Preserve the existing token-authenticated discovery response.
+        state.instance_config().owner
+    };
+    Ok(Json(json!({"owner":owner,"csrf":p.csrf})))
 }
 pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> ApiResult<Response> {
     let p = check(&state, &headers, "observe", true)?;

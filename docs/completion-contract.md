@@ -44,7 +44,7 @@ prevents starting work or recording review against it. Its current requester
 must freeze a replacement.
 
 The freezing principal becomes `completion_contract.requester_actor`: the
-signed-in OS owner or an authenticated management token (`token:<token-id>`).
+configured sign-in account (the OS owner by default) or an authenticated management token (`token:<token-id>`).
 This does not infer a human identity from a conversation or display name.
 Distinct reviewer token IDs likewise establish distinct principals, not proof
 that different humans control them.
@@ -124,7 +124,7 @@ automatically publishes a completion message to Slack or another experience.
 
 After credential rotation or an explicit reassignment, an administrator can use
 `transfer_requester` with `requester_actor` and `note`. The new principal must be
-the configured OS owner or an unexpired token with `work`/`admin` scope. The
+the configured sign-in account or an unexpired token with `work`/`admin` scope. The
 transfer preserves frozen history and invalidates current review/closure. The
 new requester can freeze a replacement with new reviewer identities. Normal
 work tokens cannot transfer this authority.

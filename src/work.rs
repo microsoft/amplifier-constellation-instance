@@ -807,9 +807,11 @@ pub async fn command(
     } = &body.command
     {
         auth::check(&state, &headers, "admin", true)?;
-        if requester_actor != &state.instance_config().owner {
+        if requester_actor != auth::login_owner(&state.instance_config()) {
             let id = requester_actor.strip_prefix("token:").ok_or_else(|| {
-                ApiError::bad("Choose the OS owner or a current management token principal")
+                ApiError::bad(
+                    "Choose the configured sign-in account or a current management token principal",
+                )
             })?;
             let scopes: Option<String> = state
                 .db

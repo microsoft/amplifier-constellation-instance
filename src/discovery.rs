@@ -158,7 +158,7 @@ pub fn openapi() -> Value {
             "/auth/login",
             vec!["post"],
             "public",
-            "Authenticate the owning OS account using native OS authentication; returns an HTTPS-only session cookie and CSRF token.",
+            "Authenticate the configured sign-in account using native OS authentication or an opt-in private host bridge; returns an HTTPS-only session cookie and CSRF token.",
         ),
         (
             "/auth/session",

@@ -42,9 +42,19 @@ pub struct ServerConfig {
     pub welcome_port: Option<u16>,
     pub public_url: Option<String>,
     pub pam_service: String,
+    /// Optional private host account bridge; the installation owner is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_pam: Option<HostPamConfig>,
     pub embed_origins: Vec<String>,
     pub certificate_file: Option<String>,
     pub private_key_file: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostPamConfig {
+    pub owner: String,
+    pub socket: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -91,6 +101,7 @@ impl InstanceConfig {
                     "agent-instance"
                 }
                 .into(),
+                host_pam: None,
                 embed_origins: vec![],
                 certificate_file: None,
                 private_key_file: None,
@@ -138,6 +149,22 @@ impl InstanceConfig {
             valid_name(&self.server.pam_service),
             "Invalid PAM service name"
         );
+        if let Some(bridge) = &self.server.host_pam {
+            ensure!(cfg!(unix), "Host PAM requires a Unix host");
+            ensure!(
+                !bridge.owner.is_empty()
+                    && bridge.owner == bridge.owner.trim()
+                    && bridge.owner.len() <= 100
+                    && !bridge.owner.chars().any(char::is_control),
+                "Host PAM owner must name one host account"
+            );
+            ensure!(
+                std::path::Path::new(&bridge.socket).is_absolute()
+                    && bridge.socket.len() <= 4096
+                    && !bridge.socket.contains('\0'),
+                "Host PAM socket must be an absolute Unix socket path"
+            );
+        }
         for origin in &self.server.embed_origins {
             let url = reqwest::Url::parse(origin)?;
             ensure!(
@@ -257,4 +284,21 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     drop(f);
     std::fs::rename(temp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod host_pam_config_tests {
+    use super::*;
+    #[test]
+    fn host_pam_is_opt_in_and_requires_supported_platform() {
+        let mut config = InstanceConfig::blank("fixture".into(), "resource-owner".into());
+        assert!(config.server.host_pam.is_none());
+        assert!(config.validate().is_ok());
+        config.server.host_pam = Some(HostPamConfig {
+            owner: "host-owner".into(),
+            socket: "/run/private/owner.sock".into(),
+        });
+        assert_eq!(config.validate().is_ok(), cfg!(unix));
+        assert_eq!(config.owner, "resource-owner");
+    }
 }

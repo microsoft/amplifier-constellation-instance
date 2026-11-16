@@ -10,6 +10,7 @@ pub mod context;
 pub mod discovery;
 pub mod error;
 pub mod host;
+mod host_pam;
 pub mod identity;
 pub mod memory;
 pub mod native_account;
