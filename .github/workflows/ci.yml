@@ -81,6 +81,11 @@ jobs:
         env:
           AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
         run: node ui/tests/attention.mjs
+      - name: Check shared approval settings and revocation
+        if: matrix.runner == 'ubuntu-24.04'
+        env:
+          AGENT_INSTANCE_BINARY: ${{ github.workspace }}/target/release/agent-instance
+        run: node ui/tests/approvals.mjs
       - name: Check native account and model migration controls
         if: matrix.runner == 'ubuntu-24.04'
         env:

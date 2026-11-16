@@ -54,6 +54,20 @@ it performs no provider calls or game actions.
 PLAYWRIGHT_MODULE=/tmp/agent-instance-browser-tests/node_modules/playwright/index.mjs node ui/tests/attention.mjs
 ```
 
+## Approval controls
+
+`approvals.mjs` runs the actual UI and Rust approval-policy API in a disposable
+loopback installation. It checks explicit Ask/automatic selection, client
+delegation, reload persistence, conflicting edits, a deliberately lost save
+reply without retry, safe rule display and revocation, unavailable-policy
+handling, and desktop/mobile layout. The owner browser session and one display
+rule are synthetic; engine decision/remembering behavior is covered by the ACP
+integration tests. No model or live connector is used.
+
+```sh
+PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node ui/tests/approvals.mjs
+```
+
 ## View-intent conflicts
 
 `UI_TEST_VIEW_INTENT_ONLY=1 node ui/tests/fixture.mjs` starts the actual bundled

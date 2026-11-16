@@ -29,6 +29,7 @@
     chevron:'<path d="m9 5 7 7-7 7"/>'
   };
   const app = {savedConnections:null,savedConnectionsError:"",connectionRequests:new Map(),updates:null,updatesError:"",
+    approvalPolicy:null,approvalPolicyError:"",approvalPolicyBusy:false,approvalPolicyNeedsReview:false,approvalPolicyRequest:0,
     development:null,developmentError:"",nativeConfig:null,nativeSchema:null,nativeObservations:null,nativeObservationsError:"",nativeError:"",nativeAccount:null,nativeAccountError:"",nativeAccountTimer:null,nativeModels:null,memory:null,memoryError:"",scheduler:null,execution:null,schedulerError:"",work:null,organization:null,workError:"",profileUse:null,profileUseError:"",workSaving:false,
     contextProviders:[], contextError:"", session:null, csrf:"", doc:null, status:null, schema:null, view:null, events:[], connections:[], sessions:[],
     secrets:[], tokens:[], profiles:{}, profilePackage:null, profilePackageError:"", profilePackageBusy:false, profilePackageImport:null, profilePackageImportError:"", profilePackageExpected:null, sessionDetail:null, source:null, online:true, streamOnline:false,
@@ -377,8 +378,70 @@
     return heading("Work, outcomes, and what needs attention.","Follow what your agent is doing, what it finished, and anything that needs your help.",button("Attention review","attention.open",{icon:"activity"})+button("Refresh","refresh",{icon:"refresh"}))+`<section class="card"><div class="filters"><input class="input" aria-label="Search activity" data-action="filter" data-filter="search" data-control="activity.search" placeholder="Search activity…" value="${esc(filters.search||"")}"><select class="input" aria-label="Activity category" data-action="filter" data-filter="category" data-control="activity.category" ${filters.problems_only?"disabled":""}>${Object.entries(categories).map(([key,label])=>`<option value="${key}" ${activityCategory({...filters,problems_only:false})===key?"selected":""}>${label}</option>`).join("")}</select><span class="small muted" aria-live="polite">${app.activityLoading?"Loading…":`${items.length} shown`}</span></div><div class="activity-options">${filterCheck("Only problems","problems_only","activity.problems")}${filterCheck("Include diagnostics","diagnostics","activity.diagnostics")}</div>${app.activityError?banner(app.activityError,"error"):""}<div data-control="activity.results">${items.length?`<ol class="activity-list">${items.map(e=>`<li class="activity-entry ${e.category==="problems"||e.severity==="error"?"has-problem":""}"><div class="activity-symbol">${icon(e.category==="outcomes"?"check":e.category==="problems"||e.severity==="error"?"info":"activity")}</div><div class="activity-body"><button class="event-button" type="button" data-action="event.inspect" data-event="${esc(e.seq)}"><strong>${esc(e.summary||title(e.kind))}</strong></button><div class="activity-meta"><span>${esc(displayTime(e.at))}</span><span>${esc(categories[e.category]||title(e.category))}</span>${e.data?.session_id?`<span>Session ${esc(shortId(e.data.session_id))}</span>`:""}${diagnostics?`<span class="mono">${esc(e.kind)}</span>`:""}</div></div>${e.category==="problems"||e.severity==="error"?badge("Needs attention","amber"):""}</li>`).join("")}</ol>`:empty(app.activityLoading?"Loading recent activity…":"No matching activity",filters.problems_only?"There are no problems in this view.":"Try a different filter, or check back after your agent has done some work.","activity")}</div>${app.activityHasMore?`<div class="activity-more">${button("Load earlier activity","activity.more",{disabled:app.activityLoading})}</div>`:""}<p class="card-note">${diagnostics?"Diagnostics includes interface updates and protocol details for troubleshooting.":"Interface updates and protocol details stay out of this view. Turn on diagnostics when you want to troubleshoot."}</p></section>`;
   }
   function secretName(s) {return typeof s==="string"?s:s.name;}
+  function approvalDraftRevision() {return draft("approvals.expected_revision",null);}
+  function approvalDraftChanged() {return approvalDraftRevision()!==null;}
+  function approvalSettings() {
+    const p=app.approvalPolicy,dirty=approvalDraftChanged(),stale=dirty&&approvalDraftRevision()!==p?.revision;
+    const disabled=app.approvalPolicyBusy||!!app.approvalPolicyError||!p;
+    const selected=draft("approvals.delegated_clients",p?.delegated_clients||[]);
+    const rules=p?.rules||[],active=rules.filter(r=>r.status==="active");
+    return `<section class="card section-gap" data-control="approvals.panel"><div class="card-header"><div><h2>Approvals</h2><p>Across all chats with this agent.</p></div>${button(dirty?"Discard edits & reload":"Refresh","approvals.reload",{small:true,disabled:app.approvalPolicyBusy})}</div>${app.approvalPolicyError?banner(app.approvalPolicyError,"warning"):""}${stale?banner("Approval settings changed elsewhere. Discard these edits and review the latest settings before saving.","warning"):""}${p?`<fieldset class="approval-fields" ${disabled?"disabled":""}>${choice("When an action needs approval","approvals.mode",p.mode,[["ask","Ask before actions"],["automatic","Automatically approve permitted actions"]],"Automatic approval accepts requests offered by the engine, including requests for file or settings access. Hard engine restrictions, operating-system permissions and work limits still apply. Sign-ins are separate.")}<h3>Where approvals can be remembered</h3><p class="field-help">Choose the connected clients whose approval controls may save an “Always allow” rule for this agent. Other clients can still ask you to approve once.</p>${p.clients.length?p.clients.map(c=>`<label class="check"><input type="checkbox" data-action="edit-draft" data-approval-client="${esc(c.id)}" data-control="approvals.client.${esc(c.id)}" ${selected.includes(c.id)?"checked":""}><span>${esc(c.name||shortId(c.id))}<span class="token-meta">Expires ${esc(displayTime(c.expires_at))}</span></span></label>`).join(""):`<p class="small muted">No eligible clients yet. Create a scoped connection token below to connect an experience.</p>`}<div class="form-footer"><span class="small muted">${dirty?"Unsaved changes":"Settings are saved for this agent."}</span>${button("Save approval settings","approvals.save",{primary:true,disabled:disabled||stale||!dirty})}</div></fieldset><div class="approval-rules"><h3>Remembered approvals</h3><p class="field-help">Matching requests use the rule across this agent’s chats. Changed requests still need their own approval in Ask mode.</p>${active.length?active.map(r=>`<div class="secret-row"><div><strong>${esc(r.description)}</strong><div class="token-meta">${r.usable?"Active":"Not currently usable"} · ${esc(r.producer)} · Added ${esc(displayTime(r.created_at))}</div></div>${button("Revoke","approvals.revoke",{small:true,disabled:disabled||dirty,attrs:`data-id="${esc(r.id)}" data-revision="${esc(p.revision)}"`})}</div>`).join(""):empty("No remembered approvals","Choose “Always allow” on a supported request to save an exact matching rule.","access")}<p class="card-note">Revoking a rule stops future matches. Automatic mode still approves offered requests; choose Ask to require decisions again. Already approved work or conversation grants may continue until completed, stopped or revoked in the engine.${dirty&&active.length?" Save or discard your edits before revoking a rule.":""}</p></div>`:`<p class="muted">${app.approvalPolicyError?"Approval settings are unavailable. No setting has been changed.":"Loading approval settings…"}</p>`}</section>`;
+  }
+  async function loadApprovalPolicy() {
+    if(app.approvalPolicyBusy)return;
+    const session=app.session,request=++app.approvalPolicyRequest;
+    try {
+      const p=await api("approval-policy");
+      if(session!==app.session||request!==app.approvalPolicyRequest)return;
+      if(p?.schema!=="agent-instance.approval-policy/1"||!Number.isSafeInteger(p.revision)||!["ask","automatic"].includes(p.mode)||!Array.isArray(p.clients)||!Array.isArray(p.rules)||!Array.isArray(p.delegated_clients))throw new Error("This agent returned unsupported approval settings.");
+      app.approvalPolicy=p;if(!app.approvalPolicyNeedsReview)app.approvalPolicyError="";
+    } catch(e) {if(session===app.session&&request===app.approvalPolicyRequest)app.approvalPolicyError=e.status===404?"This agent does not yet support shared approval settings.":e.message;}
+  }
+  function queueApprovalDraft(key,value) {
+    if(!app.approvalPolicy||app.approvalPolicyBusy||app.approvalPolicyError)return;
+    if(!approvalDraftChanged())queueDraft("approvals.expected_revision",app.approvalPolicy.revision);
+    queueDraft(key,value);render();
+  }
+  async function saveApprovalPolicy() {
+    if(app.approvalPolicyBusy)return;
+    if(!app.approvalPolicy||app.approvalPolicyError)throw new Error("Load the current approval settings before making changes.");
+    const session=app.session,request=++app.approvalPolicyRequest;
+    const current=()=>session===app.session&&request===app.approvalPolicyRequest;
+    let dispatched=false;
+    app.approvalPolicyBusy=true;render();
+    try {
+      await flushDrafts();if(!current())return;
+      const revision=approvalDraftRevision();
+      if(!Number.isSafeInteger(revision)||revision!==app.approvalPolicy.revision)throw new Error("Discard these edits and review the latest approval settings before saving.");
+      const body={expected_revision:revision,mode:draft("approvals.mode",app.approvalPolicy.mode),delegated_clients:draft("approvals.delegated_clients",app.approvalPolicy.delegated_clients)};
+      dispatched=true;
+      const result=await api("approval-policy",{method:"PUT",body});
+      if(!current())return;app.approvalPolicy=result;
+      await clearDraftNamespace("approvals");if(current())setNotice("Approval settings saved for all chats with this agent.");
+    } catch(e) {
+      if(current()&&dispatched){app.approvalPolicyNeedsReview=true;app.approvalPolicyError=e.status===409?"Approval settings changed elsewhere. Reload and review them before saving again.":"The save could not be confirmed. Reload approval settings before deciding what to do next.";}
+      throw e;
+    } finally {if(current()){app.approvalPolicyBusy=false;render();}}
+  }
+  async function revokeApproval(payload) {
+    if(app.approvalPolicyBusy)return;
+    if(approvalDraftChanged()||!app.approvalPolicy||app.approvalPolicyError)throw new Error("Save or discard your edits and load current settings before revoking a rule.");
+    const revision=Number(payload.revision);
+    if(revision!==app.approvalPolicy.revision||!app.approvalPolicy.rules.some(r=>r.id===payload.id&&r.status==="active"))throw new Error("Reload the current approvals before revoking this rule.");
+    const session=app.session,request=++app.approvalPolicyRequest;
+    const current=()=>session===app.session&&request===app.approvalPolicyRequest;
+    app.approvalPolicyBusy=true;render();
+    try {
+      const result=await api(`approval-policy/rules/${encodeURIComponent(payload.id)}/revoke`,{method:"POST",body:{expected_revision:revision}});
+      if(!current())return;app.approvalPolicy=result;
+      setNotice("Remembered approval revoked. Future requests will follow the current approval setting.");
+    } catch(e) {
+      if(current()){app.approvalPolicyNeedsReview=true;app.approvalPolicyError=e.status===409?"Approval settings changed elsewhere. Reload and review them before revoking again.":"Revocation could not be confirmed. Reload the approvals before deciding what to do next.";}
+      throw e;
+    } finally {if(current()){app.approvalPolicyBusy=false;render();}}
+  }
   function access() {
-    return heading("Access, kept intentional.","Store named secrets and issue scoped access for clients, tools, and other agents.")+`<div class="grid two"><section class="card"><div class="card-header"><div><h2>Named secrets</h2><p>Values stay private. Reference a name in backend settings.</p></div>${button("Add secret","secret.new",{small:true,icon:"plus"})}</div>${app.secrets.length?app.secrets.map(s=>`<div class="secret-row"><div><strong class="mono">${esc(secretName(s))}</strong><div class="token-meta">Value is write-only</div></div><div class="row-actions">${button("Replace","secret.edit",{small:true,quiet:true,attrs:`data-name="${esc(secretName(s))}"`})}${button("Remove","secret.remove",{small:true,quiet:true,attrs:`data-name="${esc(secretName(s))}"`})}</div></div>`).join(""):empty("No stored secrets","Add a secret only when your backend needs it.","access")}</section><section class="card"><div class="card-header"><div><h2>Sign-in & view control</h2><p>This installation is owned by your machine account.</p></div></div><dl class="detail-list"><div class="detail-row"><dt>Owner</dt><dd>${esc(app.doc.config.owner)}</dd></div><div class="detail-row"><dt>Sign-in provider</dt><dd>${app.status?.authentication==="windows_logon"?"Windows account":`PAM · ${esc(app.doc.config.server.pam_service)}`}</dd></div><div class="detail-row"><dt>This display</dt><dd class="mono">${esc(app.view?.id)}</dd></div><div class="detail-row"><dt>View revision</dt><dd>${esc(app.view?.revision||0)}</dd></div></dl><p class="card-note">A token with UI access can control a selected browser’s application view. It cannot read passwords or secret input values.</p>${button("Inspect view state","view.inspect",{small:true,icon:"screen"})}${certificateHelp()}</section></div><section class="card section-gap"><div class="card-header"><div><h2>Access tokens</h2><p>Use scoped tokens for automation instead of sharing your machine password.</p></div>${button("Create token","token.new",{primary:true,small:true,icon:"plus"})}</div>${app.tokens.length?app.tokens.map(t=>`<div class="secret-row"><div><strong>${esc(t.name||shortId(t.id))}</strong><div class="token-meta">${esc((t.scopes||[]).join(" · "))} · Expires ${esc(displayTime(t.expires_at||t.expires))}</div></div>${button("Revoke","token.revoke",{small:true,danger:true,attrs:`data-token="${esc(t.id)}"`})}</div>`).join(""):empty("No automation tokens","Create only the access a particular client or task needs.","access")}<p class="card-note">Observe reads service state. UI adds view control. ACP connects a working client. Owner context additionally gives that client access to the owner’s conversations and responsibility tools. Grant it only to private owner experiences. Profiles permits profile-package updates. Admin permits configuration and runtime changes.</p></section>`;
+    return heading("Access, kept intentional.","Manage approval choices, named secrets and scoped access for this agent.")+approvalSettings()+`<div class="grid two"><section class="card"><div class="card-header"><div><h2>Named secrets</h2><p>Values stay private. Reference a name in backend settings.</p></div>${button("Add secret","secret.new",{small:true,icon:"plus"})}</div>${app.secrets.length?app.secrets.map(s=>`<div class="secret-row"><div><strong class="mono">${esc(secretName(s))}</strong><div class="token-meta">Value is write-only</div></div><div class="row-actions">${button("Replace","secret.edit",{small:true,quiet:true,attrs:`data-name="${esc(secretName(s))}"`})}${button("Remove","secret.remove",{small:true,quiet:true,attrs:`data-name="${esc(secretName(s))}"`})}</div></div>`).join(""):empty("No stored secrets","Add a secret only when your backend needs it.","access")}</section><section class="card"><div class="card-header"><div><h2>Sign-in & view control</h2><p>This installation is owned by your machine account.</p></div></div><dl class="detail-list"><div class="detail-row"><dt>Owner</dt><dd>${esc(app.doc.config.owner)}</dd></div><div class="detail-row"><dt>Sign-in provider</dt><dd>${app.status?.authentication==="windows_logon"?"Windows account":`PAM · ${esc(app.doc.config.server.pam_service)}`}</dd></div><div class="detail-row"><dt>This display</dt><dd class="mono">${esc(app.view?.id)}</dd></div><div class="detail-row"><dt>View revision</dt><dd>${esc(app.view?.revision||0)}</dd></div></dl><p class="card-note">A token with UI access can control a selected browser’s application view. It cannot read passwords or secret input values.</p>${button("Inspect view state","view.inspect",{small:true,icon:"screen"})}${certificateHelp()}</section></div><section class="card section-gap"><div class="card-header"><div><h2>Access tokens</h2><p>Use scoped tokens for automation instead of sharing your machine password.</p></div>${button("Create token","token.new",{primary:true,small:true,icon:"plus"})}</div>${app.tokens.length?app.tokens.map(t=>`<div class="secret-row"><div><strong>${esc(t.name||shortId(t.id))}</strong><div class="token-meta">${esc((t.scopes||[]).join(" · "))} · Expires ${esc(displayTime(t.expires_at||t.expires))}</div></div>${button("Revoke","token.revoke",{small:true,danger:true,attrs:`data-token="${esc(t.id)}"`})}</div>`).join(""):empty("No automation tokens","Create only the access a particular client or task needs.","access")}<p class="card-note">Observe reads service state. UI adds view control. ACP connects a working client. Owner context additionally gives that client access to the owner’s conversations and responsibility tools. Grant it only to private owner experiences. Profiles permits profile-package updates. Admin permits configuration and runtime changes.</p></section>`;
   }
 
   function modal() {
@@ -456,6 +519,7 @@
     if(view.state.route==="activity"&&(before.route!=="activity"||activityFilterKey(before.filters)!==activityFilterKey(view.state.filters)))await loadActivity();
     if(view.state.route==="connections" && before.route!=="connections"){await Promise.all([loadSavedConnections(),loadDevelopment()]);render();}
     if(view.state.route==="updates" && before.route!=="updates"){await loadUpdates();render();}
+    if(view.state.route==="access" && before.route!=="access"){await loadApprovalPolicy();render();}
     if(view.state.route==="profiles" && before.route!=="profiles")await loadProfiles();
     if(view.state.route==="memory"&&before.route!=="memory")await loadMemory();
     if(["work","organization"].includes(view.state.route)&&(before.route!==view.state.route||before.filters?.work_id!==view.state.filters?.work_id))await loadWork();
@@ -508,7 +572,7 @@
     commandValue=clone(commandValue);
     if(commandValue?.type==="set_draft"){
       const path=String(commandValue.path||"");
-      const allowed=(app.savedConnections?.services||[]).flatMap(s=>(s.add?.fields||[]).map(f=>`service_add.${f.name}`)).concat(Object.keys(configFields).map(k=>`config.${k}`).concat(Object.keys(profileNames).map(k=>`profiles.${k}`),workDrafts.concat(["updates.check_minutes","updates.install","updates.channel","updates.agent_initiated","updates.window_start_utc","updates.window_hours","access.secret_name","access.token_name","access.token_hours","access.token_scopes.observe","access.token_scopes.ui","access.token_scopes.acp","access.token_scopes.context:owner","access.token_scopes.tools:use","access.token_scopes.profiles","access.token_scopes.admin","access.token_scopes.work:read","access.token_scopes.work","access.token_scopes.work:execute","access.token_scopes.memory:read","access.token_scopes.memory"])));
+      const allowed=(app.savedConnections?.services||[]).flatMap(s=>(s.add?.fields||[]).map(f=>`service_add.${f.name}`)).concat(Object.keys(configFields).map(k=>`config.${k}`).concat(Object.keys(profileNames).map(k=>`profiles.${k}`),workDrafts.concat(["approvals.mode","approvals.delegated_clients","approvals.expected_revision","updates.check_minutes","updates.install","updates.channel","updates.agent_initiated","updates.window_start_utc","updates.window_hours","access.secret_name","access.token_name","access.token_hours","access.token_scopes.observe","access.token_scopes.ui","access.token_scopes.acp","access.token_scopes.context:owner","access.token_scopes.tools:use","access.token_scopes.profiles","access.token_scopes.admin","access.token_scopes.work:read","access.token_scopes.work","access.token_scopes.work:execute","access.token_scopes.memory:read","access.token_scopes.memory"])));
       if(!allowed.includes(path))return Promise.reject(new Error("Use a supported non-secret draft field. Credentials have dedicated write-only APIs."));
     }
     if(origin)origin.writes=commandWrites(commandValue);
@@ -673,6 +737,9 @@
       case "service.add.save":return saveServiceConnection();
       case "service.connect":return serviceAction("connect",payload.id);
       case "service.disconnect":return serviceAction("disconnect",payload.id);
+      case "approvals.reload":if(app.approvalPolicyBusy)return;await clearDraftNamespace("approvals");app.approvalPolicyNeedsReview=false;app.approvalPolicyError="";await loadApprovalPolicy();render();return;
+      case "approvals.save":return saveApprovalPolicy();
+      case "approvals.revoke":return revokeApproval(payload);
       case "updates.check":return updateAction("check");
       case "updates.update":return updateAction("update");
       case "updates.rollback":return updateAction("rollback");
@@ -791,6 +858,7 @@
     if(results[6]?.status==="fulfilled"){app.profileUse=results[6].value;app.profileUseError="";}else{app.profileUse=null;app.profileUseError="Profile delivery evidence could not be loaded.";}
     if(["updates","dashboard"].includes(currentRoute()))await loadUpdates();
     if(currentRoute()==="connections")await Promise.all([loadDevelopment(),loadSavedConnections()]);
+    if(currentRoute()==="access"&&!app.approvalPolicyBusy)await loadApprovalPolicy();
     if(currentRoute()==="memory")await loadMemory();
     if(["work","organization"].includes(currentRoute()))await loadWork();
     if(state().modal==="attention")app.attention=await api("attention");
@@ -848,6 +916,7 @@
     clearInterval(app.poll);app.poll=setInterval(()=>refresh(false),15000);
   }
   function signedOut() {
+    app.approvalPolicy=null;app.approvalPolicyError="";app.approvalPolicyBusy=false;app.approvalPolicyNeedsReview=false;app.approvalPolicyRequest++;
     app.source?.close();clearInterval(app.poll);clearTimeout(app.accountTimer);clearTimeout(app.nativeAccountTimer);app.nativeAccount=null;app.nativeModels=null;app.account=null;app.backend=null;app.source=null;app.streamOnline=false;app.session=null;app.csrf="";app.tokenOnce=null;app.profilePackage=null;app.profilePackageImport=null;app.profilePackageImportError="";app.profilePackageExpected=null;app.view=null;app.draftPending.clear();app.draftOrigins.clear();app.deferredOrigins.clear();app.viewIntents.clear();app.loading=false;render();
   }
   async function migrateSetupDraft() {
@@ -885,6 +954,7 @@
     if(!app.view){app.view=await api("views",{method:"POST",body:{label:`Browser · ${navigator.platform||"web"}`}});try{sessionStorage.setItem(storageKey(),app.view.id);}catch{}if(doc.config.setup_complete)await command({type:"navigate",route:"dashboard"});}
     await loadUpdates();
     const linkedRoute=location.hash.slice(1);if(doc.config.setup_complete&&routes.includes(linkedRoute))await command({type:"navigate",route:linkedRoute});
+    if(currentRoute()==="access")await loadApprovalPolicy();
     if(currentRoute()==="connections")await Promise.all([loadSavedConnections(),loadDevelopment()]);
     await migrateSetupDraft();
     if(backend.kind==="native")await loadNativeAccount(false);
@@ -912,11 +982,13 @@
   });
   root.addEventListener("input",event=>{
     const node=event.target;if(node.hasAttribute("data-sensitive"))return;
+    if(node.dataset.draft?.startsWith("approvals.")){queueApprovalDraft(node.dataset.draft,node.type==="checkbox"?node.checked:node.value);return;}
     if(node.dataset.draft)queueDraft(node.dataset.draft,node.type==="checkbox"?node.checked:node.value);
     if(node.dataset.filter&&node.type!=="checkbox"&&node.tagName!=="SELECT"){const origin=viewOrigin(),key=node.dataset.filter,value=node.value;if(origin)origin.writes=[["filters",key]];app.deferredOrigins.set(`filter:${key}`,origin);clearTimeout(app.timers.get(`filter:${key}`));app.timers.set(`filter:${key}`,setTimeout(()=>{app.deferredOrigins.delete(`filter:${key}`);command({type:"set_filter",key,value},origin).catch(fail);},250));}
   });
   root.addEventListener("change",event=>{
     const node=event.target;if(node.hasAttribute("data-sensitive"))return;
+    if(node.dataset.approvalClient){const selected=new Set(draft("approvals.delegated_clients",app.approvalPolicy?.delegated_clients||[]));if(node.checked)selected.add(node.dataset.approvalClient);else selected.delete(node.dataset.approvalClient);queueApprovalDraft("approvals.delegated_clients",[...selected]);return;}
     if(node.dataset.control==="identity.avatar.file"){
       const file=node.files?.[0];if(!file)return;
       if(file.size>5*1024*1024){fail(new Error("Choose an image smaller than 5 MB."));return;}
@@ -956,7 +1028,7 @@
     actions:()=>[...root.querySelectorAll("[data-action]")].map(el=>({action:el.dataset.action,control:el.dataset.control||null,label:el.getAttribute("aria-label")||el.textContent.trim().slice(0,100),enabled:!el.disabled,...Object.fromEntries(Object.entries(el.dataset).filter(([key])=>!['action','control'].includes(key)))})).concat([{action:"identity.avatar.upload",control:"identity.avatar.file",label:"Upload agent image",enabled:!!app.session,parameters:["media_type","data","expected_revision"]}]),
     command:value=>command(value),
     perform:(action,payload)=>perform(action,payload),
-    setDraft:(path,value)=>command({type:"set_draft",path,value})
+    setDraft:async(path,value)=>{if(["approvals.mode","approvals.delegated_clients"].includes(path)){if(!app.approvalPolicy||app.approvalPolicyError)throw new Error("Load current approval settings first.");if(!approvalDraftChanged())await command({type:"set_draft",path:"approvals.expected_revision",value:app.approvalPolicy.revision});}return command({type:"set_draft",path,value});}
   });
   window.addEventListener("message",async event=>{
     if(!app.session || event.source!==window.parent || event.source===window)return;
