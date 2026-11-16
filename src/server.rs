@@ -414,6 +414,7 @@ pub fn replace_config(
             &state.home.join("config.json"),
             &serde_json::to_vec_pretty(&next).unwrap(),
         )?;
+        auth::reconcile_sessions(&state.db.lock().unwrap(), &next.config)?;
         let enabled = next.config.enabled;
         *current = next.clone();
         state.runtime_enabled.store(enabled, Ordering::SeqCst);
@@ -460,7 +461,7 @@ pub fn status_value(state: &AppState) -> ApiResult<Value> {
     let sessions = state.list_records("sessions")?;
     let addresses = state.addresses.read().unwrap().clone();
     Ok(
-        json!({"instance_id":config.instance_id,"name":config.name,"setup_complete":config.setup_complete,"enabled":state.enabled(),"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"authentication":crate::platform::auth_method(),"uptime_ms":now_ms()-state.started_at,"connections":connections,"sessions":sessions,"config_revision":document.revision,"addresses":addresses,"backend":{"configured":config.backend.is_some(),"command":config.backend.as_ref().map(|b|&b.command)},"counts":{"connections":connections.len(),"sessions":sessions.len()},"restart_required":addresses.get("effective_server").is_some_and(|s|*s!=json!(config.server)),"profile_activation":"Profiles are supplied on each new prompt; in-flight turns retain their context"}),
+        json!({"instance_id":config.instance_id,"name":config.name,"setup_complete":config.setup_complete,"enabled":state.enabled(),"version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"authentication":auth::method(config),"uptime_ms":now_ms()-state.started_at,"connections":connections,"sessions":sessions,"config_revision":document.revision,"addresses":addresses,"backend":{"configured":config.backend.is_some(),"command":config.backend.as_ref().map(|b|&b.command)},"counts":{"connections":connections.len(),"sessions":sessions.len()},"restart_required":addresses.get("effective_server").is_some_and(|s|*s!=json!(config.server)),"profile_activation":"Profiles are supplied on each new prompt; in-flight turns retain their context"}),
     )
 }
 async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> ApiResult<Json<Value>> {
