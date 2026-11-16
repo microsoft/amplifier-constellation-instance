@@ -6,6 +6,11 @@ running as `anchor` while its owner signs in as their normal host account. This
 is optional: omitted or `null` `server.host_pam` preserves local account sign-in.
 Windows does not accept this option.
 
+Before reverting to a version without this option, remove `server.host_pam`
+through the supported configuration path. Older versions reject the field,
+including a `null` value. Restore the intended local sign-in configuration before
+making that transition; do not treat a failed bridge as permission to bypass it.
+
 An installation administrator can set the following through the existing
 revision-checked management configuration API, or in its private configuration
 before starting the service:

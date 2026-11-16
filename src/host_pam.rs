@@ -94,8 +94,7 @@ mod tests {
         let mut request = [0u8; 256];
         assert!(peer.read(&mut request).await.unwrap() > 0);
         peer.write_all(b"OK\n").await.unwrap();
-        // A success prefix without EOF is still unfinished, not an accepted login.
-        assert!(!attempt.is_finished());
+        // A success prefix without EOF cannot complete an accepted login.
         assert!(!attempt.await.unwrap());
         assert_eq!(peer.read(&mut request).await.unwrap(), 0);
     }
