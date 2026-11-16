@@ -117,6 +117,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/work/import", post(work::import))
         .route("/api/v1/profile-use", get(profile_use::get))
         .route("/api/v1/config", get(config_get).put(config_put))
+        .route(
+            "/api/v1/approval-policy",
+            get(crate::approval_policy::get).put(crate::approval_policy::put),
+        )
+        .route(
+            "/api/v1/approval-policy/rules/{id}/revoke",
+            post(crate::approval_policy::revoke),
+        )
         .route("/api/v1/config/validate", post(config_validate))
         .route(
             "/api/v1/native-config",
@@ -383,6 +391,7 @@ pub fn replace_config(
     config: InstanceConfig,
     actor: &str,
 ) -> ApiResult<Value> {
+    let _approval_guard = state.approval_policy_guard.lock().unwrap();
     config
         .validate()
         .map_err(|e| ApiError::bad(e.to_string()))?;
@@ -471,9 +480,12 @@ async fn descriptor(
         .push(json!({"path":"context/providers/{id}","methods":["PATCH"],"scope":"admin"}));
     document["capabilities"].as_array_mut().unwrap().extend([
         json!("constellation.installation-updates/1"),
+        json!(crate::approval_policy::CAPABILITY),
         json!("constellation.service-connections/1"),
     ]);
     document["operations"].as_array_mut().unwrap().extend([
+        json!({"path":"approval-policy","methods":["GET","PUT"],"scope":"admin"}),
+        json!({"path":"approval-policy/rules/{id}/revoke","methods":["POST"],"scope":"admin"}),
         json!({"path":"service-connections","methods":["GET","POST"],"scope":"admin"}),
         json!({"path":"service-connections/report","methods":["POST"],"scope":"admin"}),
         json!({"path":"updates","methods":["GET"],"scope":"observe"}),
@@ -635,6 +647,7 @@ async fn secret_put(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     let actor = auth::check(&state, &headers, "admin", true)?.actor;
+    let _approval_guard = state.approval_policy_guard.lock().unwrap();
     let path = secret_path(&state, &name)?;
     let value = body["value"]
         .as_str()
@@ -650,6 +663,7 @@ async fn secret_delete(
     Path(name): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let actor = auth::check(&state, &headers, "admin", true)?.actor;
+    let _approval_guard = state.approval_policy_guard.lock().unwrap();
     let path = secret_path(&state, &name)?;
     if state
         .instance_config()

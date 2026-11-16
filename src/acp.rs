@@ -289,12 +289,17 @@ async fn relay_connection(
     }
     launch.stage = "backend_secrets";
     launch.action = "Supply every named secret referenced by the backend configuration, or remove obsolete secret references.";
+    let mut launch_secrets = BTreeMap::new();
     for (name, reference) in &backend.secret_env {
         let secret = state
             .read_secret(reference)
             .map_err(|_| anyhow::anyhow!("A configured backend secret is unavailable"))?;
-        command.env(name, secret);
+        command.env(name, &secret);
+        launch_secrets.insert(name.clone(), secret);
     }
+    let approval_fingerprint =
+        crate::approval_policy::fingerprint_with_secrets(&backend, &launch_secrets)?;
+    drop(launch_secrets);
     #[cfg(unix)]
     command.process_group(0);
     launch.stage = "backend_process";
@@ -326,6 +331,9 @@ async fn relay_connection(
     let idle_duration = Duration::from_secs(config.limits.idle_timeout_seconds);
     let mut idle_deadline = Instant::now() + idle_duration;
     let mut initialized = false;
+    let mut approval_bridge = crate::approval_policy::Bridge::from_launch(approval_fingerprint);
+    let mut permission_offers = BTreeMap::<String, crate::approval_policy::Offer>::new();
+    let mut forwarded_callbacks = BTreeSet::<String>::new();
     let mut maintenance = crate::maintenance::Maintenance::default();
     let mut maintenance_guards = BTreeMap::new();
     let mut client_compaction = false;
@@ -377,6 +385,22 @@ async fn relay_connection(
                         continue;
                     }
                     ensure!(serde_json::to_vec(&value)?.len() <= max_frame, "Client ACP frame exceeds configured limit");
+                    if value.get("method").is_none() {
+                        approval_bridge.check_live(&state, auth_headers.as_ref())?;
+                        let callback_key=value["id"].to_string();
+                        if let Some(offer)=permission_offers.remove(&callback_key) {
+                            let live=loaded_sessions.contains(&offer.session)
+                                && pending.get(&offer.prompt).is_some_and(|p|p.method=="session/prompt"&&!p.cancelled&&p.session_id.as_deref()==Some(&offer.session))
+                                && !maintenance.busy(&offer.session)
+                                && offer.source.as_deref()==session_context.get(&offer.session).map(|source|source.hash.as_str());
+                            let source_ok=if let Some(source)=session_context.get(&offer.session){context::revalidate(&state,&source.hash).await.is_ok()}else{true};
+                            value=if live && source_ok {offer.decide(&state,auth_headers.as_ref(),Some(value))?.unwrap_or_else(||offer.cancelled())}else{offer.cancelled()};
+                        } else if !forwarded_callbacks.remove(&callback_key) {
+                            // Unknown, original-backend, duplicate and late answers never
+                            // bypass a remapped permission decision.
+                            continue;
+                        }
+                    }
                     if let Some(method) = value["method"].as_str().map(str::to_owned) {
                         if value.get("id").is_some_and(|id| pending.contains_key(&id.to_string()) || attention_ids.contains(&id.to_string())) {
                             reject_request(&outgoing, &value, -32600, "Duplicate in-flight JSON-RPC request ID").await?;
@@ -391,6 +415,7 @@ async fn relay_connection(
                             continue;
                         }
                         if method == "initialize" {
+                            approval_bridge.initialize_request(&state, &mut value);
                             client_compaction = value["params"]["clientCapabilities"]["session"]["compaction"].is_object();
                             value["params"]["clientCapabilities"]["session"]["compaction"] = json!({});
                         }
@@ -473,6 +498,8 @@ async fn relay_connection(
                         if matches!(method.as_str(),"session/cancel"|"session/close")
                             && let Some(sid)=value["params"]["sessionId"].as_str() {
                             crate::attention::cancel_session(&state,&principal,&connection_id,sid,session_context.get(sid).map(|p|&p.binding));
+                            let ids:Vec<_>=permission_offers.iter().filter(|(_,o)|o.session==sid).map(|(id,_)|id.clone()).collect();
+                            for id in ids {let offer=permission_offers.remove(&id).unwrap();input.send(offer.cancelled()).await?;}
                             pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                             for request in pending.values_mut().filter(|request| request.method == "session/prompt" && request.session_id.as_deref() == Some(sid)) { request.cancelled = true; }
                         }
@@ -745,6 +772,27 @@ async fn relay_connection(
                         let reply=if value["method"]=="session/request_permission" {json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":{"outcome":"cancelled"}}})} else {rpc_error(value["id"].clone(),-32002,"Client operations are unavailable during conversation maintenance")};
                         input.send(reply).await?;continue;
                     }
+                    if value["method"]=="session/request_permission" && value.get("id").is_some() {
+                        approval_bridge.check_live(&state,auth_headers.as_ref())?;
+                        let sid=value["params"]["sessionId"].as_str().unwrap_or("");
+                        let prompts:Vec<_>=pending.iter().filter(|(_,p)|p.method=="session/prompt"&&!p.cancelled&&p.session_id.as_deref()==Some(sid)).map(|(id,_)|id.clone()).collect();
+                        if auth_headers.is_some() && (!initialized || !loaded_sessions.contains(sid) || prompts.len()!=1) {
+                            input.send(json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":{"outcome":"cancelled"}}})).await?;continue;
+                        }
+                        if initialized && loaded_sessions.contains(sid) && prompts.len()==1 {
+                            let source_ok=if let Some(source)=session_context.get(sid){context::revalidate(&state,&source.hash).await.is_ok()}else{true};
+                            if !source_ok {input.send(json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":{"outcome":"cancelled"}}})).await?;continue;}
+                            if let Some(mut offer)=approval_bridge.offer(&state,auth_headers.as_ref(),&value,&prompts[0])? {
+                                offer.source=session_context.get(sid).map(|source|source.hash.clone());
+                                let key=json!(offer.frontend_id).to_string();
+                                ensure!(!permission_offers.values().any(|o|o.id==offer.id)&&permission_offers.len()<128,"Duplicate or excessive permission callbacks");
+                                if let Some(reply)=offer.decide(&state,auth_headers.as_ref(),None)? {
+                                    input.send(reply).await?;continue;
+                                }
+                                offer.present(&mut value);permission_offers.insert(key,offer);
+                            }
+                        }
+                    }
                     if value.get("method").is_none() && let Some(receipt)=maintenance.finish(&mut value) {crate::maintenance::save(&state,&principal,&receipt)?;state.event("maintenance.finished",receipt)?;}
                     if value["params"]["update"]["sessionUpdate"]=="compaction_update" && !client_compaction {
                         let u=&value["params"]["update"];
@@ -773,6 +821,11 @@ async fn relay_connection(
                         observe(&state, &connection_id, "agent_to_client", method, &value)?;
                     } else if let Some(request) = value.get("id").and_then(|id| pending.remove(&id.to_string())) {
                         maintenance_guards.remove(&request.id.to_string());
+                        if request.method=="session/prompt" {
+                            let prompt_key=request.id.to_string();
+                            let ids:Vec<_>=permission_offers.iter().filter(|(_,o)|o.prompt==prompt_key).map(|(id,_)|id.clone()).collect();
+                            for id in ids {let offer=permission_offers.remove(&id).unwrap();input.send(offer.cancelled()).await?;}
+                        }
                         if let Some((admission,_))=pending_steering_attention.remove(&request.id.to_string())
                             && request.method==STEERING_METHOD && value.get("error").is_none() && value["result"]["outcome"]=="promptRequired" {
                             let restored=crate::attention::restore_unapplied(&state,&admission)?;
@@ -790,6 +843,7 @@ async fn relay_connection(
                                 state.set_record("session_tool_access", sid, json!({"tools_required":true}))?;
                             }
                             if request.method == "initialize" {
+                                approval_bridge.initialize_result(&mut value);
                                 initialized = true;
                                 http_mcp_supported = value["result"]["agentCapabilities"]["mcpCapabilities"]["http"] == true;
                                 context_snapshots_supported = value["result"]["_meta"]["com.microsoft.amplifier.context-snapshot"]["version"] == 1;
@@ -849,6 +903,10 @@ async fn relay_connection(
                         } else {
                             state.event("acp.response", json!({"connection_id":connection_id,"method":request.method.chars().take(120).collect::<String>(),"success":value.get("error").is_none()}))?;
                         }
+                    }
+                    if value.get("method").is_some() && value.get("id").is_some() && !permission_offers.contains_key(&value["id"].to_string()) {
+                        let key=value["id"].to_string();
+                        ensure!(forwarded_callbacks.len()<128 && !permission_offers.values().any(|o|o.id==value["id"]) && forwarded_callbacks.insert(key),"Duplicate or excessive backend callbacks");
                     }
                     let response_id=if value.get("method").is_none(){value.get("id").map(|id|id.to_string())}else{None};
                     send_frontend(&outgoing, value).await?;
