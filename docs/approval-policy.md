@@ -2,9 +2,13 @@
 
 An installed agent can ask before actions, remember a matching approval across
 its chats, or automatically approve permitted actions. The installation owner
-chooses the policy in **Access → Approvals**. Upgrading does not enable automatic
+chooses the policy in **Access & credentials → Approvals**. Upgrading does not enable automatic
 approval or delegate permission to remember: the default is **Ask**, with no
 delegated clients.
+
+This policy covers chats connected through the installed agent's ACP endpoint.
+An engine console that bypasses Instance retains its own approval controls;
+connecting to the installed agent uses the shared policy.
 
 The policy setting does not bypass an engine’s hard resource restrictions,
 budgets, operating-system privileges, or background-work authority. Automatic
