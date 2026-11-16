@@ -1,5 +1,6 @@
 pub mod acp;
 pub mod activity;
+pub mod approval_policy;
 pub mod attention;
 pub mod attention_policy;
 pub mod auth;

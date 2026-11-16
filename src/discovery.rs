@@ -5,6 +5,18 @@ pub fn openapi() -> Value {
     let mut paths = serde_json::Map::new();
     for (path, methods, scope, description) in [
         (
+            "/approval-policy",
+            vec!["get", "put"],
+            "admin",
+            "Per-installed-agent Ask/automatic policy and bounded remembered rules across chats. PUT requires expected_revision, mode and delegated_clients (current ACP token IDs). Defaults to Ask/no delegates. Does not expand engine or resource authority.",
+        ),
+        (
+            "/approval-policy/rules/{id}/revoke",
+            vec!["post"],
+            "admin",
+            "Revoke future matching authorization using expected_revision of the whole policy. Already accepted work or conversation grants may remain valid in the engine.",
+        ),
+        (
             "/attention",
             vec!["get"],
             "observe",

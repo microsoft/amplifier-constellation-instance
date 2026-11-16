@@ -129,3 +129,12 @@ reaches the backend. Advertised backend capabilities, authentication, permission
 and session state remain backend-owned. Plain clients need not adopt the
 extension; plain engines do not implement it. Engine-family changes require a
 new installation; this boundary does not promise portable session files.
+
+## Optional installed-agent approval policy
+
+The optional `com.microsoft.amplifier.approval-policy` version 1 profile negotiates
+Instance ownership of durable matching rules. The engine supplies trusted
+semantic descriptors; Instance maps a remembered choice to the original current
+`allow_once` option. [Approval policy](approval-policy.md) specifies negotiation,
+client delegation, callback identity, lifetime and revocation. Existing engine
+resource guards and the scheduler's interactive-permission refusal remain in force.

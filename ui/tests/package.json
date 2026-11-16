@@ -2,6 +2,6 @@
   "name": "agent-instance-ui-checks",
   "private": true,
   "type": "module",
-  "scripts": {"test:development": "node development.mjs"},
+  "scripts": {"test:development": "node development.mjs", "test:approvals": "node approvals.mjs"},
   "devDependencies": {"playwright": "1.58.2"}
 }

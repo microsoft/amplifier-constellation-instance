@@ -24,3 +24,15 @@
 .execution-report { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 28rem; overflow: auto; font: inherit; padding: 1rem; background: var(--surface-muted, #f5f7f4); }
 
 .agent-portrait{width:100%;height:100%;object-fit:cover;border-radius:inherit}.portrait-settings{display:flex;gap:20px;align-items:center;margin:0 0 28px}.portrait-preview{width:104px;height:104px;border-radius:24px;flex-shrink:0;background:#e8efed;overflow:hidden;display:grid;place-items:center;font-size:32px}.portrait-file{position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}.portrait-settings label.button{position:relative;overflow:hidden;display:inline-flex}.portrait-settings p{max-width:560px;margin:8px 0}.portrait-settings label:focus-within{outline:3px solid #328c80;outline-offset:3px}@media(max-width:580px){.portrait-settings{align-items:flex-start}.portrait-preview{width:72px;height:72px}}
+
+/* Approval choices use the same owner controls as access tokens. */
+.approval-fields{border:0;margin:0;padding:0;min-width:0}
+.approval-fields h3,.approval-rules h3{margin-top:1.5rem}
+.approval-fields[disabled]{opacity:.7}
+.approval-fields .check{align-items:flex-start}
+.approval-rules{border-top:1px solid var(--line);margin-top:1.5rem;padding-top:.25rem}
+.approval-rules .secret-row>div{min-width:0;overflow-wrap:anywhere}
+
+[data-control="approvals.panel"]{margin-bottom:22px}
+.approval-fields .select{display:block;width:100%;max-width:32rem;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
+.approval-fields .field-help,.approval-fields .token-meta{display:block}

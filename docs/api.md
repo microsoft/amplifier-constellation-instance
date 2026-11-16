@@ -133,3 +133,10 @@ Optional [HTTP MCP tool connections](tool-connections.md) are configured through
 ## Installation updates
 
 See [Updates](updates.md) for the optional `constellation.installation-updates/1` management capability, policies, commands, host helper, and agent tool.
+
+## Agent-wide approval policy
+
+The admin-only `approval-policy` GET/PUT and
+`approval-policy/rules/{id}/revoke` POST expose revisioned Ask/automatic settings
+and remembered matching approvals across chats. See [Approval policy](approval-policy.md)
+for exact request shapes, client delegation, revocation and unknown-delivery rules.

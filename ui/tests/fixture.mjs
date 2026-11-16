@@ -52,6 +52,7 @@ const server=http.createServer(async(req,res)=>{
  if(endpoint==='auth/logout'){loggedIn=false;return send({ok:true});}
  if(endpoint==='config'){if(req.method==='PUT'){if(data.expected_revision!==revision)return send({error:'Config conflict'},409);Object.assign(config,data.config);revision++;}return send({revision,config});}
  if(endpoint==='updates')return send({policy:{enabled:false},components:[],history:[]});
+ if(endpoint==='approval-policy'&&req.method==='GET')return send({schema:'agent-instance.approval-policy/1',revision:0,mode:'ask',delegated_clients:[],clients:[],rules:[]});
  if(endpoint==='service-connections')return send({schema:1,services:[],connections:[],observed_at:0,helper_connected:false,request:null,last_operation:null});
  if(endpoint==='development')return send({config_revision:revision,github:{configured:false,verification:null,local_clients_enabled:false,credential_boundary:'GitHub access follows the connected credential. Tool selection does not restrict repositories.'},environment:{kind:'external_acp_backend',build_verified:false,message:'Execution is provided by the connected agent. A project build has not been verified.'},ready_to_develop:false});
  if(endpoint==='schema')return send({type:'object'});

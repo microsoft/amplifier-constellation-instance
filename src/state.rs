@@ -19,6 +19,9 @@ pub fn now_ms() -> i64 {
         .as_millis() as i64
 }
 pub struct AppState {
+    /// Managed backend/config/secret changes serialize with approval decisions.
+    /// Lock order: this gate, then config, then database (no await while held).
+    pub approval_policy_guard: Mutex<()>,
     pub attention_lock: Mutex<()>,
     pub maintenance_activity: Mutex<BTreeMap<String, (usize, bool)>>,
     pub home: PathBuf,
@@ -60,6 +63,7 @@ impl AppState {
             .and_then(|v| v["drain_until"].as_i64())
             .unwrap_or(0);
         Ok(Self {
+            approval_policy_guard: Mutex::new(()),
             attention_lock: Mutex::new(()),
             maintenance_activity: Mutex::new(BTreeMap::new()),
             home,
