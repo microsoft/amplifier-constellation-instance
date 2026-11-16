@@ -770,3 +770,70 @@ async fn backend_withdrawal_uses_frontend_id_and_retires_only_that_offer() {
     );
     c.close().await;
 }
+
+#[tokio::test]
+async fn stop_retains_only_cancellation_id_until_engine_withdrawal() {
+    let f = Fixture::new();
+    f.configure("ask", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(&sid, json!({"withdraw_on_stop":true})).await;
+    let request = c.recv().await;
+    c.tx.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
+        .await
+        .unwrap();
+    let withdrawn = c.recv().await;
+    assert_eq!(withdrawn["method"], "$/cancel_request");
+    assert_eq!(
+        withdrawn["params"]["requestId"], request["id"],
+        "{withdrawn}"
+    );
+    c.answer(&request, "allow_always").await;
+    let terminal = c.recv().await;
+    assert_eq!(terminal["result"]["stopReason"], "cancelled");
+    // A fresh prompt may reuse the engine's callback ID without inheriting any
+    // authorization or old frontend cancellation mapping.
+    c.prompt(&sid, json!({})).await;
+    let next = c.recv().await;
+    assert_ne!(next["id"], request["id"]);
+    c.answer(&next, "reject_once").await;
+    c.recv().await;
+    assert_eq!(f.policy().await["rules"], json!([]));
+    let receipts = f.state.list_records("approval_decisions").unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["outcome"]["optionId"], "refuse");
+    c.close().await;
+}
+
+#[tokio::test]
+async fn cancellation_route_survives_prompt_terminal_without_authority() {
+    let f = Fixture::new();
+    f.configure("ask", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(&sid, json!({"withdraw_on_stop":"after"})).await;
+    let request = c.recv().await;
+    c.tx.send(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":sid}}))
+        .await
+        .unwrap();
+    let terminal = c.recv().await;
+    assert_eq!(terminal["result"]["stopReason"], "cancelled");
+    let withdrawal = c.recv().await;
+    assert_eq!(withdrawal["method"], "$/cancel_request");
+    assert_eq!(withdrawal["params"]["requestId"], request["id"]);
+    c.answer(&request, "allow_always").await;
+    c.tx.send(
+        json!({"jsonrpc":"2.0","id":103,"method":"session/close","params":{"sessionId":sid}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.recv().await["id"], 103);
+    assert_eq!(f.policy().await["rules"], json!([]));
+    assert!(
+        f.state
+            .list_records("approval_decisions")
+            .unwrap()
+            .is_empty()
+    );
+    c.close().await;
+}

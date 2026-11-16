@@ -334,6 +334,8 @@ async fn relay_connection(
     let mut approval_bridge = crate::approval_policy::Bridge::from_launch(approval_fingerprint);
     let mut permission_offers = BTreeMap::<String, crate::approval_policy::Offer>::new();
     let mut forwarded_callbacks = BTreeSet::<String>::new();
+    // Cancellation correlation only: these IDs never authorize a response.
+    let mut retired_permission_ids = BTreeMap::<String, String>::new();
     let mut maintenance = crate::maintenance::Maintenance::default();
     let mut maintenance_guards = BTreeMap::new();
     let mut client_compaction = false;
@@ -501,7 +503,12 @@ async fn relay_connection(
                             // Retire local choices, then let the engine receive Stop.
                             // A synthesized permission refusal first can resume its
                             // provider loop before cancellation reaches that engine.
-                            permission_offers.retain(|_,offer|offer.session!=sid);
+                            let keys:Vec<_>=permission_offers.iter().filter(|(_,offer)|offer.session==sid).map(|(key,_)|key.clone()).collect();
+                            for key in keys {
+                                let offer=permission_offers.remove(&key).unwrap();
+                                ensure!(retired_permission_ids.len()<256,"Too many unsettled permission cancellation routes");
+                                retired_permission_ids.insert(offer.id.to_string(),offer.frontend_id);
+                            }
                             pending_steering_attention.retain(|_,(_,bound)|bound!=sid);
                             for request in pending.values_mut().filter(|request| request.method == "session/prompt" && request.session_id.as_deref() == Some(sid)) { request.cancelled = true; }
                         }
@@ -758,6 +765,11 @@ async fn relay_connection(
                         data.remove(crate::attention::META);
                     }
                     idle_deadline = Instant::now() + idle_duration;
+                    if value.get("method").is_some() && value.get("id").is_some() {
+                        // A fresh request establishes a new meaning for a reused
+                        // backend ID, never an old frontend permission choice.
+                        retired_permission_ids.remove(&value["id"].to_string());
+                    }
                     if value["method"]=="$/cancel_request" {
                         let backend_id=&value["params"]["requestId"];
                         if let Some(key)=permission_offers.iter().find(|(_,offer)|offer.id==*backend_id).map(|(key,_)|key.clone()) {
@@ -765,6 +777,10 @@ async fn relay_connection(
                             // Cancellation names the request on this hop, just as
                             // its original permission request did. Retire only it.
                             value["params"]["requestId"]=json!(offer.frontend_id);
+                        } else if let Some(frontend_id)=retired_permission_ids.remove(&backend_id.to_string()) {
+                            // Stop already retired authority. Keep only the ID
+                            // route until withdrawal, including after terminal.
+                            value["params"]["requestId"]=json!(frontend_id);
                         }
                     }
                     if value["method"]=="session/update" {

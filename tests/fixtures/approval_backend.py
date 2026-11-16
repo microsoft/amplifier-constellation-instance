@@ -19,7 +19,7 @@ def prompt(req):
         while not pathlib.Path("release-permission").exists() and time.monotonic()<deadline:
             time.sleep(.005)
     event=threading.Event()
-    row={"event":event,"req":req,"stop_order_required":spec.get("stop_order_required",False)}
+    row={"event":event,"req":req,"stop_order_required":spec.get("stop_order_required",False),"withdraw_on_stop":spec.get("withdraw_on_stop",False)}
     waiting[sid]=row
     descriptor={"version":1,"producer":spec.get("producer",producer),"key":spec.get("key","a"*64),"description":"Write the fixture’s fixed disposable report","allowOptionId":"permit","authorityLifetime":spec.get("lifetime","request")}
     descriptor.update(spec.get("descriptor",{}))
@@ -52,7 +52,11 @@ for line in sys.stdin:
         row=waiting.get(req["params"]["sessionId"])
         if row:
             row["cancelled"]=True
+            if row.get("withdraw_on_stop") and row["withdraw_on_stop"]!="after":
+                emit({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}})
             result(row["req"],{"stopReason":"cancelled"})
+            if row.get("withdraw_on_stop")=="after":
+                emit({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}})
             row["event"].set()
         if "id" in req: result(req,{})
     elif method is None:
