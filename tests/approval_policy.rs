@@ -161,6 +161,357 @@ fn kinds(v: &Value) -> Vec<&str> {
         .filter_map(|v| v["kind"].as_str())
         .collect()
 }
+fn automatic_choice_fixture(profile: Value) -> Fixture {
+    let f = Fixture::new();
+    f.state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .backend
+        .as_mut()
+        .unwrap()
+        .env
+        .insert("APPROVAL_PROFILE".into(), profile.to_string());
+    f
+}
+fn automatic_choice_profile() -> Value {
+    json!({"version":1,"owner":"instance","producer":"fixture.semantic/1","automaticChoice":true})
+}
+fn automatic_choice(option: &str) -> Value {
+    json!({"version":1,"producer":"fixture.semantic/1","allowOptionId":option})
+}
+
+#[tokio::test]
+async fn automatic_choice_negotiated_default_selects_exact_second_option_without_remembering() {
+    let f = automatic_choice_fixture(automatic_choice_profile());
+    f.configure("automatic", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    for options in [
+        json!([
+            {"optionId":"permit","kind":"allow_once","name":"Default Allow"},
+            {"optionId":"other-permit","kind":"allow_once","name":"Different turn grant"},
+            {"optionId":"engine-cache","kind":"allow_always","name":"Remember"},
+            {"optionId":"refuse","kind":"reject_once","name":"Refuse"}
+        ]),
+        json!([
+            {"optionId":"refuse","kind":"reject_once","name":"Allow"},
+            {"optionId":"other-permit","kind":"allow_once","name":"Renamed"},
+            {"optionId":"permit","kind":"allow_once","name":"Renamed"}
+        ]),
+    ] {
+        c.prompt(&sid, json!({"no_descriptor":true,"options":options,"automatic_choice":automatic_choice("other-permit")})).await;
+        let result = c.recv().await;
+        assert_eq!(
+            result["result"]["decision"]["optionId"], "other-permit",
+            "{result}"
+        );
+        assert_eq!(result["result"]["initProfile"]["automaticChoice"], true);
+    }
+    assert_eq!(f.policy().await["rules"], json!([]));
+    let receipts = f.state.list_records("approval_decisions").unwrap();
+    assert_eq!(receipts.len(), 2);
+    for receipt in receipts {
+        assert_eq!(receipt["basis"], "automatic");
+        assert_eq!(receipt["delivery"], "unknown");
+        assert_eq!(receipt["effects"], "unknown");
+    }
+    c.close().await;
+}
+
+#[tokio::test]
+async fn automatic_choice_invalid_or_unnegotiated_metadata_stays_manual() {
+    let mut bad_version = automatic_choice_profile();
+    bad_version["version"] = json!(2);
+    let mut bad_capability = automatic_choice_profile();
+    bad_capability["automaticChoice"] = json!("true");
+    let profiles = [
+        json!({"version":1,"owner":"instance","producer":"fixture.semantic/1","reusableRequests":true}),
+        bad_version,
+        bad_capability,
+        automatic_choice_profile(),
+    ];
+    for profile in profiles {
+        let f = automatic_choice_fixture(profile.clone());
+        f.configure("automatic", false).await;
+        let mut c = f.connect().await;
+        let sid = c.session(&f).await;
+        let choices = if profile == automatic_choice_profile() {
+            vec![
+                Value::Null,
+                json!([automatic_choice("permit"), automatic_choice("other-permit")]),
+                json!({"version":2,"producer":"fixture.semantic/1","allowOptionId":"permit"}),
+                json!({"version":1,"producer":"changed/1","allowOptionId":"permit"}),
+                json!({"version":1,"producer":"fixture.semantic/1","allowOptionId":["permit","other-permit"]}),
+                json!({"version":1,"producer":"fixture.semantic/1","allowOptionId":"permit","extra":true}),
+                automatic_choice(""),
+                automatic_choice("absent"),
+                automatic_choice("refuse"),
+                automatic_choice("engine-cache"),
+            ]
+        } else {
+            vec![automatic_choice("permit")]
+        };
+        for choice in choices {
+            for ambiguous in [false, true] {
+                let before = f.state.list_records("approval_decisions").unwrap().len();
+                c.prompt(&sid, json!({"no_descriptor":true,"ambiguous":ambiguous,"engine_remember":true,"automatic_choice":choice})).await;
+                let request = c.recv().await;
+                assert_eq!(
+                    request["method"], "session/request_permission",
+                    "profile={profile}, choice={choice}, response={request}"
+                );
+                assert_eq!(
+                    f.state.list_records("approval_decisions").unwrap().len(),
+                    before
+                );
+                c.answer(&request, "reject_once").await;
+                assert_eq!(c.recv().await["result"]["decision"]["optionId"], "refuse");
+                let receipts = f.state.list_records("approval_decisions").unwrap();
+                assert_eq!(receipts.len(), before + 1);
+                assert!(receipts.iter().all(|r| r["basis"] == "client_decision"));
+            }
+        }
+        c.close().await;
+    }
+}
+
+#[tokio::test]
+async fn automatic_choice_absence_keeps_unique_fallback_and_ask_keeps_engine_choices() {
+    let f = automatic_choice_fixture(automatic_choice_profile());
+    f.configure("automatic", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(&sid, json!({"no_descriptor":true})).await;
+    assert_eq!(c.recv().await["result"]["decision"]["optionId"], "permit");
+    c.prompt(&sid, json!({"no_descriptor":true,"ambiguous":true}))
+        .await;
+    let request = c.recv().await;
+    assert_eq!(request["method"], "session/request_permission");
+    c.answer(&request, "reject_once").await;
+    c.recv().await;
+    f.configure("ask", true).await;
+    c.prompt(&sid, json!({"no_descriptor":true,"ambiguous":true,"engine_remember":true,"automatic_choice":automatic_choice("other-permit")})).await;
+    let request = c.recv().await;
+    assert_eq!(request["method"], "session/request_permission");
+    let options = request["params"]["options"].as_array().unwrap();
+    assert_eq!(
+        options
+            .iter()
+            .filter(|o| o["kind"] == "allow_always")
+            .count(),
+        1
+    );
+    assert!(options.iter().any(|o| o["optionId"] == "engine-cache"));
+    c.answer(&request, "reject_once").await;
+    c.recv().await;
+    assert_eq!(f.policy().await["rules"], json!([]));
+    c.close().await;
+}
+
+#[tokio::test]
+async fn automatic_choice_does_not_expand_reusable_descriptor_or_answer_questions() {
+    let mut profile = automatic_choice_profile();
+    profile["reusableRequests"] = json!(true);
+    let f = automatic_choice_fixture(profile);
+    f.configure("ask", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(
+        &sid,
+        json!({"ambiguous":true,"automatic_choice":automatic_choice("other-permit")}),
+    )
+    .await;
+    let request = c.recv().await;
+    assert!(!kinds(&request).contains(&"allow_always"));
+    c.answer(&request, "reject_once").await;
+    c.recv().await;
+    f.configure("automatic", true).await;
+    c.prompt(&sid, json!({"ambiguous":true,"descriptor":{"key":"invalid"},"automatic_choice":automatic_choice("other-permit")})).await;
+    assert_eq!(
+        c.recv().await["result"]["decision"]["optionId"],
+        "other-permit"
+    );
+    c.prompt(&sid, json!({"question":true,"ambiguous":true,"automatic_choice":automatic_choice("other-permit")})).await;
+    let request = c.recv().await;
+    assert_eq!(request["method"], "_fixture/question");
+    c.answer(&request, "reject_once").await;
+    c.recv().await;
+    assert_eq!(f.policy().await["rules"], json!([]));
+    c.close().await;
+}
+
+#[tokio::test]
+async fn automatic_choice_cancel_before_callback_never_authorizes() {
+    let f = automatic_choice_fixture(automatic_choice_profile());
+    f.configure("automatic", false).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(
+        &sid,
+        json!({"gate":true,"ambiguous":true,"automatic_choice":automatic_choice("other-permit")}),
+    )
+    .await;
+    c.recv().await;
+    c.tx.send(
+        json!({"jsonrpc":"2.0","id":103,"method":"session/cancel","params":{"sessionId":sid}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.recv().await["id"], 103);
+    std::fs::write(f.dir.path().join("work/release-permission"), b"release").unwrap();
+    let result = c.recv().await;
+    assert_eq!(result["id"], 102);
+    assert_eq!(result["result"]["decision"]["outcome"], "cancelled");
+    assert!(
+        f.state
+            .list_records("approval_decisions")
+            .unwrap()
+            .is_empty()
+    );
+    c.close().await;
+}
+
+#[tokio::test]
+async fn automatic_choice_invalid_default_does_not_fall_through_to_remembered_rule() {
+    let mut profile = automatic_choice_profile();
+    profile["reusableRequests"] = json!(true);
+    let f = automatic_choice_fixture(profile);
+    f.configure("ask", true).await;
+    let mut c = f.connect().await;
+    let sid = c.session(&f).await;
+    c.prompt(&sid, json!({})).await;
+    let request = c.recv().await;
+    c.answer(&request, "allow_always").await;
+    c.recv().await;
+    f.configure("automatic", true).await;
+    c.prompt(&sid, json!({"automatic_choice":automatic_choice("absent")}))
+        .await;
+    let request = c.recv().await;
+    assert_eq!(request["method"], "session/request_permission");
+    c.answer(&request, "reject_once").await;
+    c.recv().await;
+    assert_eq!(f.policy().await["rules"].as_array().unwrap().len(), 1);
+    c.close().await;
+}
+
+#[tokio::test]
+async fn automatic_choice_rechecks_authority_and_revision_before_receipt() {
+    use agent_instance::approval_policy::{Bridge, META, backend_fingerprint};
+    for change in [
+        "none", "revision", "expired", "revoked", "actor", "backend", "stopped",
+    ] {
+        let f = Fixture::new();
+        f.configure("automatic", false).await;
+        let backend = f.state.instance_config().backend.unwrap();
+        let mut bridge = Bridge::from_launch(backend_fingerprint(&f.state, &backend).unwrap());
+        bridge
+            .initialize_result(&mut json!({"result":{"_meta":{META:automatic_choice_profile()}}}));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", f.client).parse().unwrap(),
+        );
+        let request = json!({"jsonrpc":"2.0","id":1,"params":{"sessionId":"fixture-session","toolCall":{"toolCallId":"fixture-call","_meta":{META:{"automaticChoice":automatic_choice("second")}}},"options":[{"optionId":"first","kind":"allow_once"},{"optionId":"second","kind":"allow_once"}]}});
+        let offer = bridge
+            .offer(&f.state, Some(&headers), &request, "fixture-prompt")
+            .unwrap()
+            .unwrap();
+        match change {
+            "revision" => {
+                f.configure("automatic", false).await;
+            }
+            "expired" => {
+                f.state
+                    .db
+                    .lock()
+                    .unwrap()
+                    .execute("UPDATE tokens SET expires_at=0 WHERE id=?1", [&f.client_id])
+                    .unwrap();
+            }
+            "revoked" => {
+                f.state
+                    .db
+                    .lock()
+                    .unwrap()
+                    .execute("DELETE FROM tokens WHERE id=?1", [&f.client_id])
+                    .unwrap();
+            }
+            "actor" => {
+                headers.insert(
+                    "authorization",
+                    format!("Bearer {}", f.admin).parse().unwrap(),
+                );
+            }
+            "backend" => {
+                f.state
+                    .config
+                    .write()
+                    .unwrap()
+                    .config
+                    .backend
+                    .as_mut()
+                    .unwrap()
+                    .env
+                    .insert("CHANGED_ENDPOINT".into(), "changed".into());
+            }
+            "stopped" => {
+                f.state
+                    .runtime_enabled
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            _ => {}
+        }
+        let result = offer
+            .decide(&f.state, Some(&headers), None)
+            .unwrap()
+            .unwrap();
+        if change == "none" {
+            assert_eq!(result["result"]["outcome"]["optionId"], "second");
+            assert_eq!(f.state.list_records("approval_decisions").unwrap().len(), 1);
+        } else {
+            assert_eq!(
+                result["result"]["outcome"]["outcome"], "cancelled",
+                "{change}: {result}"
+            );
+            assert!(
+                f.state
+                    .list_records("approval_decisions")
+                    .unwrap()
+                    .is_empty(),
+                "{change}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn automatic_choice_duplicate_offered_ids_remain_malformed() {
+    use agent_instance::approval_policy::{Bridge, META, backend_fingerprint};
+    let f = Fixture::new();
+    f.configure("automatic", false).await;
+    let backend = f.state.instance_config().backend.unwrap();
+    let mut bridge = Bridge::from_launch(backend_fingerprint(&f.state, &backend).unwrap());
+    bridge.initialize_result(&mut json!({"result":{"_meta":{META:automatic_choice_profile()}}}));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {}", f.client).parse().unwrap(),
+    );
+    let request = json!({"jsonrpc":"2.0","id":1,"params":{"sessionId":"fixture-session","toolCall":{"toolCallId":"fixture-call","_meta":{META:{"automaticChoice":automatic_choice("duplicate")}}},"options":[{"optionId":"duplicate","kind":"allow_once"},{"optionId":"duplicate","kind":"allow_always"}]}});
+    assert!(
+        bridge
+            .offer(&f.state, Some(&headers), &request, "fixture-prompt")
+            .is_err()
+    );
+    assert!(
+        f.state
+            .list_records("approval_decisions")
+            .unwrap()
+            .is_empty()
+    );
+}
 #[tokio::test]
 async fn owner_api_defaults_cas_delegation_and_no_secret_projection() {
     let f = Fixture::new();

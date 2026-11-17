@@ -28,7 +28,12 @@ def prompt(req):
         options.append({"optionId":"engine-cache","kind":"allow_always","name":"Engine remember"})
     if spec.get("ambiguous"):
         options.append({"optionId":"other-permit","kind":"allow_once","name":"Other permission"})
-    emit({"jsonrpc":"2.0","id":1,"method":"_fixture/question" if spec.get("question") else "session/request_permission","params":{"sessionId":sid,"toolCall":{"toolCallId":"call-1","title":"Disposable fixture effect","rawInput":{"secret":"raw-arguments-canary"},"_meta":{NS:descriptor}},"options":options}})
+    if "options" in spec:
+        options=spec["options"]
+    metadata={} if spec.get("no_descriptor") else descriptor
+    if "automatic_choice" in spec:
+        metadata["automaticChoice"]=spec["automatic_choice"]
+    emit({"jsonrpc":"2.0","id":1,"method":"_fixture/question" if spec.get("question") else "session/request_permission","params":{"sessionId":sid,"toolCall":{"toolCallId":"call-1","title":"Disposable fixture effect","rawInput":{"secret":"raw-arguments-canary"},"_meta":{NS:metadata}},"options":options}})
     if spec.get("withdraw"):
         emit({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":1}})
     if not event.wait(5):
@@ -43,6 +48,8 @@ for line in sys.stdin:
     if method=="initialize":
         init_profile=req.get("params",{}).get("_meta",{}).get(NS)
         profile={"version":1,"owner":"instance","producer":producer,"reusableRequests":True}
+        if "APPROVAL_PROFILE" in os.environ:
+            profile=json.loads(os.environ["APPROVAL_PROFILE"])
         result(req,{"protocolVersion":1,"agentInfo":{"name":"approval-fixture","version":"1"},"agentCapabilities":{},"_meta":{NS:profile} if producer!="none" else {}})
     elif method=="session/new":
         result(req,{"sessionId":str(uuid.uuid4())})

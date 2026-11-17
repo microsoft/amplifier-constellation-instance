@@ -59,7 +59,7 @@ Remembering is optional ACP metadata under
 initialize request `_meta`:
 
 ```json
-{"version":1,"owner":"instance","instanceId":"installed UUID"}
+{"version":1,"owner":"instance","instanceId":"installed UUID","automaticChoice":true}
 ```
 
 A supporting engine responds in initialize result `_meta`:
@@ -100,14 +100,73 @@ For a valid negotiated descriptor and an explicitly delegated ACP client,
 Instance advertises one host-owned `allow_always` choice: **Always allow matching
 requests across this agent’s chats**. It records that choice durably and maps the
 current response to the engine’s advertised `allow_once`; it never asks the engine
-to create a second persistent cache. Negotiated engine-owned persistent choices
-are removed. Unsupported descriptors cannot create remembered rules; normal
+to create a second persistent cache. When `reusableRequests` is negotiated,
+engine-owned persistent choices are removed. Unsupported descriptors cannot create remembered rules; normal
 current-request choices remain available.
 
-Automatic mode is explicitly selected by the owner. It may answer a valid
-current ACP action permission with exactly one unique `allow_once`, including
-engines without the semantic extension. Ambiguous options are not guessed.
-Other methods, such as questions or login, retain their original behavior.
+## Optional default choice for Automatic
+
+Automatic mode is explicitly selected by the owner. Without per-request default
+metadata, it may answer a valid current ACP action permission with exactly one
+unique `allow_once`, including engines without either extension. It never guesses
+from an option's wording or position. Other methods, such as questions or login,
+retain their original behavior.
+
+Some engines offer several materially different `allow_once` decisions for the
+same request. To designate the engine's ordinary Automatic decision, a producer
+may negotiate `automaticChoice: true` in the version 1 initialize profile. The
+Instance initialize request advertises support as shown above; a supporting
+engine responds under the same result `_meta` namespace:
+
+```json
+{"version":1,"owner":"instance","producer":"stable engine contract identity","automaticChoice":true}
+```
+
+This capability is independent of `reusableRequests`. An engine may negotiate
+either or both. Negotiating only `automaticChoice` does not hide engine-owned
+persistent options, create an Instance Always choice, or transfer rule ownership.
+The producer identity is a nonempty, control-free string of at most 160 UTF-8
+bytes, bound to this initialized backend connection and selected configuration.
+
+For the current `session/request_permission`, the engine may include this
+independent object in `params.toolCall._meta["com.microsoft.amplifier.approval-policy"]`:
+
+```json
+{
+  "automaticChoice": {
+    "version": 1,
+    "producer": "same initialized identity",
+    "allowOptionId": "exact current allow_once option ID"
+  }
+}
+```
+
+The nested object has exactly these three fields. Its version must be 1, its
+producer must match the negotiated identity, and its single `allowOptionId` must
+name exactly one current offered option of kind `allow_once`. The normal option
+validation still rejects duplicate option IDs and malformed requests. Arrays,
+unknown fields or versions, empty/unknown IDs, producer drift, missing negotiation
+and references to persistent or rejection choices cannot authorize Automatic.
+When the object is present but invalid, Automatic leaves the request for normal
+manual handling, even if the request also has a single ordinary choice or a
+matching remembered rule. When the object is absent, the existing unique-choice
+fallback remains. Ask mode retains its existing manual and remembered-rule
+behavior.
+
+The engine constructs this metadata from its actual approval decision contract;
+model text, option labels, connector hints and raw arguments are not authoritative.
+It must define the selected option's semantics explicitly, including any turn or
+conversation grant. This field selects one current decision; it does not assert
+a reusable semantic scope or change the lifetime of the engine's grant. A
+reusable descriptor, if also supplied, remains a separate sibling in the same
+namespace and still requires exactly one unique `allow_once`. This extension
+does not make ambiguous requests rememberable.
+
+The existing active-prompt, source, authentication, cancellation, backend and
+policy-revision checks apply at the same durable authorization boundary. No new
+policy store, setting, resource permission, budget, retry or delegation is added.
+Instance support alone does not enable this behavior in an existing adapter:
+that producer must implement the negotiation and per-request metadata too.
 
 ## Lifetime and uncertainty
 

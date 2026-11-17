@@ -133,8 +133,10 @@ new installation; this boundary does not promise portable session files.
 ## Optional installed-agent approval policy
 
 The optional `com.microsoft.amplifier.approval-policy` version 1 profile negotiates
-Instance ownership of durable matching rules. The engine supplies trusted
-semantic descriptors; Instance maps a remembered choice to the original current
-`allow_once` option. [Approval policy](approval-policy.md) specifies negotiation,
-client delegation, callback identity, lifetime and revocation. Existing engine
-resource guards and the scheduler's interactive-permission refusal remain in force.
+Instance ownership of durable matching rules and, independently, an engine's
+explicit default among current ordinary approval choices. The engine supplies
+trusted semantic descriptors; Instance maps a remembered choice to the original
+current `allow_once` option. [Approval policy](approval-policy.md) specifies
+negotiation, client delegation, optional Automatic defaults, callback identity,
+lifetime and revocation. Existing engine resource guards and the scheduler's
+interactive-permission refusal remain in force.
