@@ -176,7 +176,7 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
         if active:run('systemctl','--user','restart',name+'.service')
     elif system=='Darwin':
         label='io.'+name;domain='gui/'+str(os.getuid());path=Path.home()/'Library/LaunchAgents'/(label+'.plist');path.parent.mkdir(parents=True,exist_ok=True)
-        subprocess.run(['launchctl','bootout',domain+'/'+label],capture_output=True)
+        w.stop_launchd(domain+'/'+label)
         # launchd does not inherit the installer shell's PATH. Preserve the
         # owner's tool lookup so Homebrew gh remains available for release API
         # rate-limit fallback and authenticated development-build downloads.
