@@ -120,18 +120,28 @@ class EnrollmentRaceTests(unittest.TestCase):
 
     @contextlib.contextmanager
     def fake_manager(self, system="Linux", action=None):
+        launchd_present = [True]
         def command(*argv):
             self.manager_calls.append(tuple(argv))
             if action:
                 action(argv)
+            if argv[:2] == ("launchctl", "bootstrap"):
+                launchd_present[0] = True
             return ""
+        def query(argv, **kwargs):
+            if argv[:2] == ["launchctl", "print"]:
+                return subprocess.CompletedProcess(argv, 0 if launchd_present[0] else 113)
+            if argv[:2] == ["launchctl", "bootout"]:
+                command(*argv)
+                launchd_present[0] = False
+            return subprocess.CompletedProcess(argv, 0)
         with contextlib.ExitStack() as mocks:
             mocks.enter_context(patch.object(m.platform, "system", return_value=system))
             if system == "Darwin":
                 mocks.enter_context(patch.object(m.os, "getuid", return_value=12345, create=True))
             mocks.enter_context(patch.object(m.Path, "home", return_value=self.root))
             mocks.enter_context(patch.object(m, "run", side_effect=command))
-            mocks.enter_context(patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)))
+            mocks.enter_context(patch.object(m.subprocess, "run", side_effect=query))
             mocks.enter_context(patch.object(m, "ENROLLMENT_TIMEOUT", 2, create=True))
             if hasattr(m, "load_worker"):
                 mocks.enter_context(patch.object(m, "load_worker", return_value=w))
@@ -357,9 +367,14 @@ class EnrollmentRaceTests(unittest.TestCase):
                     if phase == "definition" and path.suffix == ".plist":
                         fail()
                     return result
+                launchd_present = [True]
                 def query(argv, **kwargs):
                     if phase == "bootout" and "bootout" in argv:
                         fail()
+                    if argv[:2] == ["launchctl", "bootout"]:
+                        launchd_present[0] = False
+                    if argv[:2] == ["launchctl", "print"]:
+                        return subprocess.CompletedProcess(argv, 0 if launchd_present[0] else 113)
                     return subprocess.CompletedProcess(argv, 0)
                 with self.fake_manager(system, manager), \
                      patch.object(m.subprocess, "run", side_effect=query), \

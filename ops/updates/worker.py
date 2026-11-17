@@ -94,6 +94,23 @@ def run(argv,timeout=90,env=None):
     if p.returncode: raise RuntimeError('command_failed')
     return p.stdout
 
+def stop_launchd(service,timeout=90):
+    # bootout acknowledges removal before the old process and launchd job have
+    # necessarily exited. Wait for absence before replacing or bootstrapping.
+    # Only status reads repeat; the accepted stop is dispatched once.
+    deadline=time.monotonic()+timeout
+    def status():
+        remaining=deadline-time.monotonic()
+        if remaining<=0:raise TimeoutError('launchd_stop_did_not_settle')
+        result=subprocess.run(['launchctl','print',service],capture_output=True,timeout=min(5,remaining))
+        if result.returncode not in (0,113):raise RuntimeError('launchd_service_state_unknown')
+        if time.monotonic()>=deadline:raise TimeoutError('launchd_stop_did_not_settle')
+        return result.returncode
+    if status()==113:return
+    run(['launchctl','bootout',service],timeout=max(.001,deadline-time.monotonic()))
+    while status()!=113:
+        time.sleep(min(.05,max(0,deadline-time.monotonic())))
+
 def version(text):
     m=re.search(r'\bv?(\d+)\.(\d+)\.(\d+)',text)
     if not m: raise ValueError('version_unavailable')
@@ -443,8 +460,7 @@ class Worker:
             if s['kind']=='systemd-user':run(['systemctl','--user',action,s['name']])
             elif s['kind']=='launchd':
                 if action=='stop':
-                    loaded=subprocess.run(['launchctl','print',s['domain']+'/'+s['name']],capture_output=True).returncode==0
-                    if loaded:run(['launchctl','bootout',s['domain']+'/'+s['name']])
+                    stop_launchd(s['domain']+'/'+s['name'])
                 else:run(['launchctl','bootstrap',s['domain'],s['file']])
             else:
                 verb='Start' if action=='start' else 'Stop'

@@ -263,6 +263,13 @@ pub struct Descriptor {
     description: String,
     authority_lifetime: String,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AutomaticChoice {
+    version: u64,
+    producer: String,
+    allow_option_id: String,
+}
 #[derive(Clone)]
 pub struct Offer {
     pub id: Value,
@@ -275,6 +282,7 @@ pub struct Offer {
     actor: String,
     backend: String,
     allow: String,
+    automatic_allow: String,
     descriptor: Option<Descriptor>,
     always: Option<String>,
     original_options: BTreeSet<String>,
@@ -282,12 +290,14 @@ pub struct Offer {
 pub struct Bridge {
     backend: String,
     producer: Option<String>,
+    automatic_producer: Option<String>,
 }
 impl Bridge {
     pub fn from_launch(backend: String) -> Self {
         Self {
             backend,
             producer: None,
+            automatic_producer: None,
         }
     }
     pub fn check_live(&self, state: &AppState, headers: Option<&HeaderMap>) -> Result<()> {
@@ -305,7 +315,7 @@ impl Bridge {
         if !value["params"]["_meta"].is_object() {
             value["params"]["_meta"] = json!({});
         }
-        value["params"]["_meta"][META] = json!({"version":1,"owner":"instance","instanceId":state.instance_config().instance_id});
+        value["params"]["_meta"][META] = json!({"version":1,"owner":"instance","instanceId":state.instance_config().instance_id,"automaticChoice":true});
     }
     pub fn initialize_result(&mut self, value: &mut Value) {
         let profile = &value["result"]["_meta"][META];
@@ -317,8 +327,17 @@ impl Bridge {
         } else {
             None
         };
+        self.automatic_producer = if profile["version"] == 1
+            && profile["owner"] == "instance"
+            && profile["automaticChoice"] == true
+        {
+            bounded(&profile["producer"], 160)
+        } else {
+            None
+        };
         // Do not advertise backend-owned remembering as an Instance guarantee.
         if self.producer.is_none()
+            && self.automatic_producer.is_none()
             && let Some(meta) = value["result"]["_meta"].as_object_mut()
         {
             meta.remove(META);
@@ -376,11 +395,27 @@ impl Bridge {
             }
         }
         let allow = if allows.len() == 1 {
-            allows.pop().unwrap()
+            allows[0].clone()
         } else {
             String::new()
         };
         let d = &value["params"]["toolCall"]["_meta"][META];
+        // An explicit default is a current decision, not a reusable authority
+        // descriptor. Invalid or unnegotiated metadata must not fall back to a
+        // different ordinary choice, even when only one is offered.
+        let automatic_allow = if let Some(choice) = d.get("automaticChoice") {
+            (|| {
+                let producer = self.automatic_producer.as_ref()?;
+                let choice: AutomaticChoice = serde_json::from_value(choice.clone()).ok()?;
+                (choice.version == 1
+                    && choice.producer == *producer
+                    && allows.contains(&choice.allow_option_id))
+                .then_some(choice.allow_option_id)
+            })()
+            .unwrap_or_default()
+        } else {
+            allow.clone()
+        };
         let descriptor = (|| {
             let producer = self.producer.as_ref()?;
             if allow.is_empty() {
@@ -431,6 +466,7 @@ impl Bridge {
             actor,
             backend: self.backend.clone(),
             allow,
+            automatic_allow,
             descriptor,
             always,
             original_options: ids,
@@ -455,8 +491,8 @@ impl Offer {
     pub fn cancelled(&self) -> Value {
         json!({"jsonrpc":"2.0","id":self.id,"result":{"outcome":{"outcome":"cancelled"}}})
     }
-    fn allowed(&self) -> Value {
-        json!({"jsonrpc":"2.0","id":self.id,"result":{"outcome":{"outcome":"selected","optionId":self.allow}}})
+    fn allowed(&self, option: &str) -> Value {
+        json!({"jsonrpc":"2.0","id":self.id,"result":{"outcome":{"outcome":"selected","optionId":option}}})
     }
     /// Validate and durably authorize under one database transaction. The caller
     /// has already checked the exact active prompt/source and cancellation state.
@@ -527,16 +563,19 @@ impl Offer {
                 });
                 save(&tx, &policy)?;
                 basis = "remembered_by_client";
-                self.allowed()
+                self.allowed(&self.allow)
             } else if self.original_options.contains(option) {
                 basis = "client_decision";
                 response
             } else {
                 return Ok(Some(self.cancelled()));
             }
-        } else if policy.mode == Mode::Automatic && !self.allow.is_empty() {
+        } else if policy.mode == Mode::Automatic {
+            if self.automatic_allow.is_empty() {
+                return Ok(None);
+            }
             basis = "automatic";
-            self.allowed()
+            self.allowed(&self.automatic_allow)
         } else if let Some(d) = &self.descriptor {
             let mut matched = false;
             for r in &policy.rules {
@@ -555,7 +594,7 @@ impl Offer {
                 return Ok(None);
             };
             basis = "remembered_match";
-            self.allowed()
+            self.allowed(&self.allow)
         } else {
             return Ok(None);
         };
