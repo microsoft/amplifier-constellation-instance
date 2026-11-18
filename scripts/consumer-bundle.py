@@ -47,6 +47,8 @@ def validate(root, binary):
     for relative, expected in files.items():
         if sha(ordinary(root, relative)) != expected:
             raise ValueError('Consumer bundle checksum mismatch: ' + relative)
+    if asset['executable'] == 'python.exe' and f"support/{lock['directory']}/pythonw.exe" not in files:
+        raise ValueError('Consumer bundle needs its verified windowless Python')
     for required in (manifest['binary'], 'setup/native-install.py', 'setup/private-python-lock.json',
                      'setup/consumer-bundle.py', f"support/{lock['directory']}/{asset['executable']}"):
         if required not in files:

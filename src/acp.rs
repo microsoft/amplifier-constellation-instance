@@ -235,6 +235,7 @@ async fn relay_connection(
     launch.action = "The runtime stopped during connection setup; start it before reconnecting.";
     ensure!(state.enabled(), "Agent runtime was stopped");
     let mut command = Command::new(expand(&state.home, &backend.command));
+    crate::platform::no_console_window(command.as_std_mut());
     command
         .args(backend.args.iter().map(|arg| expand(&state.home, arg)))
         .current_dir(&work)

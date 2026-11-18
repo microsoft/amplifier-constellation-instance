@@ -32,6 +32,29 @@ live = load('consumer_bundle_live', 'tests')
 
 
 class BundleTests(unittest.TestCase):
+    def test_resolved_windows_namespace_spelling_preserves_exact_target(self):
+        self.assertEqual(startup.canonical_windows_spelling(r"\\?\C:\Users\Brian\pythonw.exe"), startup.canonical_windows_spelling(r"c:\users\brian\pythonw.exe"))
+        self.assertEqual(startup.canonical_windows_spelling(r"\\?\UNC\server\share\pythonw.exe"), startup.canonical_windows_spelling(r"\\server\share\pythonw.exe"))
+        self.assertNotEqual(startup.canonical_windows_spelling(r"C:\one\pythonw.exe"), startup.canonical_windows_spelling(r"C:\two\pythonw.exe"))
+
+    def test_windowless_task_requires_exact_file_not_matching_name_or_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary).resolve(); expected=root/'pythonw.exe';expected.write_bytes(b'exact sealed fixture')
+            digest=hashlib.sha256(expected.read_bytes()).hexdigest()
+            result=startup.windowless_action_evidence(str(expected), expected, digest)
+            self.assertTrue(result['same_file']);self.assertEqual(result['sha256'], digest)
+            other=root/'other';other.mkdir();(other/'pythonw.exe').write_bytes(expected.read_bytes())
+            with self.assertRaisesRegex(AssertionError, 'exact private'):
+                startup.windowless_action_evidence(str(other/'pythonw.exe'), expected, digest)
+            with self.assertRaisesRegex(AssertionError, 'digest'):
+                startup.windowless_action_evidence(str(expected), expected, '0'*64)
+            with self.assertRaisesRegex(AssertionError, 'absolute'):
+                startup.windowless_action_evidence('pythonw.exe', expected, digest)
+            if os.name != 'nt':
+                link=root/'alias';link.symlink_to(expected)
+                with self.assertRaisesRegex(AssertionError, 'link or reparse'):
+                    startup.windowless_action_evidence(str(link), expected, digest)
+
     def native_oracle_fixture(self, root):
         manifest = self.fixture(root)
         runtime = self.native_fixture(root, manifest)
@@ -196,6 +219,7 @@ class BundleTests(unittest.TestCase):
                  'setup/consumer-bundle.py': b'fixed staging',
                  'setup/private-python-lock.json': json.dumps(lock).encode(),
                  f"support/{lock['directory']}/{asset['executable']}": b'private python',
+                 f"support/{lock['directory']}/pythonw.exe": b'private windowless python',
                  f"support/{lock['directory']}/LICENSE.txt": b'retained license'}
         for name, content in files.items():
             path = root / name
@@ -247,6 +271,16 @@ class BundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'checksum'):
                 package.download({'filename': 'python.tar.gz', 'size': 3,
                                   'sha256': '0' * 64}, root)
+
+    def test_windows_bundle_requires_sealed_windowless_interpreter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self.fixture(root)
+            relative = f"support/{manifest['python_directory']}/pythonw.exe"
+            del manifest['files'][relative]
+            (root / 'consumer-bundle.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'verified windowless Python'):
+                consumer.validate(root, root / 'agent-instance.exe')
 
     def test_bundle_validates_every_required_file_and_platform_lock(self):
         with tempfile.TemporaryDirectory() as temp:

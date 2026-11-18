@@ -10,6 +10,8 @@ from contextlib import closing
 import hashlib
 import json
 import os
+import ntpath
+import stat
 from pathlib import Path
 import shutil
 import sqlite3
@@ -19,6 +21,43 @@ import tempfile
 import time
 import uuid
 import zipfile
+
+
+def canonical_windows_spelling(path):
+    # Apply only after strict resolution; retain the original strings in evidence.
+    if path.startswith('\\\\?\\UNC\\'):
+        path='\\\\'+path[8:]
+    elif path.startswith('\\\\?\\'):
+        path=path[4:]
+    return ntpath.normcase(path)
+
+
+def windowless_action_evidence(actual, expected, expected_sha256):
+    """Compare filesystem identity, not Windows TEMP/extended-path spelling."""
+    if not isinstance(actual, str) or not actual or len(actual) > 32767:
+        raise AssertionError('Missing or excessive helper action path')
+    actual, expected = Path(actual), Path(expected)
+    if not actual.is_absolute() or not expected.is_absolute():
+        raise AssertionError('Helper action path is not absolute')
+    for path in (actual, expected):
+        for part in (path, *path.parents):
+            info = part.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                raise AssertionError('Helper action path uses a link or reparse point')
+        if not path.is_file():
+            raise AssertionError('Helper action target is not an ordinary file')
+    actual_canonical, expected_canonical = actual.resolve(strict=True), expected.resolve(strict=True)
+    key = canonical_windows_spelling if os.name == 'nt' else str
+    if key(str(actual_canonical)) != key(str(expected_canonical)) or not os.path.samefile(actual, expected):
+        raise AssertionError('Helper action does not select the exact private interpreter')
+    actual_hash = hashlib.sha256(actual.read_bytes()).hexdigest()
+    if actual_hash != expected_sha256:
+        raise AssertionError('Helper action interpreter digest differs')
+    info = actual.stat()
+    return {'actual_path': str(actual), 'expected_path': str(expected),
+            'actual_canonical': str(actual_canonical), 'expected_canonical': str(expected_canonical),
+            'same_file': True, 'device': info.st_dev, 'inode': info.st_ino,
+            'sha256': actual_hash}
 
 
 def settled_helper(status, policy, observed_after, binary_digest):
@@ -146,12 +185,19 @@ def main():
             if os.name == 'nt':
                 # Hosted runners can be elevated. Inspect the actual registered
                 # jobs as well, so a global logon trigger cannot pass unnoticed.
+                private_receipt = json.loads((home / 'install.json').read_text())['private_python']
+                windowless = home / 'support' / private_receipt['directory'] / private_receipt['windowless_executable']
+                assert windowless.name == 'pythonw.exe'
+                assert hashlib.sha256(windowless.read_bytes()).hexdigest() == private_receipt['windowless_sha256']
                 script = r'''$ErrorActionPreference='Stop';
                   $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
                   function Resolve-Sid($value) { if($value -match '^S-1-') { return (New-Object Security.Principal.SecurityIdentifier($value)).Value }; return (New-Object Security.Principal.NTAccount($value)).Translate([Security.Principal.SecurityIdentifier]).Value };
                   $scheduler=New-Object -ComObject Schedule.Service; $scheduler.Connect();
                   foreach($name in @('AgentInstance-ID','constellation-updates-ID')) {
                     $definition=$scheduler.GetFolder('\').GetTask($name).Definition;
+                    $actionPath=$null; if($definition.Actions.Count -eq 1) { $actionPath=$definition.Actions.Item(1).Path };
+                    Write-Output ('TASK_OBSERVATION '+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject ([ordered]@{name=$name;action_count=$definition.Actions.Count;action_path=$actionPath})))));
+                    if($definition.Actions.Count -ne 1) { throw 'Expected exactly one task action' };
                     $owner=Resolve-Sid $definition.Principal.UserId;
                     if($owner -ne $sid -or $definition.Principal.LogonType -ne 3 -or $definition.Principal.RunLevel -ne 0) { throw 'Startup principal is not the interactive limited owner' };
                     if($definition.Triggers.Count -ne 1) { throw 'Expected one owner logon trigger' };
@@ -164,8 +210,23 @@ def main():
                 powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
                 verified = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand',
                     base64.b64encode(script.encode('utf-16-le')).decode()], env=env, capture_output=True, text=True, timeout=30)
+                # Emit bounded exact task observations before any equality assertion.
+                # The previous failed fixture did not retain these and does not
+                # establish whether its raw path mismatch was semantic.
+                task_rows = [json.loads(base64.b64decode(line.removeprefix('TASK_OBSERVATION '), validate=True).decode('utf-8'))
+                             for line in verified.stdout.splitlines() if line.startswith('TASK_OBSERVATION ')]
+                task_evidence = {'schema': 1, 'tasks': task_rows, 'query_exit': verified.returncode,
+                                 'expected_helper_path': str(windowless)}
+                (root / 'windowless-task-observation.json').write_text(json.dumps(task_evidence, indent=2))
+                print(json.dumps(task_evidence), flush=True)
                 assert verified.returncode == 0, verified.stderr
-                checks.append('both actual Windows tasks use the limited owner and owner-only logon trigger')
+                rows = [row for row in task_rows if row['name'] == 'constellation-updates-' + identifier]
+                assert len(rows) == 1 and rows[0]['action_count'] == 1
+                task_evidence['helper_identity'] = windowless_action_evidence(
+                    rows[0]['action_path'], windowless, private_receipt['windowless_sha256'])
+                (root / 'windowless-task-observation.json').write_text(json.dumps(task_evidence, indent=2))
+                print(json.dumps(task_evidence), flush=True)
+                checks.append('both actual Windows tasks use the limited owner and owner-only logon trigger; helper uses exact private pythonw')
             native = home / 'bin' / name
             # The initial setup may already have admitted its default hourly
             # metadata check. Disable future checks through the supported API;

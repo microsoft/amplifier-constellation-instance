@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use agent_instance::{auth, config::InstanceConfig, host, state::AppState};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -237,6 +239,7 @@ fn print(value: Value) -> Result<()> {
 }
 #[tokio::main]
 async fn main() -> Result<()> {
+    agent_instance::platform::attach_existing_cli_console();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     match cli.command {
@@ -425,6 +428,7 @@ async fn main() -> Result<()> {
                 agent_instance::platform::installation_python(&cli.home)?
             };
             let mut cmd = std::process::Command::new(python);
+            agent_instance::platform::no_console_window(&mut cmd);
             cmd.args(["-I", "-X", "utf8"])
                 .arg("-B")
                 .arg(staging.join("install.py"))

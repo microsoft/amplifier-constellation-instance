@@ -145,6 +145,7 @@ async fn run(
 ) -> ApiResult<Value> {
     let (engine, home) = installation(state)?;
     let mut cmd = Command::new(engine);
+    crate::platform::no_console_window(cmd.as_std_mut());
     cmd.arg("--home")
         .arg(&home)
         .arg(operation)

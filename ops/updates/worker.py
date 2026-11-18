@@ -8,6 +8,10 @@ import argparse, base64, contextlib, datetime, email.utils, errno, hashlib, io, 
 import sqlite3, ssl, subprocess, sys, tarfile, tempfile, threading, time, urllib.error, urllib.request, uuid, zipfile
 from pathlib import Path
 
+def child_creationflags():
+    # Preserve captured protocol streams and existing timeout/job ownership.
+    return subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+
 REPOSITORIES = {'instance': ('amplifier-constellation-instance','agent-instance','ci.yml'),
                 'runtime': ('amplifier-constellation-runtime','agent-runtime','check.yml'),
                 'slack': ('amplifier-acp-slack','acp-slack-adapter','check.yml'),
@@ -27,7 +31,7 @@ def management_call(registration,action,**data):
     if len(payload)>2*1024*1024:raise ValueError('management_request_too_large')
     with tempfile.TemporaryFile() as output:
         process=subprocess.run(registration['management']['command'],input=payload,stdout=output,
-                               stderr=subprocess.DEVNULL,timeout=60)
+                               stderr=subprocess.DEVNULL,timeout=60,creationflags=child_creationflags())
         if process.returncode or output.tell()>8*1024*1024:raise ValueError('management_transport_failed')
         output.seek(0);result=json.load(output)
     if not isinstance(result,dict) or set(result)!={'schema','instance_id','result'} or result['schema']!=1 or result['instance_id']!=registration['instance_id'] or not isinstance(result['result'],dict):raise ValueError('invalid_management_response')
@@ -90,7 +94,7 @@ def digest(path):
         while block:=f.read(1024*1024):result.update(block)
     return result.hexdigest()
 def run(argv,timeout=90,env=None):
-    p=subprocess.run([str(a) for a in argv],capture_output=True,stdin=subprocess.DEVNULL,timeout=timeout,env=env)
+    p=subprocess.run([str(a) for a in argv],capture_output=True,stdin=subprocess.DEVNULL,timeout=timeout,env=env,creationflags=child_creationflags())
     if p.returncode: raise RuntimeError('command_failed')
     return p.stdout
 
@@ -102,7 +106,7 @@ def stop_launchd(service,timeout=90):
     def status():
         remaining=deadline-time.monotonic()
         if remaining<=0:raise TimeoutError('launchd_stop_did_not_settle')
-        result=subprocess.run(['launchctl','print',service],capture_output=True,timeout=min(5,remaining))
+        result=subprocess.run(['launchctl','print',service],capture_output=True,timeout=min(5,remaining),creationflags=child_creationflags())
         if result.returncode not in (0,113):raise RuntimeError('launchd_service_state_unknown')
         if time.monotonic()>=deadline:raise TimeoutError('launchd_stop_did_not_settle')
         return result.returncode
@@ -167,7 +171,7 @@ def connection_call(entry,action,request_id):
     payload={'schema':1,'connection_id':entry['id'],'revision':entry['revision'],'action':action,'request_id':request_id}
     # Host-owned executable only; stdin is data, never shell or interpolated argv.
     with tempfile.TemporaryFile() as output:
-        process=subprocess.run(entry['commands'][action],input=json.dumps(payload).encode(),stdout=output,stderr=subprocess.DEVNULL,timeout=30)
+        process=subprocess.run(entry['commands'][action],input=json.dumps(payload).encode(),stdout=output,stderr=subprocess.DEVNULL,timeout=30,creationflags=child_creationflags())
         if process.returncode or output.tell()>65536:raise ValueError('connection_command_failed')
         output.seek(0);result=json.load(output)
     if set(result)-{'schema','connection_id','state','request_id','settled','message','context_ready','context_quiesced','failed'} or result.get('schema')!=1 or result.get('connection_id')!=entry['id'] or result.get('state') not in ['connected','disconnected','busy','unknown'] or result.get('request_id')!=request_id or not isinstance(result.get('settled'),bool) or not isinstance(result.get('message',''),str) or len(result.get('message',''))>1000:raise ValueError('invalid_connection_result')
@@ -256,13 +260,13 @@ def owner_github_available():
     # token into state, arguments, the agent environment or diagnostics.
     try:
         p=subprocess.run(['gh','auth','token','--hostname','github.com'],capture_output=True,
-                         stdin=subprocess.DEVNULL,timeout=10)
+                         stdin=subprocess.DEVNULL,timeout=10,creationflags=child_creationflags())
         return p.returncode==0 and bool(p.stdout.strip())
     except (OSError,subprocess.TimeoutExpired):return False
 
 def github_cli_json(path):
     p=subprocess.run(['gh','api','--include','--hostname','github.com',path],capture_output=True,
-                     stdin=subprocess.DEVNULL,timeout=90)
+                     stdin=subprocess.DEVNULL,timeout=90,creationflags=child_creationflags())
     # gh owns authentication and HTTP. Its included response headers retain the
     # actual account's retry deadline; do not reuse an anonymous quota deadline.
     head,separator,body=p.stdout.replace(b'\r\n',b'\n').partition(b'\n\n')
@@ -361,7 +365,7 @@ def candidate(component,channel,folder,*,observed=None,inspect_candidate=None):
         # gh needs the installation owner's account for Actions artifacts; it is
         # never injected into the agent. Bound disk use and time during streaming.
         with archive.open('wb') as out:
-            proc=subprocess.Popen(['gh','api','--hostname','github.com','repos/'+repo+'/actions/artifacts/'+str(a['id'])+'/zip'],stdout=out,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL)
+            proc=subprocess.Popen(['gh','api','--hostname','github.com','repos/'+repo+'/actions/artifacts/'+str(a['id'])+'/zip'],stdout=out,stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,creationflags=child_creationflags())
             try:
                 end=time.monotonic()+120
                 while proc.poll() is None:
@@ -446,7 +450,7 @@ class Worker:
                 if state not in ('active','inactive','failed'):raise ValueError('service_transition_in_progress')
                 result[service['name']]=state=='active'
             elif service['kind']=='launchd':
-                result[service['name']]=subprocess.run(['launchctl','print',service['domain']+'/'+service['name']],capture_output=True).returncode==0
+                result[service['name']]=subprocess.run(['launchctl','print',service['domain']+'/'+service['name']],capture_output=True,creationflags=child_creationflags()).returncode==0
             else:
                 value=run(['powershell.exe','-NoProfile','-NonInteractive','-Command',"(Get-ScheduledTask -TaskName '"+service['name']+"').State"]).decode().strip()
                 result[service['name']]=value=='Running'
@@ -801,7 +805,7 @@ class Worker:
         result={'service_id':service['id'],'request_id':command['request_id'],'state':'unknown','settled':False,'message':'Setup is being reconciled without repeating it.'}
         try:
             with tempfile.TemporaryFile() as output:
-                process=subprocess.run(service['add_commands'][action],input=json.dumps(payload).encode(),stdout=output,stderr=subprocess.DEVNULL,timeout=30)
+                process=subprocess.run(service['add_commands'][action],input=json.dumps(payload).encode(),stdout=output,stderr=subprocess.DEVNULL,timeout=30,creationflags=child_creationflags())
                 if process.returncode or output.tell()>65536:raise ValueError('add_command_failed')
                 output.seek(0);received=json.load(output)
             if set(received)-{'schema','service_id','request_id','state','settled','message','connection'} or received.get('schema')!=1 or received.get('service_id')!=service['id'] or received.get('request_id')!=command['request_id'] or received.get('state') not in ['saved','busy','unknown','failed'] or not isinstance(received.get('settled'),bool) or not isinstance(received.get('message',''),str) or len(received.get('message',''))>1000:raise ValueError('invalid_add_result')

@@ -99,7 +99,18 @@ def main():
         private = home / 'support' / manifest['python_directory'] / manifest['python_executable']
         assert private.is_file()
         installed_support = json.loads((home / "install.json").read_text())["private_python"]
-        assert installed_support == {"directory": manifest["python_directory"], "executable": manifest["python_executable"]}
+        expected_support = {"directory": manifest["python_directory"], "executable": manifest["python_executable"]}
+        if os.name == 'nt':
+            relative = f"support/{manifest['python_directory']}/pythonw.exe"
+            expected_support.update(windowless_executable='pythonw.exe', windowless_sha256=manifest['files'][relative])
+            windowless = home / relative
+            assert hashlib.sha256(windowless.read_bytes()).hexdigest() == expected_support['windowless_sha256']
+            probe = root / 'windowless-python-observation.json'
+            code = "import ctypes,json,pathlib,sys; k=ctypes.WinDLL('kernel32'); k.GetConsoleWindow.restype=ctypes.c_void_p; pathlib.Path(sys.argv[1]).write_text(json.dumps({'console_window':int(k.GetConsoleWindow() or 0),'stdout_available':sys.stdout is not None,'stderr_available':sys.stderr is not None}))"
+            subprocess.run([str(windowless), '-I', '-X', 'utf8', '-c', code, str(probe)], env=env, check=True, timeout=15)
+            assert json.loads(probe.read_text())['console_window'] == 0
+            checks.append('exact packaged private pythonw has no console window')
+        assert installed_support == expected_support
         output = subprocess.check_output([str(private), '-I', '-c',
             'import hashlib,json,sqlite3,ssl,sys; print(json.dumps({"python":sys.version_info[:3],"sqlite":sqlite3.sqlite_version,"tls":ssl.OPENSSL_VERSION}))'],
             env=env, text=True)

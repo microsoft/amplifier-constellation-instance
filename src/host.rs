@@ -50,7 +50,9 @@ pub fn certificate_names() -> Result<Vec<String>> {
     {
         sans.push(hostname.trim().to_owned());
     }
-    if let Ok(output) = std::process::Command::new("hostname").output()
+    let mut hostname = std::process::Command::new("hostname");
+    crate::platform::no_console_window(&mut hostname);
+    if let Ok(output) = hostname.output()
         && output.status.success()
         && let Ok(hostname) = String::from_utf8(output.stdout)
         && !hostname.trim().is_empty()

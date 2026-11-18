@@ -10,6 +10,7 @@ cargo test --locked
 cargo build --locked
 python3 scripts/test-installation.py
 python3 scripts/test-native-installation.py
+python3 scripts/test-windowless.py
 python3 scripts/test-provisioning.py
 python3 tests/test_checkpoints.py
 cargo clippy --locked --all-targets -- -D warnings
@@ -47,3 +48,14 @@ on other OSes. It does not claim a working Linux user-manager startup cycle.
 A separate disposable host integration must establish that behavior. Native
 model/provider authorization and existing used-session compatibility remain
 separate qualifications from these new-installation fixtures.
+
+Windows CI also runs `tests/windows_console_live.py` against the exact release
+executable. Its controlled detached-parent baseline and no-window child inspect
+`GetConsoleWindow`; inherited parent-console output, captured protocol streams,
+file redirection and GUI-subsystem metadata are checked separately. The console
+baseline is a fixture witness, not a claim that an earlier end-user flash was
+observed. Consumer bundle/startup fixtures additionally verify the hash-bound
+private `pythonw.exe`, its lack of a console window, and its exact scheduled-task
+action. Existing installations need the normal refreshed consumer bundle before
+reenrollment can select that recorded windowless interpreter; no ambient Python
+is substituted. These checks do not change task identity or update authority.

@@ -169,6 +169,7 @@ async fn run(
     let outcome=async {
         let (engine,home)=native_config::installation(&state)?;
         let mut command=Command::new(engine);
+        crate::platform::no_console_window(command.as_std_mut());
         command.arg("--home").arg(&home).args(["chatgpt-sign-in","--no-browser","--port"]).arg(body.callback_port.to_string())
             .env_clear().env("HOME",&home).env("USERPROFILE",&home).current_dir(&home)
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);

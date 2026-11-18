@@ -1,4 +1,49 @@
 //! Native account and process boundaries. ACP and management contracts stay portable.
+
+/// Background helpers keep their existing stdio and process ownership. Windows
+/// must not allocate a console merely because a captured executable is a console
+/// application. Apply before any caller-specific creation flags.
+pub fn no_console_window(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
+/// The Windows executable is a GUI-subsystem entry so a manager or desktop
+/// client cannot allocate a terminal before main. Explicit interactive CLI use
+/// may join its parent's existing console; it never creates one. Redirected
+/// pipe/file streams retain the complete inherited handle table unchanged.
+pub fn attach_existing_cli_console() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            Storage::FileSystem::{FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType},
+            System::Console::{
+                ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleWindow, GetStdHandle,
+                STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            },
+        };
+        if !GetConsoleWindow().is_null() {
+            return;
+        }
+        let redirected = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE]
+            .into_iter()
+            .map(|stream| GetStdHandle(stream))
+            .filter(|handle| !handle.is_null() && *handle != INVALID_HANDLE_VALUE)
+            .any(|handle| matches!(GetFileType(handle), FILE_TYPE_DISK | FILE_TYPE_PIPE));
+        if !redirected {
+            // No parent console is an ordinary desktop/service launch, not an
+            // error or permission to allocate another console.
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
 pub fn auth_method() -> &'static str {
     if cfg!(windows) {
         "windows_logon"

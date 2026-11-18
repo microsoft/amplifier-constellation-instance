@@ -68,7 +68,13 @@ pub fn run(home: &Path, arguments: Vec<String>) -> Result<()> {
             && files.contains_key("setup/consumer-bundle.py"),
         "Bundle setup files missing"
     );
+    #[cfg(windows)]
+    ensure!(
+        files.contains_key(&format!("support/{directory}/pythonw.exe")),
+        "The consumer bundle needs its verified windowless Python"
+    );
     let mut command = std::process::Command::new(ordinary(root, &relative)?);
+    crate::platform::no_console_window(&mut command);
     command
         .args(["-I", "-X", "utf8"])
         .arg("-B")

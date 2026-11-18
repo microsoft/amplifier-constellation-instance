@@ -26,7 +26,7 @@ import webbrowser
 
 
 def run(argv, **kwargs):
-    return subprocess.run([str(x) for x in argv], check=True, capture_output=True, text=True, **kwargs).stdout.strip()
+    return subprocess.run([str(x) for x in argv], check=True, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, **kwargs).stdout.strip()
 
 
 def save(path, value):
@@ -365,7 +365,12 @@ def stage_support(args):
     module.stage(args.home, bundle, manifest)
     if args.command == 'install' and not args.skip_runtime and args.engine == 'native' and not args.runtime_binary:
         args.runtime_binary = module.stage_native(args.home, bundle, manifest)
-    return {"directory": manifest["python_directory"], "executable": manifest["python_executable"]}
+    recorded = {"directory": manifest["python_directory"], "executable": manifest["python_executable"]}
+    if manifest["python_executable"] == "python.exe":
+        relative = f"support/{manifest['python_directory']}/pythonw.exe"
+        recorded["windowless_executable"] = "pythonw.exe"
+        recorded["windowless_sha256"] = manifest["files"][relative]
+    return recorded
 
 
 def main():
