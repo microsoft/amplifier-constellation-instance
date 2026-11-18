@@ -101,6 +101,7 @@ async fn host_credential() -> ApiResult<String> {
     // No shell, no model-selected executable, no inherited token overrides, and
     // no credential in process arguments or errors. The owner opts in explicitly.
     let mut cmd = tokio::process::Command::new(if cfg!(windows) { "gh.exe" } else { "gh" });
+    crate::platform::no_console_window(cmd.as_std_mut());
     cmd.args(["auth", "token", "--hostname", "github.com"])
         .env_clear()
         .env("GH_PROMPT_DISABLED", "1")

@@ -29,6 +29,7 @@ pub async fn install_codex(home: &Path, reuse_owner_account: bool) -> Result<Bac
         "Initialize the instance first"
     );
     let mut command = Command::new(crate::platform::installation_python(home)?);
+    crate::platform::no_console_window(command.as_std_mut());
     command
         .args(["-I", "-X", "utf8", "-B", "-c", INSTALLER, "--home"])
         .arg(home)
@@ -67,6 +68,7 @@ pub async fn install_native(home: &Path, binary: Option<&Path>) -> Result<Backen
         "Initialize the instance first"
     );
     let mut command = Command::new(crate::platform::installation_python(home)?);
+    crate::platform::no_console_window(command.as_std_mut());
     command
         .args([
             "-I",
@@ -350,6 +352,7 @@ impl AccountProcess {
         let provider = backend.join("provider");
         private_dir(&provider)?;
         let mut command = Command::new(runtime(home).join(&runtime_files()[1]));
+        crate::platform::no_console_window(command.as_std_mut());
         command
             .args(["app-server", "-c", "cli_auth_credentials_store=\"file\""])
             .current_dir(home.join("workspace"))

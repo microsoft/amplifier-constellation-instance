@@ -21,6 +21,10 @@ import urllib.request
 import zipfile
 
 
+def child_creationflags():
+    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -95,7 +99,7 @@ def obtain(lock, directory, name):
         # Retain authenticated access for an explicitly configured private release.
         subprocess.run(['gh', 'release', 'download', tag, '--repo', repository,
                         '--pattern', asset, '--output', str(archive)], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=240)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=240, creationflags=child_creationflags())
     if archive.stat().st_size > 256 * 1024 * 1024:
         raise ValueError('Runtime download exceeds its size limit')
     if digest(archive) != release['asset_sha256']:
@@ -109,7 +113,7 @@ def obtain(lock, directory, name):
 
 def provision(home, binary):
     config = json.loads((home / 'config.json').read_text())['config']
-    version = subprocess.check_output([str(binary), '--version'], text=True, timeout=15).strip()
+    version = subprocess.check_output([str(binary), '--version'], text=True, timeout=15, creationflags=child_creationflags()).strip()
     match = re.fullmatch(r'agent-runtime (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)', version)
     if not match:
         raise ValueError('Expected a native agent-runtime executable')
@@ -127,7 +131,7 @@ def provision(home, binary):
     if not runtime_config.exists():
         subprocess.run([str(target), '--home', str(engine), 'init', '--workspace', str(home / 'workspace'),
                         '--name', config['name'], '--provider', 'openai'], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30, creationflags=child_creationflags())
         c = json.loads(runtime_config.read_text())
         c['provider']['api_key_env'] = 'AGENT_MODEL_API_KEY'
         if config['server'].get('public_url'):

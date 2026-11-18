@@ -137,6 +137,9 @@ class EnrollmentRaceTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0)
         with contextlib.ExitStack() as mocks:
             mocks.enter_context(patch.object(m.platform, "system", return_value=system))
+            # This fixture replaces each OS manager, not the interpreter
+            # package. Exact paired Python validation has its own tests.
+            mocks.enter_context(patch.object(m, "worker_python", return_value=str(self.home / "support/python-fixture/pythonw.exe") if system == "Windows" else sys.executable))
             if system == "Darwin":
                 mocks.enter_context(patch.object(m.os, "getuid", return_value=12345, create=True))
             mocks.enter_context(patch.object(m.Path, "home", return_value=self.root))

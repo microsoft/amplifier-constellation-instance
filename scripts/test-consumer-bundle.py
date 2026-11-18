@@ -196,6 +196,7 @@ class BundleTests(unittest.TestCase):
                  'setup/consumer-bundle.py': b'fixed staging',
                  'setup/private-python-lock.json': json.dumps(lock).encode(),
                  f"support/{lock['directory']}/{asset['executable']}": b'private python',
+                 f"support/{lock['directory']}/pythonw.exe": b'private windowless python',
                  f"support/{lock['directory']}/LICENSE.txt": b'retained license'}
         for name, content in files.items():
             path = root / name
@@ -247,6 +248,16 @@ class BundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'checksum'):
                 package.download({'filename': 'python.tar.gz', 'size': 3,
                                   'sha256': '0' * 64}, root)
+
+    def test_windows_bundle_requires_sealed_windowless_interpreter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manifest = self.fixture(root)
+            relative = f"support/{manifest['python_directory']}/pythonw.exe"
+            del manifest['files'][relative]
+            (root / 'consumer-bundle.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, 'verified windowless Python'):
+                consumer.validate(root, root / 'agent-instance.exe')
 
     def test_bundle_validates_every_required_file_and_platform_lock(self):
         with tempfile.TemporaryDirectory() as temp:

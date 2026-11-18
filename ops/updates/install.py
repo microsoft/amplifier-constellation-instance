@@ -4,7 +4,26 @@ import argparse, contextlib, hashlib, importlib.util, json, os, pathlib, platfor
 from pathlib import Path
 ENROLLMENT_TIMEOUT = 30
 
-def run(*args):return subprocess.run([str(a) for a in args],check=True,capture_output=True,text=True).stdout
+def run(*args):return subprocess.run([str(a) for a in args],check=True,capture_output=True,text=True,creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0).stdout
+
+def worker_python(home):
+    """Use only the windowless interpreter sealed with this consumer installation."""
+    if platform.system()!='Windows':return sys.executable
+    recorded=json.loads((home/'install.json').read_text()).get('private_python',{})
+    directory=recorded.get('directory','')
+    if not directory.startswith('python-') or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-' for c in directory) or '..' in directory:
+        raise ValueError('verified_private_python_required')
+    root=home/'support'/directory
+    python=root/'python.exe';windowless=root/'pythonw.exe'
+    if recorded.get('executable')!='python.exe' or recorded.get('windowless_executable')!='pythonw.exe' or (home/'support').is_symlink() or root.is_symlink() or python.is_symlink() or windowless.is_symlink():
+        raise ValueError('verified_windowless_python_required')
+    if not python.is_file() or not windowless.is_file() or Path(sys.executable).resolve()!=python.resolve():
+        raise ValueError('use_installed_private_python')
+    expected=recorded.get('windowless_sha256','')
+    if len(expected)!=64 or any(c not in '0123456789abcdef' for c in expected) or hashlib.sha256(windowless.read_bytes()).hexdigest()!=expected:
+        raise ValueError('windowless_python_digest_mismatch')
+    return str(windowless)
+
 
 def load_worker(worker):
     spec=importlib.util.spec_from_file_location('update_worker',worker)
@@ -53,6 +72,7 @@ def enroll(home,state,connector_homes,worker,container_manifest=None,container_i
         return enroll_owned(home,state,connector_homes,worker,w,release_singleton,container_manifest,container_image,pull_container_image,incus_config)
 
 def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container_manifest=None,container_image=None,pull_container_image=False,incus_config=None):
+    manager_python=worker_python(home)
     remote=w.read(incus_config) if incus_config else None
     if remote:
         if remote['home']!=str(home) or Path(remote['state']).resolve()!=state/'incus':raise ValueError('incus_enrollment_paths_mismatch')
@@ -166,7 +186,7 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
     # outcomes. Only a successful sequence makes final journal publication safe.
     release_singleton()
     name='constellation-updates-'+identifier
-    argv=[sys.executable,'-I','-X','utf8',str(target),'--registration',str(path)]
+    argv=[manager_python,'-I','-X','utf8',str(target),'--registration',str(path)]
     if system=='Linux':
         def quote(x):return '"'+x.replace('\\','\\\\').replace('"','\\"').replace('%','%%').replace('$','$$')+'"'
         unit=Path.home()/'.config/systemd/user'/(name+'.service');unit.parent.mkdir(parents=True,exist_ok=True)
@@ -184,7 +204,7 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
         run('launchctl','bootstrap',domain,str(path))
     elif system=='Windows':
         import base64
-        encoded=base64.b64encode(json.dumps([name,sys.executable,subprocess.list2cmdline(argv[1:]),config['owner']]).encode()).decode()
+        encoded=base64.b64encode(json.dumps([name,manager_python,subprocess.list2cmdline(argv[1:]),config['owner']]).encode()).decode()
         # Like the instance itself, this helper belongs to the logged-in owner.
         # An unrestricted logon trigger needs elevation on ordinary desktops.
         script="$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; $d=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"'))); $action=New-ScheduledTaskAction -Execute $d[1] -Argument $d[2]; $trigger=New-ScheduledTaskTrigger -AtLogOn -User $d[3]; $principal=New-ScheduledTaskPrincipal -UserId $d[3] -LogonType Interactive -RunLevel Limited; $settings=New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; Register-ScheduledTask -TaskName $d[0] -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null; Start-ScheduledTask -TaskName $d[0]"

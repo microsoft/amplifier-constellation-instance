@@ -146,12 +146,19 @@ def main():
             if os.name == 'nt':
                 # Hosted runners can be elevated. Inspect the actual registered
                 # jobs as well, so a global logon trigger cannot pass unnoticed.
+                private_receipt = json.loads((home / 'install.json').read_text())['private_python']
+                windowless = home / 'support' / private_receipt['directory'] / private_receipt['windowless_executable']
+                assert windowless.name == 'pythonw.exe'
+                assert hashlib.sha256(windowless.read_bytes()).hexdigest() == private_receipt['windowless_sha256']
+                encoded_windowless = base64.b64encode(json.dumps(str(windowless)).encode()).decode()
                 script = r'''$ErrorActionPreference='Stop';
+                  $windowless=ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('WINDOWLESS')));
                   $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
                   function Resolve-Sid($value) { if($value -match '^S-1-') { return (New-Object Security.Principal.SecurityIdentifier($value)).Value }; return (New-Object Security.Principal.NTAccount($value)).Translate([Security.Principal.SecurityIdentifier]).Value };
                   $scheduler=New-Object -ComObject Schedule.Service; $scheduler.Connect();
                   foreach($name in @('AgentInstance-ID','constellation-updates-ID')) {
                     $definition=$scheduler.GetFolder('\').GetTask($name).Definition;
+                    if($name -like 'constellation-updates-*' -and ($definition.Actions.Count -ne 1 -or $definition.Actions.Item(1).Path -ne $windowless)) { throw 'Helper does not use its exact private windowless interpreter' };
                     $owner=Resolve-Sid $definition.Principal.UserId;
                     if($owner -ne $sid -or $definition.Principal.LogonType -ne 3 -or $definition.Principal.RunLevel -ne 0) { throw 'Startup principal is not the interactive limited owner' };
                     if($definition.Triggers.Count -ne 1) { throw 'Expected one owner logon trigger' };
@@ -160,12 +167,12 @@ def main():
                     $triggerOwner=Resolve-Sid $trigger.UserId;
                     if($triggerOwner -ne $sid) { throw 'Logon trigger belongs to another owner' };
                   }; Write-Output 'owner-scoped startup verified'
-                '''.replace('ID', identifier)
+                '''.replace('ID', identifier).replace('WINDOWLESS', encoded_windowless)
                 powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
                 verified = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-EncodedCommand',
                     base64.b64encode(script.encode('utf-16-le')).decode()], env=env, capture_output=True, text=True, timeout=30)
                 assert verified.returncode == 0, verified.stderr
-                checks.append('both actual Windows tasks use the limited owner and owner-only logon trigger')
+                checks.append('both actual Windows tasks use the limited owner and owner-only logon trigger; helper uses exact private pythonw')
             native = home / 'bin' / name
             # The initial setup may already have admitted its default hourly
             # metadata check. Disable future checks through the supported API;

@@ -256,7 +256,7 @@ def provision(home, lock, reuse_owner_account):
                     if key_name in os.environ:
                         clean_env[key_name] = os.environ[key_name]
                 for executable, expected in zip(runtime_paths(build)[:2], ("v" + lock["node_version"], "codex-cli " + lock["codex_version"])):
-                    result = subprocess.run([str(executable), "--version"], env=clean_env, capture_output=True, text=True, timeout=15, check=True)
+                    result = subprocess.run([str(executable), "--version"], env=clean_env, capture_output=True, text=True, timeout=15, check=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
                     if result.stdout.strip() != expected:
                         raise ValueError("Runtime version does not match the pinned release")
                 manifest = {key: lock[key] for key in ("schema_version", "bundle", "codex_version", "acp_version", "node_version")}
