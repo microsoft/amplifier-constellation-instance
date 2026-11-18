@@ -2085,3 +2085,37 @@ async fn conditional_provider_update_preserves_other_admin_edits_and_rejects_sta
         json!({"version":1,"method":"PATCH","path":"api/v1/context/providers/{id}","precondition":"expected_provider"})
     );
 }
+
+#[tokio::test]
+async fn connector_projection_skips_only_duplicate_source_read_and_preserves_context() {
+    let f = Fixture::new().await;
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    for (i,projection) in [
+        json!({"version":1,"provider_id":"web:fixture","conversation_id":"team-room","thread_id":null}),
+        json!({"version":1,"provider_id":"wrong","conversation_id":"team-room","thread_id":null}),
+        json!({"version":1,"provider_id":"web:fixture","conversation_id":"other-room","thread_id":null}),
+        json!({"version":1,"provider_id":"web:fixture","conversation_id":"team-room","thread_id":"other-thread"}),
+        Value::Null,
+    ].into_iter().enumerate() {
+        f.source.seen.lock().unwrap().clear();
+        let (reply,updates)=client.request(100+i as u64,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"Stable connector instructions then source projection"}],"_meta":{"com.microsoft.amplifier.conversation-projection":projection}})).await;
+        assert!(reply["error"].is_null(),"{reply}");
+        let detail:Value=serde_json::from_str(updates.last().unwrap()["params"]["update"]["content"]["text"].as_str().unwrap()).unwrap();
+        let blocks=detail["prompt_blocks"].as_array().unwrap();
+        assert!(blocks[0]["text"].as_str().unwrap().contains("Name: One Helper"));
+        assert!(!blocks[0]["text"].as_str().unwrap().contains("Conversation orientation"));
+        assert!(blocks[1]["text"].as_str().unwrap().starts_with("Stable connector"));
+        assert!(blocks[2]["text"].as_str().unwrap().contains("responsibilities"));
+        let seen=f.source.seen.lock().unwrap();
+        assert!(seen.iter().any(|q|q["operation"]=="authorize"));
+        assert_eq!(seen.iter().filter(|q|q["operation"]=="orientation").count(),if i==0 {0}else{1});
+    }
+    f.source.revoked.store(true, Ordering::SeqCst);
+    let (denied,_)=client.request(110,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"no authority"}],"_meta":{"com.microsoft.amplifier.conversation-projection":{"version":1,"provider_id":"web:fixture","conversation_id":"team-room","thread_id":null}}})).await;
+    assert!(denied["error"].is_object());
+    client.close().await;
+}

@@ -53,8 +53,8 @@ for line in sys.stdin:
         sid = params["sessionId"]
         settings = sessions[sid]
         detail = {"mcp_names": [s["name"] for s in settings["mcpServers"]], "metadata": settings.get("_meta", {}),
-                  "orientation": params["prompt"][0].get("text", "")}
-        content = params["prompt"][-1].get("text", "")
+                  "orientation": "\n".join(b.get("text", "") for b in params["prompt"] if b.get("_meta", {}).get("io.github.bkrabach.agent-instance", {}).get("context")), "prompt_blocks": params["prompt"]}
+        content = next((b.get("text", "") for b in params["prompt"] if b.get("text", "").startswith("CONTEXT_TOOL ")), "")
         if content.startswith("CONTEXT_TOOL "):
             server = next(s for s in settings["mcpServers"] if s["name"] == "agent-continuity")
             detail["initialize"] = mcp(server, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fixture", "version": "1"}})

@@ -202,3 +202,20 @@ The coordinated contract is the family's
 [collaboration candidate](https://github.com/microsoft/amplifier-constellation/blob/main/contracts/interaction.md).
 `tests/acp_relay.rs` covers active-only admission, stale/wrong-session references,
 preserved approvals and rejection of new attention offers.
+
+### One conversation projection per prompt
+
+Initialization advertises `continuity.connectorProjectionVersion: 1` in the
+Instance metadata. A connector that already supplies its authorized orientation
+may send `_meta["com.microsoft.amplifier.conversation-projection"]` containing
+`version: 1`, `provider_id`, `conversation_id`, and `thread_id` (including null).
+For an exact match to the validated grant lease, Instance retains its own memory,
+responsibilities, current binding and permitted activity, but does not fetch the
+same provider orientation again. Missing, unsupported or mismatched descriptors
+use normal provider retrieval. This is a presentation agreement, not evidence of
+new permissions or a replacement for grant revalidation. Context tools still
+retrieve the full current source when requested.
+
+Stable identity/profile guidance is a separate leading block; changing context
+follows the connector prompt. Both retain distinct replaceable snapshot keys
+when the backend advertises snapshot support. Saved history is not rewritten.
