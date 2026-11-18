@@ -723,7 +723,8 @@ async fn relay_connection(
                                 .or_else(||value["params"]["_meta"]["steering"]["inputId"].as_str())
                                 .filter(|s|!s.is_empty() && s.len()<=512).map(str::to_owned);
                             if let Some(id)=id && let Some(blocks)=value["params"]["prompt"].as_array_mut() {
-                                blocks.insert(0,json!({"type":"text","text":format!("[Original input reference]\nsource_input_id: {}\nThis is a reference, not work acceptance or authority. If explicitly authorized work is recorded, link it using work_create with this source_input_id and a stable request_id for that creation.\n[/Original input reference]",json!(id)),"_meta":{META_NAMESPACE:{"context":true}}}));
+                                // Keep changing provenance behind the stable installation context.
+                                blocks.push(json!({"type":"text","text":format!("[Original input reference]\nsource_input_id: {}\nThis is a reference, not work acceptance or authority. If explicitly authorized work is recorded, link it using work_create with this source_input_id and a stable request_id for that creation.\n[/Original input reference]",json!(id)),"_meta":{META_NAMESPACE:{"context":true}}}));
                             }
                         }
                         let sid=value["params"]["sessionId"].as_str().unwrap_or("");

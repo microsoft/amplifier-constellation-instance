@@ -2087,6 +2087,72 @@ async fn conditional_provider_update_preserves_other_admin_edits_and_rejects_sta
 }
 
 #[tokio::test]
+async fn registered_source_reference_preserves_stable_prompt_prefix_and_receipt() {
+    use agent_instance::source_delivery as delivery;
+    let f = Fixture::new().await;
+    let mut client = f.client(false);
+    client.init().await;
+    let sid = client
+        .new_session(f.params(Some("group-grant-canary")))
+        .await;
+    let mut stable = None;
+    for i in 0..2 {
+        let input = format!("stable-prefix-input-{i}");
+        let source = json!({"id":format!("message-{i}"),"revision":"r1","occurredAt":agent_instance::state::now_ms()});
+        let params = json!({"sessionId":sid,"prompt":[{"type":"text","text":"Stable connector instructions then source projection"}],"_meta":{
+            "com.microsoft.amplifier.conversation-projection":{"version":1,"provider_id":"web:fixture","conversation_id":"team-room","thread_id":null},
+            delivery::META:{"version":1,"inputId":input,"sources":[source]}}});
+        let (reply, updates) = client
+            .request(120 + i, "session/prompt", params.clone())
+            .await;
+        assert!(reply["error"].is_null(), "{reply}");
+        let detail: Value = serde_json::from_str(
+            updates.last().unwrap()["params"]["update"]["content"]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let blocks = detail["prompt_blocks"].as_array().unwrap();
+        assert!(
+            blocks[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[Configured agent instance context]")
+        );
+        assert!(
+            blocks[1]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Stable connector")
+        );
+        assert!(
+            blocks[2]["text"]
+                .as_str()
+                .unwrap()
+                .contains("responsibilities")
+        );
+        assert_eq!(blocks.len(), 4);
+        let reference = blocks[3]["text"].as_str().unwrap();
+        assert!(reference.starts_with("[Original input reference]"));
+        assert!(reference.contains(&format!("source_input_id: {}", json!(input))));
+        if let Some(before) = &stable {
+            assert_eq!(before, &blocks[0]);
+        }
+        stable = Some(blocks[0].clone());
+        let records = f.state.list_records("source_delivery").unwrap();
+        let record = records.iter().find(|r| r["inputId"] == input).unwrap();
+        assert_eq!(record["sessionId"], sid);
+        assert_eq!(record["sources"], json!([source]));
+        let (duplicate, _) = client.request(130 + i, "session/prompt", params).await;
+        assert!(
+            duplicate["error"].is_object(),
+            "registered input must not be replayed"
+        );
+    }
+    client.close().await;
+}
+
+#[tokio::test]
 async fn connector_projection_skips_only_duplicate_source_read_and_preserves_context() {
     let f = Fixture::new().await;
     let mut client = f.client(false);
