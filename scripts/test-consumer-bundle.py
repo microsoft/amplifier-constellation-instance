@@ -32,6 +32,29 @@ live = load('consumer_bundle_live', 'tests')
 
 
 class BundleTests(unittest.TestCase):
+    def test_resolved_windows_namespace_spelling_preserves_exact_target(self):
+        self.assertEqual(startup.canonical_windows_spelling(r"\\?\C:\Users\Brian\pythonw.exe"), startup.canonical_windows_spelling(r"c:\users\brian\pythonw.exe"))
+        self.assertEqual(startup.canonical_windows_spelling(r"\\?\UNC\server\share\pythonw.exe"), startup.canonical_windows_spelling(r"\\server\share\pythonw.exe"))
+        self.assertNotEqual(startup.canonical_windows_spelling(r"C:\one\pythonw.exe"), startup.canonical_windows_spelling(r"C:\two\pythonw.exe"))
+
+    def test_windowless_task_requires_exact_file_not_matching_name_or_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); expected=root/'pythonw.exe';expected.write_bytes(b'exact sealed fixture')
+            digest=hashlib.sha256(expected.read_bytes()).hexdigest()
+            result=startup.windowless_action_evidence(str(expected), expected, digest)
+            self.assertTrue(result['same_file']);self.assertEqual(result['sha256'], digest)
+            other=root/'other';other.mkdir();(other/'pythonw.exe').write_bytes(expected.read_bytes())
+            with self.assertRaisesRegex(AssertionError, 'exact private'):
+                startup.windowless_action_evidence(str(other/'pythonw.exe'), expected, digest)
+            with self.assertRaisesRegex(AssertionError, 'digest'):
+                startup.windowless_action_evidence(str(expected), expected, '0'*64)
+            with self.assertRaisesRegex(AssertionError, 'absolute'):
+                startup.windowless_action_evidence('pythonw.exe', expected, digest)
+            if os.name != 'nt':
+                link=root/'alias';link.symlink_to(expected)
+                with self.assertRaisesRegex(AssertionError, 'link or reparse'):
+                    startup.windowless_action_evidence(str(link), expected, digest)
+
     def native_oracle_fixture(self, root):
         manifest = self.fixture(root)
         runtime = self.native_fixture(root, manifest)
