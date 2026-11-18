@@ -39,7 +39,7 @@ class BundleTests(unittest.TestCase):
 
     def test_windowless_task_requires_exact_file_not_matching_name_or_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root=Path(temporary); expected=root/'pythonw.exe';expected.write_bytes(b'exact sealed fixture')
+            root=Path(temporary).resolve(); expected=root/'pythonw.exe';expected.write_bytes(b'exact sealed fixture')
             digest=hashlib.sha256(expected.read_bytes()).hexdigest()
             result=startup.windowless_action_evidence(str(expected), expected, digest)
             self.assertTrue(result['same_file']);self.assertEqual(result['sha256'], digest)
