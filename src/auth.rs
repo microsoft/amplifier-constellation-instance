@@ -299,6 +299,21 @@ pub(crate) fn explicit_scopes(state: &AppState, headers: &HeaderMap) -> Vec<Stri
         .unwrap_or_default()
 }
 
+pub(crate) const TOKEN_SCOPES: &[&str] = &[
+    "admin",
+    "acp",
+    "observe",
+    "ui",
+    "profiles",
+    "context:owner",
+    "tools:use",
+    "work:read",
+    "work",
+    "work:execute",
+    "memory:read",
+    "memory",
+];
+
 pub fn issue_token(
     state: &AppState,
     name: &str,
@@ -331,28 +346,11 @@ pub fn issue_token(
     if name.trim().is_empty()
         || name.len() > 200
         || scopes.is_empty()
-        || (single.is_none()
-            && scopes.iter().any(|s| {
-                ![
-                    "admin",
-                    "acp",
-                    "context:owner",
-                    "tools:use",
-                    "observe",
-                    "ui",
-                    "profiles",
-                    "work:execute",
-                    "memory:read",
-                    "memory",
-                    "work:read",
-                    "work",
-                ]
-                .contains(&s.as_str())
-            }))
+        || (single.is_none() && scopes.iter().any(|s| !TOKEN_SCOPES.contains(&s.as_str())))
         || !(60..=366 * 86400).contains(&seconds)
     {
         return Err(ApiError::bad(
-            "Supply a name, scopes (admin/acp/context:owner/tools:use/observe/ui/profiles/work:read/work/work:execute/memory:read/memory), and a lifetime between 60 seconds and 366 days",
+            "Supply a name, scopes (admin/acp/context:owner/tools:use/observe/ui/profiles/work:read/work/work:execute/memory:read/memory, or exactly acp and tools:use:<registered-name>), and a lifetime between 60 seconds and 366 days",
         ));
     }
     let token = random_token();

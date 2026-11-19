@@ -679,3 +679,33 @@ fn incompatible_pending_or_live_attaches_cannot_race_a_session_authority_change(
     assert!(Attachment::reserve(&f.state, "historical", &single).is_err());
     assert!(Attachment::reserve(&f.state, "historical", &Authority::Full).is_ok());
 }
+
+#[test]
+fn token_discovery_keeps_legacy_scopes_closed_and_requires_the_exact_named_pair() {
+    let api = agent_instance::discovery::openapi();
+    let body =
+        &api["paths"]["/tokens"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+    let scopes = &body["properties"]["scopes"];
+    let branches = scopes["oneOf"]
+        .as_array()
+        .expect("distinct scope alternatives");
+    assert_eq!(branches.len(), 2);
+    let legacy = branches[0]["items"]["enum"].as_array().unwrap();
+    assert!(legacy.contains(&json!("tools:use")));
+    assert!(
+        !legacy
+            .iter()
+            .any(|v| v.as_str().unwrap().starts_with("tools:bound:"))
+    );
+    let named = &branches[1];
+    assert_eq!(named["minItems"], 2);
+    assert_eq!(named["maxItems"], 2);
+    assert_eq!(named["uniqueItems"], true);
+    assert_eq!(named["contains"], json!({"const":"acp"}));
+    assert_eq!(
+        named["items"]["oneOf"],
+        json!([
+            {"const":"acp"}, {"type":"string","pattern":"^tools:use:[A-Za-z0-9_-]{1,80}$"}
+        ])
+    );
+}
