@@ -87,3 +87,25 @@ behavior. Other ACP backends may ignore this namespaced extension.
 
 This option does not relax credential validation, `tools:use`, context grants, or
 revocation. The audience-authorizing continuity connection remains required.
+
+## One registered server
+
+An owner can issue a dedicated ACP client credential with exactly two scopes,
+`acp` and `tools:use:<registered-name>`. Issue it after registering the
+HTTP MCP connection. The connection must have no credential headers. Issuance
+pins the entire descriptor, including name, URL and optional flag. The token
+metadata shows its derived `tools:bound:<digest>` scope. A caller cannot request
+that internal scope directly. The token receives only the pinned descriptor.
+A different server registered later does not expand it. Replacing the pinned
+descriptor, adding headers, revoking the token or reaching its expiry prevents
+continued use. Server-side operations still depend on the server itself.
+
+Pass the credential using the client's private `--token-file` option. Keep it
+separate from the installation's management credential. The grant confers no
+owner context. Original group sessions still require the matching verified
+conversation grant and the same audience. An unbound private session still
+requires its original principal. Existing full-tool histories require full
+tool authority. Sessions first enrolled with one descriptor retain that
+exact requirement across close, restart, load and resume. Before adopting an
+existing session, close clients attached with incompatible tool authority.
+A replacement credential must independently meet tool and session access checks.

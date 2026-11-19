@@ -271,12 +271,16 @@ pub fn same_origin(headers: &HeaderMap) -> ApiResult<()> {
 /// Capabilities that release installation secrets require an explicit token grant.
 /// The broad admin permission and owner browser cookie do not imply this grant.
 pub fn explicit_scope(state: &AppState, headers: &HeaderMap, scope: &str) -> bool {
+    explicit_scopes(state, headers).iter().any(|s| s == scope)
+}
+
+pub(crate) fn explicit_scopes(state: &AppState, headers: &HeaderMap) -> Vec<String> {
     let Some(token) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     else {
-        return false;
+        return Vec::new();
     };
     let scopes: Option<String> = state
         .db
@@ -292,8 +296,23 @@ pub fn explicit_scope(state: &AppState, headers: &HeaderMap, scope: &str) -> boo
         .flatten();
     scopes
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .is_some_and(|scopes| scopes.iter().any(|s| s == scope))
+        .unwrap_or_default()
 }
+
+pub(crate) const TOKEN_SCOPES: &[&str] = &[
+    "admin",
+    "acp",
+    "observe",
+    "ui",
+    "profiles",
+    "context:owner",
+    "tools:use",
+    "work:read",
+    "work",
+    "work:execute",
+    "memory:read",
+    "memory",
+];
 
 pub fn issue_token(
     state: &AppState,
@@ -301,30 +320,37 @@ pub fn issue_token(
     scopes: &[String],
     seconds: u64,
 ) -> ApiResult<Value> {
+    let single = scopes.iter().find_map(|s| s.strip_prefix("tools:use:"));
+    let stored;
+    let scopes = if let Some(connection_name) = single {
+        if scopes.len() != 2 || !scopes.iter().any(|s| s == "acp") {
+            return Err(ApiError::bad(
+                "A single-server credential requires only acp and tools:use:<registered-name>",
+            ));
+        }
+        let registry = state.instance_config().tool_connections;
+        let connection = registry
+            .iter()
+            .find(|c| c.name == connection_name && c.header_secrets.is_empty())
+            .ok_or_else(|| {
+                ApiError::bad("Select a registered connection without credential headers")
+            })?;
+        stored = vec![
+            "acp".to_owned(),
+            crate::tool_connections::bound_scope(connection),
+        ];
+        &stored[..]
+    } else {
+        scopes
+    };
     if name.trim().is_empty()
         || name.len() > 200
         || scopes.is_empty()
-        || scopes.iter().any(|s| {
-            ![
-                "admin",
-                "acp",
-                "context:owner",
-                "tools:use",
-                "observe",
-                "ui",
-                "profiles",
-                "work:execute",
-                "memory:read",
-                "memory",
-                "work:read",
-                "work",
-            ]
-            .contains(&s.as_str())
-        })
+        || (single.is_none() && scopes.iter().any(|s| !TOKEN_SCOPES.contains(&s.as_str())))
         || !(60..=366 * 86400).contains(&seconds)
     {
         return Err(ApiError::bad(
-            "Supply a name, scopes (admin/acp/context:owner/tools:use/observe/ui/profiles/work:read/work/work:execute/memory:read/memory), and a lifetime between 60 seconds and 366 days",
+            "Supply a name, scopes (admin/acp/context:owner/tools:use/observe/ui/profiles/work:read/work/work:execute/memory:read/memory, or exactly acp and tools:use:<registered-name>), and a lifetime between 60 seconds and 366 days",
         ));
     }
     let token = random_token();

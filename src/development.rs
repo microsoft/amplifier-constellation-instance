@@ -298,6 +298,11 @@ pub fn enable_local(state: &AppState) -> ApiResult<()> {
                 "Use a scoped ACP credential for local agent tools",
             ));
         }
+        if scopes.iter().any(|s| s.starts_with("tools:bound:")) {
+            return Err(ApiError::bad(
+                "A single-server credential cannot be widened to general development tools",
+            ));
+        }
         if !scopes.iter().any(|s| s == "tools:use") {
             scopes.push("tools:use".into());
             db.execute(

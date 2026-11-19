@@ -140,9 +140,9 @@ impl Fixture {
         let (tx, incoming) = mpsc::channel(16);
         let (outgoing, rx) = mpsc::channel(16);
         let state = self.state.clone();
+        let principal = auth::check(&state, &headers, "acp", false).unwrap().actor;
         let task = tokio::spawn(async move {
-            acp::relay_authenticated(state, "fixture-client".into(), headers, incoming, outgoing)
-                .await
+            acp::relay_authenticated(state, principal, headers, incoming, outgoing).await
         });
         Client {
             tx,
@@ -515,4 +515,197 @@ async fn optional_connection_metadata_survives_new_and_load_without_weakening_to
     assert_eq!(r["result"]["_meta"]["optional"], json!([]));
     c.close().await;
     f.no_leaks();
+}
+
+fn register_reader(f: &Fixture) {
+    f.state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .tool_connections
+        .push(Connection {
+            name: "public-reader".into(),
+            url: "http://127.0.0.1:45855/mcp".into(),
+            optional: true,
+            header_secrets: BTreeMap::new(),
+        });
+}
+
+#[tokio::test]
+async fn named_credential_gets_exact_descriptor_and_never_reads_unrelated_secrets() {
+    let f = Fixture::new();
+    register_reader(&f);
+    std::fs::remove_file(f.dir.path().join("secrets/project-auth")).unwrap();
+    let (h, _) = f.token(&["acp", "tools:use:public-reader"]);
+    let mut c = f.connect(h.clone());
+    c.init().await;
+    let result = c.request("session/new", f.params(None)).await;
+    let sid = result["result"]["sessionId"].as_str().unwrap();
+    assert_eq!(
+        result["result"]["_meta"]["fixture"],
+        json!([{"name":"public-reader","type":"http","url":"http://127.0.0.1:45855/mcp","headers":[],"secret_matches":false}])
+    );
+    f.state.config.write().unwrap().config.tool_connections[0].name = "changed-unrelated".into();
+    assert!(
+        c.request("session/prompt", json!({"sessionId":sid,"prompt":[]}))
+            .await["error"]
+            .is_null()
+    );
+    c.close().await;
+    let (different, _) = f.token(&["acp", "tools:use:public-reader"]);
+    let mut foreign = f.connect(different);
+    foreign.init().await;
+    assert!(foreign.request("session/load", f.params(Some(sid))).await["error"].is_object());
+    foreign.close().await;
+    for (i, method) in ["session/load", "session/resume"].iter().enumerate() {
+        let mut c = f.connect(h.clone());
+        c.init().await;
+        assert_eq!(
+            c.request(method, f.params(Some(sid))).await["result"]["_meta"]["fixture"][0]["name"],
+            "public-reader",
+            "{i}"
+        );
+        c.close().await;
+    }
+    f.no_leaks();
+}
+
+#[tokio::test]
+async fn named_credential_fails_closed_on_descriptor_change_and_token_loss() {
+    for change in ["url", "name", "headers", "remove", "revoke", "expiry"] {
+        let f = Fixture::new();
+        register_reader(&f);
+        let (h, id) = f.token(&["acp", "tools:use:public-reader"]);
+        let mut c = f.connect(h);
+        c.init().await;
+        assert!(c.request("session/new", f.params(None)).await["result"].is_object());
+        match change {
+            "url" => f.state.config.write().unwrap().config.tool_connections[1]
+                .url
+                .push_str("/other"),
+            "name" => f.state.config.write().unwrap().config.tool_connections[1]
+                .name
+                .push_str("-other"),
+            "headers" => {
+                f.state.config.write().unwrap().config.tool_connections[1]
+                    .header_secrets
+                    .insert("Authorization".into(), "project-auth".into());
+            }
+            "remove" => {
+                f.state
+                    .config
+                    .write()
+                    .unwrap()
+                    .config
+                    .tool_connections
+                    .pop();
+            }
+            "expiry" => {
+                f.state
+                    .db
+                    .lock()
+                    .unwrap()
+                    .execute("UPDATE tokens SET expires_at=0 WHERE id=?1", [id])
+                    .unwrap();
+            }
+            _ => {
+                f.state
+                    .db
+                    .lock()
+                    .unwrap()
+                    .execute("DELETE FROM tokens WHERE id=?1", [id])
+                    .unwrap();
+            }
+        }
+        c.revoked().await;
+    }
+}
+
+#[test]
+fn owner_can_issue_only_one_registered_credential_free_descriptor() {
+    let f = Fixture::new();
+    register_reader(&f);
+    for scopes in [
+        vec!["acp", "tools:use:project-tools"],
+        vec!["acp", "tools:use:missing"],
+        vec!["tools:use:public-reader"],
+        vec!["admin", "tools:use:public-reader"],
+        vec!["acp", "tools:use", "tools:use:public-reader"],
+        vec!["acp", "tools:use:public-reader", "context:owner"],
+        vec!["acp", "tools:bound:forged"],
+    ] {
+        assert!(
+            auth::issue_token(
+                &f.state,
+                "invalid",
+                &scopes.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                300
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn incompatible_pending_or_live_attaches_cannot_race_a_session_authority_change() {
+    use tool_connections::{Attachment, Authority};
+    let f = Fixture::new();
+    let single = Authority::Single("tools:bound:one".into());
+    let original = Attachment::reserve(&f.state, "previous", &Authority::None).unwrap();
+    assert!(Attachment::reserve(&f.state, "previous", &single).is_err());
+    drop(original);
+    let reserved = Attachment::reserve(&f.state, "previous", &single).unwrap();
+    assert!(Attachment::reserve(&f.state, "previous", &Authority::Full).is_err());
+    drop(reserved); // Failed attach must not acquire durable authority.
+    assert!(
+        f.state
+            .get_record("session_tool_access", "previous")
+            .unwrap()
+            .is_none()
+    );
+    let adopted = Attachment::reserve(&f.state, "previous", &single).unwrap();
+    adopted.commit().unwrap();
+    drop(adopted);
+    assert!(Attachment::reserve(&f.state, "previous", &Authority::None).is_err());
+    assert!(Attachment::reserve(&f.state, "previous", &Authority::Single("other".into())).is_err());
+    f.state
+        .set_record(
+            "session_tool_access",
+            "historical",
+            json!({"tools_required":true}),
+        )
+        .unwrap();
+    assert!(Attachment::reserve(&f.state, "historical", &single).is_err());
+    assert!(Attachment::reserve(&f.state, "historical", &Authority::Full).is_ok());
+}
+
+#[test]
+fn token_discovery_keeps_legacy_scopes_closed_and_requires_the_exact_named_pair() {
+    let api = agent_instance::discovery::openapi();
+    let body =
+        &api["paths"]["/tokens"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+    let scopes = &body["properties"]["scopes"];
+    let branches = scopes["oneOf"]
+        .as_array()
+        .expect("distinct scope alternatives");
+    assert_eq!(branches.len(), 2);
+    let legacy = branches[0]["items"]["enum"].as_array().unwrap();
+    assert!(legacy.contains(&json!("tools:use")));
+    assert!(
+        !legacy
+            .iter()
+            .any(|v| v.as_str().unwrap().starts_with("tools:bound:"))
+    );
+    let named = &branches[1];
+    assert_eq!(named["minItems"], 2);
+    assert_eq!(named["maxItems"], 2);
+    assert_eq!(named["uniqueItems"], true);
+    assert_eq!(named["contains"], json!({"const":"acp"}));
+    assert_eq!(
+        named["items"]["oneOf"],
+        json!([
+            {"const":"acp"}, {"type":"string","pattern":"^tools:use:[A-Za-z0-9_-]{1,80}$"}
+        ])
+    );
 }

@@ -19,6 +19,7 @@ Automation uses `Authorization: Bearer <token>`, never a URL query parameter. To
 | `acp` | Authenticated ACP WebSocket connection |
 | `context:owner` | Owner-level conversation context through a verified ACP context binding; no management access |
 | `tools:use` | Explicitly receive configured installation-owned MCP tools through ACP; requires `acp` separately. Neither `context:owner` nor `admin` implies this grant. |
+| `tools:use:<registered-name>` | Issue together with `acp` as the only two scopes to authorize one exact registered HTTP MCP descriptor with no credential headers. |
 | `profiles` | Inspect, apply, and restore versioned communication/working-style packages; no identity, credentials, or runtime configuration access |
 | `work:read` | Read local responsibilities, assignments, templates, sharing policy and background execution reports; no mutations |
 | `work` | Read/change responsibilities and prepare/receive explicit delegation envelopes; no policy or runtime configuration changes |
@@ -128,7 +129,7 @@ Optional capability IDs `agent-instance.organization/1`, `agent-instance.work/1`
 
 ## Installation-owned tools
 
-Optional [HTTP MCP tool connections](tool-connections.md) are configured through the same revision-checked `config` API/CLI and schema as other agent settings. Their credentials use the existing write-only secret API. Clients receive these connections only with an explicit `tools:use` token scope; ordinary ACP clients continue to work without them.
+Optional [HTTP MCP tool connections](tool-connections.md) are configured through the same revision-checked `config` API/CLI and schema as other agent settings. Their credentials use the existing write-only secret API. Clients receive these connections with an explicit full or single-server tool grant; ordinary ACP clients continue to work without them.
 
 ## Installation updates
 

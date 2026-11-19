@@ -133,6 +133,34 @@ fn local_enablement_preserves_existing_identity_expiry_and_remote_grants() {
     );
 }
 #[test]
+fn local_development_enablement_preserves_single_server_limit() {
+    let (_d, s) = fixture();
+    let mut config = s.instance_config();
+    config.tool_connections.push(Connection {
+        name: "public-reader".into(),
+        url: "https://reader.example/mcp".into(),
+        header_secrets: BTreeMap::new(),
+        optional: true,
+    });
+    server::replace_config(&s, 1, config, "fixture").unwrap();
+    let issued = auth::issue_token(
+        &s,
+        "reader",
+        &["acp".into(), "tools:use:public-reader".into()],
+        600,
+    )
+    .unwrap();
+    let token = issued["token"].as_str().unwrap();
+    agent_instance::config::write_private(&s.home.join("secrets/acp-token"), token.as_bytes())
+        .unwrap();
+    assert!(development::enable_local(&s).is_err());
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    assert!(!auth::explicit_scope(&s, &headers, "tools:use"));
+    assert!(auth::check(&s, &headers, "acp", false).is_ok());
+}
+
+#[test]
 fn invalid_local_credential_never_falls_back_to_admin_or_enables_remote_tools() {
     let (_d, s) = fixture();
     let admin = std::fs::read(s.home.join("secrets/control-token")).unwrap();

@@ -354,7 +354,14 @@ async fn relay_connection(
     let mut loaded_sessions = BTreeSet::<String>::new();
     let mut update_admissions = BTreeMap::new();
     let mut tool_guard: Option<tool_connections::Guard> = None;
-    let mut pending_tools = BTreeSet::<String>::new();
+    let mut pending_tools = BTreeMap::<
+        String,
+        (
+            tool_connections::Authority,
+            Option<tool_connections::Attachment>,
+        ),
+    >::new();
+    let mut attached_tools = BTreeMap::<String, tool_connections::Attachment>::new();
     let mut tool_recheck = tokio::time::interval(Duration::from_millis(500));
     let mut replay = crate::replay::ContextReplay::default();
     let mut ending_reason = "connection_ended";
@@ -521,9 +528,10 @@ async fn relay_connection(
                             continue;
                         }
                         if is_session_method(&method) && let Some(sid) = value["params"]["sessionId"].as_str()
-                            && state.get_record("session_tool_access", sid)?.is_some()
-                            && !tool_connections::allowed(&state, auth_headers.as_ref()) {
-                            reject_request(&outgoing, &value, -32002, "This session requires explicit tools:use access").await?;
+                            && let Some(required) = state.get_record("session_tool_access", sid)?
+                            && (!tool_connections::Authority::current(&state, auth_headers.as_ref()).permits(&required)
+                                || (!matches!(method.as_str(), "session/load" | "session/resume") && !attached_tools.contains_key(sid))) {
+                            reject_request(&outgoing, &value, -32002, "This session requires its explicit tool authority").await?;
                             continue;
                         }
                         if matches!(method.as_str(), "session/new" | "session/load" | "session/resume") {
@@ -577,17 +585,20 @@ async fn relay_connection(
                         }
                         if matches!(method.as_str(), "session/new" | "session/load" | "session/resume") {
                             let requires_tools = value["params"]["sessionId"].as_str().map(|sid| state.get_record("session_tool_access", sid)).transpose()?.flatten().is_some();
-                            match tool_connections::prepare(&state, auth_headers.as_ref(), &mut value["params"], http_mcp_supported, requires_tools) {
-                                Ok(Some(guard)) => {
-                                    if serde_json::to_vec(&value)?.len() > max_frame {
-                                        if let Some(prepared) = value.get("id").and_then(|id| pending_context.remove(&id.to_string())) { context::revoke(&state, &prepared.hash); }
-                                        reject_request(&outgoing, &value, -32602, "Configured tool connections exceed the ACP message limit").await?;
-                                        continue;
-                                    }
-                                    tool_guard = Some(guard);
-                                    if let Some(id) = value.get("id") { pending_tools.insert(id.to_string()); }
+                            let admission = (|| -> Result<_> {
+                                let id = value.get("id").context("Session attachment requires a request ID")?.to_string();
+                                let guard = tool_connections::prepare(&state, auth_headers.as_ref(), &mut value["params"], http_mcp_supported, requires_tools)?;
+                                ensure!(serde_json::to_vec(&value)?.len() <= max_frame, "Configured tool connections exceed the ACP message limit");
+                                let authority = guard.as_ref().map(|g| g.authority.clone()).unwrap_or(tool_connections::Authority::None);
+                                let attachment = value["params"]["sessionId"].as_str()
+                                    .map(|sid| tool_connections::Attachment::reserve(&state, sid, &authority)).transpose()?;
+                                Ok((id, guard, authority, attachment))
+                            })();
+                            match admission {
+                                Ok((id, guard, authority, attachment)) => {
+                                    if let Some(guard) = guard { tool_guard = Some(guard); }
+                                    pending_tools.insert(id,(authority,attachment));
                                 }
-                                Ok(None) => (),
                                 Err(error) => {
                                     if let Some(prepared) = value.get("id").and_then(|id| pending_context.remove(&id.to_string())) { context::revoke(&state, &prepared.hash); }
                                     reject_request(&outgoing, &value, -32602, &error.to_string()).await?;
@@ -875,10 +886,17 @@ async fn relay_connection(
                             update_connection(&state, &connection_id, "last_activity_at", json!(now_ms()));
                             state.event("acp.history_replay", json!({"connection_id":connection_id,"session_id":sid,"received_updates":request.replay_updates,"duration_ms":now_ms()-request.started_at,"success":value.get("result").is_some()}))?;
                         }
-                        let used_tools = pending_tools.remove(&request.id.to_string()) || request.session_id.as_deref().map(|sid| state.get_record("session_tool_access", sid)).transpose()?.flatten().is_some();
+                        let attachment = pending_tools.remove(&request.id.to_string());
                         if value.get("result").is_some() {
-                            if used_tools && let Some(sid) = value["result"]["sessionId"].as_str().or(request.session_id.as_deref()).filter(|sid| sid.len() <= 512) {
-                                state.set_record("session_tool_access", sid, json!({"tools_required":true}))?;
+                            if let Some((authority, reserved)) = attachment {
+                                let sid = value["result"]["sessionId"].as_str().or(request.session_id.as_deref()).context("Missing attached session ID")?;
+                                ensure!(request.session_id.as_deref().is_none_or(|requested| requested == sid), "Backend returned a different session");
+                                let claim = match reserved {
+                                    Some(claim) => claim,
+                                    None => tool_connections::Attachment::reserve(&state,sid,&authority)?,
+                                };
+                                claim.commit()?;
+                                attached_tools.insert(sid.to_owned(),claim);
                             }
                             if request.method == "initialize" {
                                 approval_bridge.initialize_result(&mut value);
@@ -915,7 +933,7 @@ async fn relay_connection(
                                 update_connection(&state, &connection_id, "protocol_version", value["result"]["protocolVersion"].clone());
                             }
                             if matches!(request.method.as_str(),"session/new"|"session/load"|"session/resume") && let Some(sid)=value["result"]["sessionId"].as_str().or(request.session_id.as_deref()) {loaded_sessions.insert(sid.to_owned());}
-                            if request.method=="session/close" && let Some(sid)=&request.session_id {loaded_sessions.remove(sid);}
+                            if request.method=="session/close" && let Some(sid)=&request.session_id {loaded_sessions.remove(sid);attached_tools.remove(sid);}
                             record_response(&state, &connection_id, &request, &value["result"])?;
                             if request.method == "session/new"
                                 && let Some(sid) = value["result"]["sessionId"].as_str().filter(|sid|sid.len() <= 512) {

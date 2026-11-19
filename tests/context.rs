@@ -2185,3 +2185,73 @@ async fn connector_projection_skips_only_duplicate_source_read_and_preserves_con
     assert!(denied["error"].is_object());
     client.close().await;
 }
+
+#[tokio::test]
+async fn exact_reader_adopts_original_group_via_its_grant_without_owner_scope() {
+    let mut f = Fixture::new().await;
+    let mut old = f.client(true);
+    old.init().await;
+    let sid = old.new_session(f.params(Some("group-grant-canary"))).await;
+    let original = f
+        .state
+        .get_record("context_bindings", &sid)
+        .unwrap()
+        .unwrap();
+    let actor = f.state.get_record("session_access", &sid).unwrap().unwrap();
+    f.state
+        .config
+        .write()
+        .unwrap()
+        .config
+        .tool_connections
+        .push(agent_instance::tool_connections::Connection {
+            name: "public-reader".into(),
+            url: "http://127.0.0.1:45855/mcp".into(),
+            header_secrets: BTreeMap::new(),
+            optional: true,
+        });
+    let issued = auth::issue_token(
+        &f.state,
+        "game",
+        &["acp".into(), "tools:use:public-reader".into()],
+        3600,
+    )
+    .unwrap();
+    f.acp_only = issued["token"].as_str().unwrap().to_owned();
+    let mut game = f.client(false);
+    game.init().await;
+    for grant in [None, Some("other-invalid-grant")] {
+        let mut params = f.params(grant);
+        params["sessionId"] = json!(sid);
+        assert!(game.request(10, "session/load", params).await.0["error"].is_object());
+        assert!(
+            f.state
+                .get_record("session_tool_access", &sid)
+                .unwrap()
+                .is_none()
+        );
+    }
+    let mut params = f.params(Some("group-grant-canary"));
+    params["sessionId"] = json!(sid);
+    // The original unscoped relay still holds this session. Even a matching
+    // group grant cannot upgrade a different live attachment.
+    assert!(game.request(9, "session/load", params.clone()).await.0["error"].is_object());
+    old.close().await;
+    assert!(game.request(11, "session/load", params.clone()).await.0["error"].is_null());
+    assert_eq!(
+        f.state
+            .get_record("context_bindings", &sid)
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        f.state.get_record("session_access", &sid).unwrap().unwrap(),
+        actor
+    );
+    game.close().await;
+    let mut game = f.client(false);
+    game.init().await;
+    assert!(game.request(12, "session/load", params).await.0["error"].is_null());
+    game.close().await;
+}

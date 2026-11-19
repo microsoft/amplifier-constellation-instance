@@ -481,7 +481,21 @@ pub fn openapi() -> Value {
                         json!({"type":"object","required":["value"],"properties":{"value":{"type":"string","writeOnly":true,"maxLength":65536}}})
                     }
                     "/tokens" => {
-                        json!({"type":"object","required":["name","scopes","expires_in_seconds"],"properties":{"name":{"type":"string"},"scopes":{"type":"array","items":{"enum":["admin","acp","observe","ui","profiles","context:owner","tools:use","work:read","work","work:execute","memory:read","memory"]}},"expires_in_seconds":{"type":"integer","minimum":60,"maximum":31622400}}})
+                        let scopes = json!({
+                            "type":"array",
+                            "oneOf":[
+                                {"minItems":1,"items":{"enum":crate::auth::TOKEN_SCOPES}},
+                                {
+                                    "minItems":2,"maxItems":2,"uniqueItems":true,
+                                    "contains":{"const":"acp"},
+                                    "items":{"oneOf":[
+                                        {"const":"acp"},
+                                        {"type":"string","pattern":"^tools:use:[A-Za-z0-9_-]{1,80}$"}
+                                    ]}
+                                }
+                            ]
+                        });
+                        json!({"type":"object","required":["name","scopes","expires_in_seconds"],"properties":{"name":{"type":"string"},"scopes":scopes,"expires_in_seconds":{"type":"integer","minimum":60,"maximum":31622400}}})
                     }
                     "/views" => json!({"type":"object","properties":{"label":{"type":"string"}}}),
                     "/views/{id}" => {
@@ -510,5 +524,5 @@ pub fn openapi() -> Value {
         }
         paths.insert(path.into(), Value::Object(item));
     }
-    json!({"openapi":"3.1.0","info":{"title":"Agent Instance management","version":env!("CARGO_PKG_VERSION"),"description":"Versioned management API separate from ACP. Admin grants include every scope. Cookie-authenticated mutations require X-CSRF-Token. Base ACP clients use the stdio attach command."},"servers":[{"url":"./"}],"paths":paths,"components":{"securitySchemes":{"bearer":{"type":"http","scheme":"bearer"},"browserSession":{"type":"apiKey","in":"cookie","name":"ai_<instance-id-without-dashes>","description":"Instance-specific, Secure, HttpOnly, SameSite=Strict cookie returned by native OS account sign-in"}}}})
+    json!({"openapi":"3.1.0","info":{"title":"Agent Instance management","version":env!("CARGO_PKG_VERSION"),"description":"Versioned management API separate from ACP. Installation tool grants require explicit credential scopes. Cookie-authenticated mutations require X-CSRF-Token. Base ACP clients use the stdio attach command."},"servers":[{"url":"./"}],"paths":paths,"components":{"securitySchemes":{"bearer":{"type":"http","scheme":"bearer"},"browserSession":{"type":"apiKey","in":"cookie","name":"ai_<instance-id-without-dashes>","description":"Instance-specific, Secure, HttpOnly, SameSite=Strict cookie returned by native OS account sign-in"}}}})
 }
