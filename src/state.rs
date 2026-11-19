@@ -23,6 +23,7 @@ pub struct AppState {
     /// Lock order: this gate, then config, then database (no await while held).
     pub approval_policy_guard: Mutex<()>,
     pub attention_lock: Mutex<()>,
+    pub tool_attachments: Mutex<BTreeMap<String, (crate::tool_connections::Authority, usize)>>,
     pub maintenance_activity: Mutex<BTreeMap<String, (usize, bool)>>,
     pub home: PathBuf,
     pub profile_lock: Mutex<()>,
@@ -66,6 +67,7 @@ impl AppState {
         Ok(Self {
             approval_policy_guard: Mutex::new(()),
             attention_lock: Mutex::new(()),
+            tool_attachments: Mutex::new(BTreeMap::new()),
             maintenance_activity: Mutex::new(BTreeMap::new()),
             home,
             profile_lock: Mutex::new(()),

@@ -6,7 +6,10 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 pub const SCOPE: &str = "tools:use";
 const MAX_SERVERS: usize = 8;
@@ -98,21 +101,133 @@ pub fn allowed(state: &AppState, headers: Option<&HeaderMap>) -> bool {
     headers.is_some_and(|headers| auth::explicit_scope(state, headers, SCOPE))
 }
 
+/// Token issuance resolves an owner-selected name to the entire credential-free descriptor.
+pub(crate) fn bound_scope(c: &Connection) -> String {
+    let descriptor = serde_json::to_string(c).expect("serializable tool connection");
+    format!("tools:bound:{}", auth::digest(&descriptor))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Authority {
+    None,
+    Full,
+    Single(String),
+}
+
+impl Authority {
+    pub fn current(state: &AppState, headers: Option<&HeaderMap>) -> Self {
+        let scopes = headers
+            .map(|h| auth::explicit_scopes(state, h))
+            .unwrap_or_default();
+        if scopes.iter().any(|s| s == SCOPE) {
+            Self::Full
+        } else if let Some(scope) = scopes.into_iter().find(|s| s.starts_with("tools:bound:")) {
+            Self::Single(scope)
+        } else {
+            Self::None
+        }
+    }
+
+    fn record(&self) -> Option<Value> {
+        match self {
+            Self::None => None,
+            Self::Full => Some(json!({"tools_required":true})),
+            Self::Single(scope) => Some(json!({"bound_scope":scope})),
+        }
+    }
+
+    pub fn permits(&self, stored: &Value) -> bool {
+        self.record().as_ref() == Some(stored)
+    }
+}
+
+/// Hold compatible authority from before a backend load (including its replay) until close.
+/// Pending, failed, cancelled and disconnected relays drop their own reservations.
+pub struct Attachment {
+    state: Arc<AppState>,
+    session: String,
+    authority: Authority,
+}
+
+impl Attachment {
+    pub fn reserve(state: &Arc<AppState>, session: &str, authority: &Authority) -> Result<Self> {
+        ensure!(
+            !session.is_empty() && session.len() <= 512,
+            "Invalid session identity"
+        );
+        let mut live = state.tool_attachments.lock().unwrap();
+        if let Some(record) = state.get_record("session_tool_access", session)? {
+            ensure!(
+                authority.permits(&record),
+                "Different tool authority is required for this session"
+            );
+        }
+        let (held, n) = live
+            .entry(session.to_owned())
+            .or_insert_with(|| (authority.clone(), 0));
+        ensure!(
+            held == authority,
+            "An attached client has different tool authority"
+        );
+        *n += 1;
+        Ok(Self {
+            state: Arc::clone(state),
+            session: session.to_owned(),
+            authority: authority.clone(),
+        })
+    }
+    pub fn commit(&self) -> Result<()> {
+        if let Some(record) = self.authority.record() {
+            self.state
+                .set_record("session_tool_access", &self.session, record)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Attachment {
+    fn drop(&mut self) {
+        let mut live = self.state.tool_attachments.lock().unwrap();
+        if let Some((_, n)) = live.get_mut(&self.session) {
+            *n -= 1;
+            if *n == 0 {
+                live.remove(&self.session);
+            }
+        }
+    }
+}
+
+fn selected(registry: &[Connection], authority: &Authority) -> Result<Vec<Connection>> {
+    match authority {
+        Authority::None => Ok(Vec::new()),
+        Authority::Full => Ok(registry.to_vec()),
+        Authority::Single(scope) => {
+            let c = registry
+                .iter()
+                .find(|c| c.header_secrets.is_empty() && bound_scope(c) == *scope)
+                .ok_or_else(|| anyhow::anyhow!("Bound tool descriptor is no longer registered"))?;
+            Ok(vec![c.clone()])
+        }
+    }
+}
+
 /// Only digests remain in the revocation guard. The resolved descriptors are
 /// delivered to the trusted ACP backend and are never recorded by Instance.
 pub struct Guard {
+    pub authority: Authority,
     connections: Vec<Connection>,
     secret_digests: BTreeMap<String, String>,
 }
 impl Guard {
     pub fn check(&self, state: &AppState, headers: Option<&HeaderMap>) -> Result<()> {
         ensure!(
-            allowed(state, headers)
+            Authority::current(state, headers) == self.authority
                 && headers.is_some_and(|headers| auth::check(state, headers, "acp", false).is_ok()),
-            "Tool connection authorization ended; reconnect with tools:use access"
+            "Tool connection authorization ended; reconnect with the required tool grant"
         );
         ensure!(
-            state.instance_config().tool_connections == self.connections,
+            selected(&state.instance_config().tool_connections, &self.authority)?
+                == self.connections,
             "Tool connections changed; reconnect to apply them"
         );
         for (reference, expected) in &self.secret_digests {
@@ -135,11 +250,13 @@ pub fn prepare(
     http_supported: bool,
     required_for_session: bool,
 ) -> Result<Option<Guard>> {
-    let connections = state.instance_config().tool_connections;
-    if !allowed(state, headers) || (connections.is_empty() && !required_for_session) {
+    let registry = state.instance_config().tool_connections;
+    let authority = Authority::current(state, headers);
+    let connections = selected(&registry, &authority)?;
+    if authority == Authority::None || (connections.is_empty() && !required_for_session) {
         return Ok(None);
     }
-    validate(&connections)?;
+    validate(&registry)?;
     ensure!(
         connections.is_empty() || http_supported,
         "This backend does not support configured HTTP MCP tools"
@@ -154,7 +271,7 @@ pub fn prepare(
     );
     for item in supplied {
         ensure!(
-            !connections
+            !registry
                 .iter()
                 .any(|connection| item["name"] == connection.name
                     || item["url"]
@@ -194,6 +311,7 @@ pub fn prepare(
         .unwrap()
         .extend(descriptors);
     Ok(Some(Guard {
+        authority,
         connections,
         secret_digests,
     }))
