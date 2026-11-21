@@ -378,7 +378,13 @@ pub async fn models(
         if listed {
             supported_models.push(json!({"slug": slug, "display_name": label}));
         }
-        if let Some(opt_in) = model["requires_model_opt_in"].as_bool() {
+        let opt_in = match model.get("requires_model_opt_in") {
+            Some(value) => value.as_bool(),
+            // Older engines return only live account slugs and labels.
+            None if supported.is_some() && listed && !slug.trim().is_empty() => Some(false),
+            None => None,
+        };
+        if let Some(opt_in) = opt_in {
             selectable_models.push(json!({
                 "slug": slug, "display_name": label, "requires_model_opt_in": opt_in,
             }));

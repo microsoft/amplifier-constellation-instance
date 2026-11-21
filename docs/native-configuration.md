@@ -46,6 +46,10 @@ response. An empty response, a failed request, or an older Instance response
 without selectable models shows **Retry**. The saved model stays visible as
 **In use**. Choose a model and use **Save engine settings** to apply it. A model
 marked unverified by the runtime carries the runtime's opt-in when selected.
+Older runtimes return only a slug and display name for each live account model.
+Instance offers such a row when the installed runtime's OpenAI model catalog
+also names that exact slug. This selection needs no unverified-model opt-in.
+When the runtime supplies an explicit opt-in field, only a boolean is accepted.
 Existing sessions and background approvals retain the configuration rules above.
 
 A browser on the agent machine can open the sign-in link directly. For a browser
@@ -64,7 +68,7 @@ All account routes require administration:
 | `native-account/login` | POST | `{expected_backend_sha256,callback_port:0}`. Start one asynchronous job; repeated requests return the pending job. Port 0 chooses an available port. |
 | `native-account/login` | GET | `starting`, `pending`, `connected`, `cancelling`, `cancelled`, `expired`, `interrupted` or `failed`. Pending includes the ephemeral authorization link, loopback callback, deadline and optional SSH command. |
 | `native-account/login` | DELETE | `{job_id}`. Cancel that exact attempt; stale IDs fail instead of cancelling a newer attempt. |
-| `native-account/models` | POST | `models` is the legacy filtered response. `selectable_models` contains live account models the engine declares selectable, with `requires_model_opt_in` if applicable. The opaque `account_binding` lets a client guard a later save. This operation may refresh account authorization without making an inference request. |
+| `native-account/models` | POST | `models` is the legacy filtered response. Each row in `selectable_models` comes from the live account list and includes a boolean `requires_model_opt_in`. For engines that omit the field, an exact OpenAI catalog match supplies `false`. The opaque `account_binding` lets a client guard a later save. This operation may refresh account authorization without making an inference request. |
 | `native-account` | DELETE | `{confirm:true}`. Revoke saved account access through the native engine. Engine configuration/history and account binding remain. |
 
 The job owns a bounded subprocess independently of an HTTP request or browser.

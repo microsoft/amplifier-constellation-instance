@@ -150,6 +150,81 @@ async fn account_models_follow_installed_runtime_support_without_migrating_saved
     assert_eq!(std::fs::read(path).unwrap(), original);
 }
 #[tokio::test]
+async fn coarse_live_models_use_the_exact_openai_schema_intersection() {
+    let f = Fixture::new();
+    let engine = f.dir.path().join("engine");
+    std::fs::write(engine.join("catalog-mode"), "coarse").unwrap();
+    // Released Runtime 0.15.14 emits just slug and display_name.
+    let live = json!([
+        {"slug":"retired-account-model","display_name":"Retired model"},
+        {"slug":"fixture-anthropic-model","display_name":"Other provider"},
+        {"slug":"Fixture-account-model","display_name":"Different case"},
+        {"slug":"fixture-account-model","display_name":"Live account label"}
+    ]);
+    std::fs::write(engine.join("live-models.json"), live.to_string()).unwrap();
+    let listing = f.api("POST", "native-account/models", json!({})).await;
+    assert_eq!(listing["models"], json!([live[3]]));
+    assert_eq!(
+        listing["selectable_models"],
+        json!([{"slug":"fixture-account-model","display_name":"Live account label","requires_model_opt_in":false}])
+    );
+    std::fs::write(engine.join("live-models.json"), "[]").unwrap();
+    let empty = f.api("POST", "native-account/models", json!({})).await;
+    assert_eq!(empty["selectable_models"], json!([]));
+    assert_eq!(empty["models"], json!([]));
+    std::fs::write(engine.join("catalog-mode"), "unavailable").unwrap();
+    let (status, failure) = f
+        .request("POST", "native-account/models", json!({}), &f.token)
+        .await;
+    assert_ne!(status, 200);
+    assert!(failure.get("selectable_models").is_none());
+}
+
+#[tokio::test]
+async fn coarse_live_models_require_schema_support_and_preserve_explicit_flags() {
+    let f = Fixture::new();
+    let engine = f.dir.path().join("engine");
+    let live = json!([{"slug":"fixture-account-model","display_name":"Live account label"}]);
+    std::fs::write(engine.join("live-models.json"), live.to_string()).unwrap();
+    for mode in ["legacy", "empty"] {
+        std::fs::write(engine.join("catalog-mode"), mode).unwrap();
+        let listing = f.api("POST", "native-account/models", json!({})).await;
+        assert_eq!(listing["selectable_models"], json!([]), "{mode}");
+        assert_eq!(
+            listing["models"],
+            if mode == "legacy" {
+                live.clone()
+            } else {
+                json!([])
+            }
+        );
+    }
+    std::fs::write(engine.join("catalog-mode"), "coarse").unwrap();
+    for flag in [
+        Value::Null,
+        json!("false"),
+        json!(0),
+        json!(false),
+        json!(true),
+    ] {
+        let mut row = live[0].clone();
+        row["requires_model_opt_in"] = flag.clone();
+        std::fs::write(engine.join("live-models.json"), json!([row]).to_string()).unwrap();
+        let listing = f.api("POST", "native-account/models", json!({})).await;
+        assert_eq!(listing["models"], live);
+        assert_eq!(
+            listing["selectable_models"],
+            if flag.is_boolean() {
+                json!([row])
+            } else {
+                json!([])
+            },
+            "{flag}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn cancellation_expiry_and_stale_jobs_reap_the_callback_process() {
     let f = Fixture::new();
     f.start().await;

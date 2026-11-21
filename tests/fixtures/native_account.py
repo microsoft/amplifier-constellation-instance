@@ -16,11 +16,14 @@ elif action=='chatgpt-models':
         {'slug':'fixture-account-model','display_name':'Fixture account model','private':'do not forward'},
     ]
     mode=(home/'catalog-mode').read_text().strip() if (home/'catalog-mode').exists() else 'normal'
+    if mode=='unavailable': sys.exit(1)
     if mode in ('normal', 'account', 'empty'):
         models[0]['requires_model_opt_in'] = None
         models[1]['requires_model_opt_in'] = False if mode != 'empty' else None
     if mode == 'account':
         models.insert(0, {'slug':'newer-account-model','display_name':'Newer model','requires_model_opt_in':True})
+    if (home/'live-models.json').exists():
+        models=json.loads((home/'live-models.json').read_text())
     print(json.dumps({'models':models}))
 elif action=='chatgpt-sign-out':
     credentials.unlink(missing_ok=True); print(json.dumps({'connected':False,'revoked':True,'registration_preserved':True}))
@@ -51,6 +54,8 @@ elif action=='config-schema':
     elif mode=='empty': metadata['model_catalog']['openai']=[]
     elif mode=='malformed': metadata['model_catalog']['openai']='invalid'
     elif mode=='missing': metadata['model_catalog'].pop('openai')
+    elif mode=='coarse':
+        metadata['model_catalog']['openai'].append({'class':'standard','model':'schema-only-model'})
     print(json.dumps({'type':'object','x-agent-runtime':metadata}))
 elif action=='config-inspect':
     value=json.loads(config.read_text());valid=value['provider']['model']!='previous-model'
