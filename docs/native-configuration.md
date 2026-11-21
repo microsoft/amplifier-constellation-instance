@@ -4,12 +4,10 @@ The host's Model & capabilities card appears for an explicitly configured `agent
 
 The editor discovers the installed engine's schema and calls its versioned local configuration commands. Provider/model/endpoint settings, image/audio input, provider-hosted tools, and named decision services have dedicated controls. Complete configuration opens an editor for every field supported by that engine version, including context compaction, execution limits, permissions and account settings. Provider defaults come from the installed engine, not a duplicated host catalog. Unsupported combinations fail validation without a silent fallback.
 
-When the engine publishes a model catalog, the model field offers its current
-supported classes. **Use provider defaults** stages the engine's current default
-model and connection settings; it does not save, change authentication routes or
-rewrite existing sessions. Gateways and custom deployments without a published
-default keep their owner-selected model name. Loading settings never migrates a
-model automatically.
+The model field shows the saved model as **In use**. Routes without discovery in
+this editor accept an exact model or deployment name. **Use provider defaults**
+stages connection and capability settings. Applying any settings requires an
+explicit save. Loading settings or discovering models preserves the saved model.
 
 An engine that reports configuration validation separately from inspection can
 keep retired settings visible and editable. The editor shows the validation
@@ -22,7 +20,14 @@ ineligible for execution; inspection is not execution approval.
 - `POST /api/v1/native-config/validate`: validate without changing files.
 - `PUT /api/v1/native-config`: atomically save through the engine's compare-and-swap configuration command.
 
-Validation and save accept `{expected_revision,expected_backend_sha256,config}`. These endpoints require `admin`; `observe` does not execute configuration commands. The local CLI uses the same paths via `agent-instance api`. UI operations are `native.load`, `native.preset`, `native.details`, `native.validate`, `native.save`, `native.raw.open`, and `native.raw.save`. Drafts and disclosures use the existing revisioned view state.
+Validation and save accept `{expected_revision,expected_backend_sha256,config}`.
+The account picker also sends `expected_account_binding` when changing a
+ChatGPT model or route. A changed account returns a conflict and requires a
+fresh selection. These endpoints require `admin`; `observe` does not execute
+configuration commands. The local CLI uses the same paths via `agent-instance
+api`. UI operations are `native.load`, `native.preset`, `native.details`,
+`native.validate`, `native.save`, `native.raw.open`, and `native.raw.save`.
+Drafts and disclosures use the existing revisioned view state.
 
 The host invokes only the configured engine executable with its explicit `--home`, argument arrays, a clean environment, 15-second deadline and bounded output. It supplies no provider key values or owner account directory to these inspection/validation commands. Candidate files are private and removed after the operation. Credentials remain named references managed through Access & credentials and the host backend's secret environment mapping.
 
@@ -35,16 +40,17 @@ A successful validation establishes configuration correctness, not provider acce
 
 The separate ChatGPT account card uses the native engine's authorization flow. It
 never reads or copies a Codex account cache. Completing sign-in leaves the current
-provider configuration unchanged. **Use this account** intersects the account's
-models with the installed runtime's support catalog, preserving the selected
-model when available or staging the supported runtime default. **Save engine settings** applies
-that explicit choice. Existing sessions and background approvals retain the
-configuration rules above.
-
-An empty intersection shows a repair message instead of selecting an unsupported
-model. A malformed runtime support catalog fails closed. Engines that do not
-publish a catalog retain their earlier account-list behavior; the engine's own
-configuration validation remains authoritative in either case.
+provider configuration unchanged. **Use this account** stages the account route
+and fetches its live selectable models. The picker only offers models from that
+response. An empty response, a failed request, or an older Instance response
+without selectable models shows **Retry**. The saved model stays visible as
+**In use**. Choose a model and use **Save engine settings** to apply it. A model
+marked unverified by the runtime carries the runtime's opt-in when selected.
+Older runtimes return only a slug and display name for each live account model.
+Instance offers such a row when the installed runtime's OpenAI model catalog
+also names that exact slug. This selection needs no unverified-model opt-in.
+When the runtime supplies an explicit opt-in field, only a boolean is accepted.
+Existing sessions and background approvals retain the configuration rules above.
 
 A browser on the agent machine can open the sign-in link directly. For a browser
 on another machine, the card first shows a loopback-only SSH forwarding command
@@ -62,7 +68,7 @@ All account routes require administration:
 | `native-account/login` | POST | `{expected_backend_sha256,callback_port:0}`. Start one asynchronous job; repeated requests return the pending job. Port 0 chooses an available port. |
 | `native-account/login` | GET | `starting`, `pending`, `connected`, `cancelling`, `cancelled`, `expired`, `interrupted` or `failed`. Pending includes the ephemeral authorization link, loopback callback, deadline and optional SSH command. |
 | `native-account/login` | DELETE | `{job_id}`. Cancel that exact attempt; stale IDs fail instead of cancelling a newer attempt. |
-| `native-account/models` | POST | Fetch account model identifiers/display names intersected with the installed engine's support catalog when available; includes `runtime_catalog_available`. This may refresh account authorization but does not make an inference request. |
+| `native-account/models` | POST | `models` is the legacy filtered response. Each row in `selectable_models` comes from the live account list and includes a boolean `requires_model_opt_in`. For engines that omit the field, an exact OpenAI catalog match supplies `false`. The opaque `account_binding` lets a client guard a later save. This operation may refresh account authorization without making an inference request. |
 | `native-account` | DELETE | `{confirm:true}`. Revoke saved account access through the native engine. Engine configuration/history and account binding remain. |
 
 The job owns a bounded subprocess independently of an HTTP request or browser.
