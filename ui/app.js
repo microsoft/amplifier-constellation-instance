@@ -30,7 +30,7 @@
   };
   const app = {savedConnections:null,savedConnectionsError:"",connectionRequests:new Map(),updates:null,updatesError:"",
     approvalPolicy:null,approvalPolicyError:"",approvalPolicyBusy:false,approvalPolicyNeedsReview:false,approvalPolicyRequest:0,
-    development:null,developmentError:"",nativeConfig:null,nativeSchema:null,nativeObservations:null,nativeObservationsError:"",nativeError:"",nativeAccount:null,nativeAccountError:"",nativeAccountTimer:null,nativeModels:null,memory:null,memoryError:"",scheduler:null,execution:null,schedulerError:"",work:null,organization:null,workError:"",profileUse:null,profileUseError:"",workSaving:false,
+    development:null,developmentError:"",nativeConfig:null,nativeSchema:null,nativeObservations:null,nativeObservationsError:"",nativeError:"",nativeAccount:null,nativeAccountError:"",nativeAccountTimer:null,nativeModels:null,nativeModelSelection:null,memory:null,memoryError:"",scheduler:null,execution:null,schedulerError:"",work:null,organization:null,workError:"",profileUse:null,profileUseError:"",workSaving:false,
     contextProviders:[], contextError:"", session:null, csrf:"", doc:null, status:null, schema:null, view:null, events:[], connections:[], sessions:[],
     secrets:[], tokens:[], profiles:{}, profilePackage:null, profilePackageError:"", profilePackageBusy:false, profilePackageImport:null, profilePackageImportError:"", profilePackageExpected:null, sessionDetail:null, source:null, online:true, streamOnline:false,
     error:"", notice:"", busy:false, tokenOnce:null, draftPending:new Map(), draftOrigins:new Map(), deferredOrigins:new Map(), viewIntents:new Set(), timers:new Map(),
@@ -260,18 +260,52 @@
     const content=step===0?`<h2 class="wizard-title">Give your agent a name and a purpose.</h2><p class="wizard-description">Tell it what you want help with and how you like to work. You can adjust these later.</p>${identityFields()}`:`<h2 class="wizard-title">Ready to make it yours.</h2><p class="wizard-description">Start the agent, then connect it to the conversations and tools you use.</p><dl class="detail-list"><div class="detail-row"><dt>Name</dt><dd>${esc(preview?.name||draft("config.name",app.doc.config.name))}</dd></div><div class="detail-row"><dt>Purpose</dt><dd>${esc(preview?.purpose||"You can add a purpose later.")}</dd></div></dl>${runtimeSummary()}${nativeConfigCard()}${nativeAccountCard()}${problem?banner(problem,"warning"):""}<p class="small muted">You’ll land on a dashboard with its connections, recent work, and settings.</p>${installationDetails()}`;
     return heading("A new individual starts here.","Name your agent. Give it a purpose. Start when you’re ready.")+`<div class="wizard"><nav class="wizard-steps" aria-label="Setup steps">${steps.map((label,i)=>`<button type="button" class="step-button ${i===step?"active":""}" data-action="setup.step" data-step="${i}" data-control="setup.step.${i}" ${i===step?'aria-current="step"':""}><span class="step-number">${i+1}</span>${label}</button>`).join("")}</nav><div><section class="card">${content}<div class="form-footer"><div>${step?button("Back","setup.step",{quiet:true,attrs:'data-step="0"'}):button("Save for later","config.save",{quiet:true})}</div><div class="right">${step===0?button("Continue","setup.next",{primary:true,icon:"arrow",attrs:'data-step="1"'}):button("Start my agent","setup.finish",{primary:true,icon:"play",disabled:!!problem||!app.backend||app.backendBusy})}</div></div></section>${advancedSettings()}</div></div>`;
   }
-  function nativeCatalog(kind){const rows=app.nativeSchema?.["x-agent-runtime"]?.model_catalog?.[kind];return Array.isArray(rows)?rows.filter(m=>typeof m.model==="string"&&m.model.length>0&&m.model.length<=256):null;}
-  function nativeModelField(c){
-    const kind=String(draft("native.kind",c.provider.kind)),current=String(draft("native.model",c.provider.model)),catalog=nativeCatalog(kind);
-    const account=draft("native.auth",c.provider.auth||"auto")==="chatgpt";
-    if(account&&Array.isArray(app.nativeModels)){
-      const models=app.nativeModels.filter(m=>!catalog||catalog.some(x=>x.model===m.slug));
-      const options=models.map(m=>[m.slug,m.display_name||m.slug]);
-      if(!options.some(([id])=>id===current))options.unshift([current,`${current||"No model selected"} · choose an available model`]);
-      return choice("Model","native.model",current,options,"Available to this account and supported by this runtime. Choosing a model does not change saved sessions.");
+  const chatGPTEndpoint="https://api.openai.com/v1/responses";
+  function nativeModelRoute(accountStatus=app.nativeAccount){
+    const n=app.nativeConfig, account=accountStatus?.account, p=n?.config.provider;
+    if(!p||!account?.connected||!account.sharing||
+       draft("native.kind",p.kind)!=="openai"||draft("native.auth",p.auth||"auto")!=="chatgpt"||
+       draft("native.endpoint",p.endpoint)!==chatGPTEndpoint||
+       draft("native.account_file",p.chatgpt_credentials_file||account.credentials_file)!==account.credentials_file)return null;
+    return JSON.stringify([n.backend_sha256,account.subject||account.email,
+      account.client_id,account.credentials_file,accountStatus.login?.id]);
+  }
+  function noteNativeModelDraft(path,value){
+    if(path==="native.model"){
+      const route=nativeModelRoute(), listing=app.nativeModels;
+      app.nativeModelSelection=route&&listing?.route===route&&listing.status==="ready"&&
+        listing.models.some(m=>m.slug===value)?{route,model:value}:null;
     }
-    const list=catalog?.length?`<datalist id="native-model-catalog">${catalog.map(m=>`<option value="${esc(m.model)}">${esc(title(m.class||m.model))}</option>`).join("")}</datalist>`:"";
-    return field("Model","native.model",current,{list:catalog?.length?"native-model-catalog":null,help:catalog?.length?"Choose a current model from the suggestions, or enter your deployment’s model name. Save explicitly to apply it.":"Use a model or deployment name supported by this provider."})+list;
+    if(["native.kind","native.auth","native.endpoint","native.account_file"].includes(path)){
+      app.nativeModels=null;
+      app.nativeModelSelection=null;
+    }
+  }
+  function nativeModelField(c){
+    const saved=c.provider.model,current=String(draft("native.model",saved));
+    const inUse=`<p class="small" data-control="native.model.in-use">In use <strong>${esc(saved||"No saved model")}</strong></p>`;
+    if(draft("native.auth",c.provider.auth||"auto")!=="chatgpt"){
+      return `<div>${inUse}${field("Model","native.model",current,{help:"Enter the exact model or deployment name for this provider."})}</div>`;
+    }
+    const route=nativeModelRoute(), listing=app.nativeModels?.route===route?app.nativeModels:null;
+    let picker;
+    if(!route){
+      picker='<p class="small muted">Connect and select a ChatGPT account with plan access to load models.</p>';
+    }else if(listing?.status==="loading"){
+      picker='<p class="small muted" role="status">Loading models…</p>';
+    }else if(listing?.status==="ready"){
+      const options=listing.models.map(m=>[m.slug,m.display_name+(m.requires_model_opt_in?" · Unverified by this runtime":"")]);
+      const sameSavedRoute=c.provider.auth==="chatgpt"&&c.provider.endpoint===chatGPTEndpoint&&
+        c.provider.chatgpt_credentials_file===app.nativeAccount.account.credentials_file;
+      const picked=app.nativeModelSelection?.route===route&&app.nativeModelSelection.model===current;
+      const selected=options.some(([id])=>id===current)&&(picked||(sameSavedRoute&&current===saved))?current:"";
+      picker=`<label class="field"><span class="field-label">Model</span><select class="select" data-draft="native.model" data-action="edit-draft" data-control="native.model">
+        <option value="" disabled ${!selected?"selected":""}>Choose a model</option>${options.map(([id,name])=>`<option value="${esc(id)}" ${selected===id?"selected":""}>${esc(name)}</option>`).join("")}</select><span class="field-help">${listing.models.some(m=>m.requires_model_opt_in)?"Choosing an unverified model enables unverified names for this provider. ":""}Save engine settings to apply your choice.</span></label>`;
+    }else{
+      const problem=listing?.message;
+      picker=`${problem?`<p class="small" role="status">${esc(problem)}</p>`:""}${button(problem?"Retry":"Load models","native.account.models",{small:true,attrs:'data-control="native.models.retry"'})}`;
+    }
+    return `<div>${inUse}${picker}</div>`;
   }
   function nativeConfigCard(){
     if(app.backend?.kind!=="native")return "";
@@ -283,23 +317,119 @@
     const native=c.provider.native||{};
     return `<section class="card" data-control="native.config"><div class="card-header"><div><h2>Model & capabilities</h2><p>Changes apply when clients reconnect. Background work requires renewed approval after changes.</p></div>${button("Add API key","native.key.open",{small:true})}${button("Reload","native.load",{small:true})}</div>${app.nativeError?banner(app.nativeError,"warning"):""}${n.validation?.valid===false?banner(`These saved model settings need updating. ${n.validation.error||"Choose supported settings below."} Your current configuration has not been changed.`,"warning"):""}<div class="form-grid">${choice("Provider","native.kind",c.provider.kind,kinds)}${nativeModelField(c)}${choice("Authentication","native.auth",c.provider.auth||"auto",[[c.provider.auth||"auto",c.provider.auth==="chatgpt"?"ChatGPT account":"Provider credentials"],...(c.provider.auth==="chatgpt"?[["auto","Provider credentials"]]:[["chatgpt","ChatGPT account"]])])}${field("Service endpoint","native.endpoint",c.provider.endpoint)}${field("Credential environment name","native.key_env",c.provider.api_key_env,{help:"Reference a named secret in Advanced settings → Secret environment references. Never paste a key here."})}${choice("Default execution mode","native.mode",c.mode,[["ask","Ask before tool use"],["read_only","Read only"],["workspace","Workspace tools"]])}${Object.hasOwn(c,"command_network")?choice("Command network access","native.command_network",c.command_network,[["isolated","Off"],["inherit","Use installation network (Linux)"]]):""}</div><div class="row-actions">${button("Use provider defaults","native.preset",{small:true})}${checkbox("Accept images","native.images",native.image_input||false)}${checkbox("Accept audio","native.audio",native.audio_input||false)}${checkbox("Accept PDFs","native.pdf",native.pdf_input||false)}</div>${button(state().filters.native_details?"Hide tool and decision settings":"Tools & decision models","native.details",{small:true})}${state().filters.native_details?`<div class="form-grid">${field("Provider-native tools","native.tools",JSON.stringify(native.tools||[],null,2),{textarea:true,code:true,rows:6,help:"Use this provider’s tool definitions. The engine validates supported combinations before saving."})}${field("Computer environment (optional)","native.computer",JSON.stringify(native.computer||null,null,2),{textarea:true,code:true,rows:5,help:"Responses providers only. Bind an installed MCP server/tool and display dimensions. Each computer action batch requires approval; leave null to disable."})}${field("Decision services","native.decisions",JSON.stringify(c.decisions||[],null,2),{textarea:true,code:true,rows:6,help:"Separate named decision backends; credential names only."})}${Object.hasOwn(c.limits||{},"provider_idle_seconds")?`${field("Model connection silence limit (seconds)","native.provider_idle_seconds",c.limits.provider_idle_seconds,{type:"number",help:"Detect a connection that stopped responding; this is not the time allowed to finish work."})}${field("Whole-turn limit (seconds)","native.turn_seconds",c.limits.turn_seconds,{type:"number",help:"0 lets healthy work continue. Assignment deadlines and tool limits still apply."})}${field("Compact after reported context tokens","native.compact_threshold_tokens",c.context?.compact_threshold_tokens||100000,{type:"number"})}${checkbox("Use provider-native compaction","native.provider_compaction",c.context?.provider_compaction!==false)}${checkbox("Use provider prompt caching","native.prompt_caching",c.context?.prompt_caching!==false)}`:""}</div>`:""}<div class="form-footer">${button("Complete configuration…","native.raw.open",{quiet:true})}<div class="row-actions">${button("Check settings","native.validate",{small:true})}${button("Save engine settings","native.save",{primary:true})}</div></div><p class="card-note">Configuration validation does not call a model or establish account access. Stored revision ${esc(shortId(n.revision))}.</p></section>`;
   }
-  async function loadNative(){try{const [n,s]=await Promise.all([api("native-config"),api("native-config/schema")]);app.nativeConfig=n;app.nativeSchema=s;app.nativeError="";await clearDraftNamespace("native");await loadNativeAccount(false);}catch(e){app.nativeError=e.message;}render();}
-  function nativeDocument(){if(!app.nativeConfig)throw new Error("Load the engine settings first.");const c=clone(app.nativeConfig.config);c.provider.kind=String(draft("native.kind",c.provider.kind));c.provider.model=String(draft("native.model",c.provider.model));c.provider.endpoint=String(draft("native.endpoint",c.provider.endpoint));c.provider.api_key_env=String(draft("native.key_env",c.provider.api_key_env));c.provider.auth=String(draft("native.auth",c.provider.auth||"auto"));if(c.provider.auth==="chatgpt"){if(c.provider.kind!=="openai")throw new Error("ChatGPT account access uses the OpenAI provider. Choose Use this account below.");const file=String(draft("native.account_file",app.nativeAccount?.account?.credentials_file||c.provider.chatgpt_credentials_file||""));if(!file||!app.nativeAccount?.account?.connected)throw new Error("Connect this engine's ChatGPT account first.");c.provider.chatgpt_credentials_file=file;}else{delete c.provider.chatgpt_credentials_file;}c.mode=String(draft("native.mode",c.mode));if(Object.hasOwn(c.limits||{},"provider_idle_seconds")){c.limits.turn_seconds=Number(draft("native.turn_seconds",c.limits.turn_seconds));c.limits.provider_idle_seconds=Number(draft("native.provider_idle_seconds",c.limits.provider_idle_seconds));c.context??={};c.context.compact_threshold_tokens=Number(draft("native.compact_threshold_tokens",c.context.compact_threshold_tokens||100000));c.context.provider_compaction=!!draft("native.provider_compaction",c.context.provider_compaction!==false);c.context.prompt_caching=!!draft("native.prompt_caching",c.context.prompt_caching!==false);}if(Object.hasOwn(c,"command_network"))c.command_network=String(draft("native.command_network",c.command_network));c.provider.native??={};c.provider.native.image_input=!!draft("native.images",c.provider.native.image_input||false);c.provider.native.audio_input=!!draft("native.audio",c.provider.native.audio_input||false);c.provider.native.pdf_input=!!draft("native.pdf",c.provider.native.pdf_input||false);try{c.provider.native.computer=JSON.parse(String(draft("native.computer",JSON.stringify(c.provider.native.computer||null))));c.provider.native.tools=JSON.parse(String(draft("native.tools",JSON.stringify(c.provider.native.tools||[]))));c.decisions=JSON.parse(String(draft("native.decisions",JSON.stringify(c.decisions||[]))));}catch{throw new Error("Tools, decisions, and computer settings must be valid JSON.");}return c;}
-  async function saveNative(validate=false,raw=false){await flushDrafts();let config;if(raw){try{config=JSON.parse(String(draft("native.raw","")));}catch{throw new Error("The complete configuration must be valid JSON.");}}else config=nativeDocument();const body={expected_revision:app.nativeConfig.revision,expected_backend_sha256:app.nativeConfig.backend_sha256,config};await api(validate?"native-config/validate":"native-config",{method:validate?"POST":"PUT",body});if(validate){setNotice("The installed engine accepts these settings. Model access still needs a real task.");}else{if(raw)await command({type:"close_modal"});await loadNative();await refresh(false);setNotice("Engine settings saved. Reconnect clients to use them; review background-work approval before the next run.");}}
+  async function loadNative(){try{const [n,s]=await Promise.all([api("native-config"),api("native-config/schema")]);app.nativeConfig=n;app.nativeSchema=s;app.nativeModels=null;app.nativeModelSelection=null;app.nativeError="";await clearDraftNamespace("native");await loadNativeAccount(false);if(nativeModelRoute())await loadNativeModels();}catch(e){app.nativeError=e.message;}render();}
+  function changedChatGPTRoute(provider,saved){
+    return provider.auth==="chatgpt"&&["model","kind","auth","endpoint","chatgpt_credentials_file"].some(key=>provider[key]!==saved[key]);
+  }
+  function nativeDocument(){if(!app.nativeConfig)throw new Error("Load the engine settings first.");const c=clone(app.nativeConfig.config);c.provider.kind=String(draft("native.kind",c.provider.kind));c.provider.model=String(draft("native.model",c.provider.model));c.provider.endpoint=String(draft("native.endpoint",c.provider.endpoint));c.provider.api_key_env=String(draft("native.key_env",c.provider.api_key_env));c.provider.auth=String(draft("native.auth",c.provider.auth||"auto"));if(c.provider.auth==="chatgpt"){if(c.provider.kind!=="openai")throw new Error("ChatGPT account access uses the OpenAI provider. Choose Use this account below.");const file=String(draft("native.account_file",c.provider.chatgpt_credentials_file||app.nativeAccount?.account?.credentials_file||""));if(!file)throw new Error("Connect this engine's ChatGPT account first.");c.provider.chatgpt_credentials_file=file;const saved=app.nativeConfig.config.provider;
+    if(changedChatGPTRoute(c.provider,saved)){
+      const route=nativeModelRoute(),listing=app.nativeModels;
+      const selected=route&&listing?.route===route&&listing.status==="ready"&&listing.models.find(m=>m.slug===c.provider.model);
+      if(!selected||app.nativeModelSelection?.route!==route||app.nativeModelSelection.model!==c.provider.model)
+        throw new Error("Choose a model from the live ChatGPT list before saving.");
+      if(selected.requires_model_opt_in)c.provider.allow_unverified_model=true;
+    }}else{delete c.provider.chatgpt_credentials_file;}c.mode=String(draft("native.mode",c.mode));if(Object.hasOwn(c.limits||{},"provider_idle_seconds")){c.limits.turn_seconds=Number(draft("native.turn_seconds",c.limits.turn_seconds));c.limits.provider_idle_seconds=Number(draft("native.provider_idle_seconds",c.limits.provider_idle_seconds));c.context??={};c.context.compact_threshold_tokens=Number(draft("native.compact_threshold_tokens",c.context.compact_threshold_tokens||100000));c.context.provider_compaction=!!draft("native.provider_compaction",c.context.provider_compaction!==false);c.context.prompt_caching=!!draft("native.prompt_caching",c.context.prompt_caching!==false);}if(Object.hasOwn(c,"command_network"))c.command_network=String(draft("native.command_network",c.command_network));c.provider.native??={};c.provider.native.image_input=!!draft("native.images",c.provider.native.image_input||false);c.provider.native.audio_input=!!draft("native.audio",c.provider.native.audio_input||false);c.provider.native.pdf_input=!!draft("native.pdf",c.provider.native.pdf_input||false);try{c.provider.native.computer=JSON.parse(String(draft("native.computer",JSON.stringify(c.provider.native.computer||null))));c.provider.native.tools=JSON.parse(String(draft("native.tools",JSON.stringify(c.provider.native.tools||[]))));c.decisions=JSON.parse(String(draft("native.decisions",JSON.stringify(c.decisions||[]))));}catch{throw new Error("Tools, decisions, and computer settings must be valid JSON.");}return c;}
+  async function saveNative(validate=false,raw=false){
+    await flushDrafts();
+    let config;
+    if(raw){
+      try{config=JSON.parse(String(draft("native.raw","")));}catch{throw new Error("The complete configuration must be valid JSON.");}
+    }else{
+      config=nativeDocument();
+    }
+    const body={expected_revision:app.nativeConfig.revision,expected_backend_sha256:app.nativeConfig.backend_sha256,config};
+    if(!raw&&changedChatGPTRoute(config.provider,app.nativeConfig.config.provider)){
+      body.expected_account_binding=app.nativeModels.binding;
+    }
+    try{
+      await api(validate?"native-config/validate":"native-config",{method:validate?"POST":"PUT",body});
+    }catch(error){
+      if(error.data?.detail?.reason!=="model_discovery_account_changed")throw error;
+      await loadNativeAccount(false);
+      invalidateNativeModels("The account changed. Load its models again.");
+      render();
+      return;
+    }
+    if(validate){
+      setNotice("The installed engine accepts these settings. Model access still needs a real task.");
+    }else{
+      if(raw)await command({type:"close_modal"});
+      await loadNative();
+      await refresh(false);
+      setNotice("Engine settings saved. Reconnect clients to use them; review background-work approval before the next run.");
+    }
+  }
 
   function nativeAccountCard(){
     if(app.backend?.kind!=="native")return "";
     const n=app.nativeAccount,job=n?.login||{},pending=["starting","pending","cancelling"].includes(job.state),connected=n?.account?.connected;
     const local=["localhost","127.0.0.1","[::1]"].includes(location.hostname),where=String(draft("account.location",local?"local":"remote"));
     const ready=where==="local"||state().filters.native_tunnel_ready;
-    return `<section class="card" data-control="native.account"><div class="card-header"><div><h2>ChatGPT account</h2><p>Optional account access for this native engine. Connect here, then choose an available model and save the engine settings.</p></div>${button("Check account","native.account.load",{small:true})}</div>${app.nativeAccountError?banner(app.nativeAccountError,"warning"):""}${connected?`<p>${badge("Connected","green")} ${esc(n.account.email||"This installation’s account")}</p><p class="small muted">${n.account.sharing?"Plan access is enabled for this agent.":"Plan access is not enabled; account permission is needed before model calls."}</p><div class="row-actions">${button("Use this account","native.account.use",{primary:true})}${button("Load available models","native.account.models",{small:true})}${button("Disconnect account…","native.account.disconnect.open",{quiet:true})}</div>`:'<p class="small muted">This authorization belongs to the native engine. It does not reuse a Codex login or switch the current provider automatically.</p>'}${choice("Where is this browser?","account.location",local?"local":"remote",[["local","On the same machine as this agent"],["remote","On another computer"]])}${!pending?`<div class="row-actions">${button(connected?"Reconnect ChatGPT":"Connect ChatGPT","native.account.connect",{primary:!connected})}</div>`:`<div class="account-connect" data-control="native.account.pending"><h3>${job.state==="starting"?"Preparing sign-in…":job.state==="cancelling"?"Cancelling sign-in…":"Finish connecting your account"}</h3>${job.state==="pending"?`<p>Complete sign-in before ${esc(displayTime(job.expires_at))}. The callback is on the agent machine’s local connection.</p>${where==="remote"?`<p>First, open Terminal or PowerShell on this computer and run this connection command. Keep it open while signing in.</p>${job.tunnel_command?`<pre class="code-block">${esc(job.tunnel_command)}</pre>${button("Copy connection command","native.account.tunnel.copy",{small:true,icon:"copy"})}`:`<p>Ask an administrator to forward local port ${esc(job.callback_port)} to 127.0.0.1:${esc(job.callback_port)} on the agent machine.</p>`}<p class="small muted">SSH must already be available for your account. If the port is busy, cancel and start again. No public callback or account transfer is used.</p>${button(ready?"Connection marked ready":"I’ve started the connection","native.account.tunnel.ready",{small:true})}`:""}${ready?button("Open ChatGPT sign-in","native.account.open",{primary:true}):""}`:""}${button("Cancel sign-in","native.account.cancel",{quiet:true,disabled:job.state==="cancelling"})}</div>`}${!pending&&["failed","expired","interrupted","cancelled"].includes(job.state)?banner(job.message||({expired:"Sign-in expired. Start again when you are ready.",cancelled:"Sign-in was cancelled. Check the account above before starting again. Provider settings were preserved.",interrupted:"Sign-in was interrupted. Check the account before trying again."})[job.state]||"Sign-in did not finish.","warning"):""}<p class="card-note">Signing in alone does not change the model, reconnect clients, or renew background-work authorization.</p></section>`;
+    return `<section class="card" data-control="native.account"><div class="card-header"><div><h2>ChatGPT account</h2><p>Optional account access for this native engine. Connect here, then choose an available model and save the engine settings.</p></div>${button("Check account","native.account.load",{small:true})}</div>${app.nativeAccountError?banner(app.nativeAccountError,"warning"):""}${connected?`<p>${badge("Connected","green")} ${esc(n.account.email||"This installation’s account")}</p><p class="small muted">${n.account.sharing?"Plan access is enabled for this agent.":"Plan access is not enabled; account permission is needed before model calls."}</p><div class="row-actions">${button("Use this account","native.account.use",{primary:true})}${button("Disconnect account…","native.account.disconnect.open",{quiet:true})}</div>`:'<p class="small muted">This authorization belongs to the native engine. It does not reuse a Codex login or switch the current provider automatically.</p>'}${choice("Where is this browser?","account.location",local?"local":"remote",[["local","On the same machine as this agent"],["remote","On another computer"]])}${!pending?`<div class="row-actions">${button(connected?"Reconnect ChatGPT":"Connect ChatGPT","native.account.connect",{primary:!connected})}</div>`:`<div class="account-connect" data-control="native.account.pending"><h3>${job.state==="starting"?"Preparing sign-in…":job.state==="cancelling"?"Cancelling sign-in…":"Finish connecting your account"}</h3>${job.state==="pending"?`<p>Complete sign-in before ${esc(displayTime(job.expires_at))}. The callback is on the agent machine’s local connection.</p>${where==="remote"?`<p>First, open Terminal or PowerShell on this computer and run this connection command. Keep it open while signing in.</p>${job.tunnel_command?`<pre class="code-block">${esc(job.tunnel_command)}</pre>${button("Copy connection command","native.account.tunnel.copy",{small:true,icon:"copy"})}`:`<p>Ask an administrator to forward local port ${esc(job.callback_port)} to 127.0.0.1:${esc(job.callback_port)} on the agent machine.</p>`}<p class="small muted">SSH must already be available for your account. If the port is busy, cancel and start again. No public callback or account transfer is used.</p>${button(ready?"Connection marked ready":"I’ve started the connection","native.account.tunnel.ready",{small:true})}`:""}${ready?button("Open ChatGPT sign-in","native.account.open",{primary:true}):""}`:""}${button("Cancel sign-in","native.account.cancel",{quiet:true,disabled:job.state==="cancelling"})}</div>`}${!pending&&["failed","expired","interrupted","cancelled"].includes(job.state)?banner(job.message||({expired:"Sign-in expired. Start again when you are ready.",cancelled:"Sign-in was cancelled. Check the account above before starting again. Provider settings were preserved.",interrupted:"Sign-in was interrupted. Check the account before trying again."})[job.state]||"Sign-in did not finish.","warning"):""}<p class="card-note">Signing in alone does not change the model, reconnect clients, or renew background-work authorization.</p></section>`;
   }
-  async function loadNativeAccount(redraw=true){try{app.nativeAccount=await api("native-account");app.nativeAccountError="";scheduleNativeAccountPoll();}catch(e){app.nativeAccountError=e.message;}if(redraw)render();}
+  async function loadNativeAccount(redraw=true){try{app.nativeAccount=await api("native-account");app.nativeAccountError="";scheduleNativeAccountPoll();}catch(e){app.nativeAccount=null;invalidateNativeModels();app.nativeAccountError=e.message;}if(redraw)render();}
   function scheduleNativeAccountPoll(){clearTimeout(app.nativeAccountTimer);if(!["starting","pending","cancelling"].includes(app.nativeAccount?.login?.state))return;app.nativeAccountTimer=setTimeout(async()=>{if(!app.session)return;try{app.nativeAccount.login=await api("native-account/login");if(app.nativeAccount.login.state==="connected"){await loadNativeAccount(false);app.backend=await api("backend");setNotice("ChatGPT account connected. Choose an available model and save engine settings to use it.");}else{render();scheduleNativeAccountPoll();}}catch(e){app.nativeAccountError=e.message;render();}},1000);}
-  async function connectNativeAccount(){if(!app.nativeConfig)await loadNative();if(!app.nativeConfig)throw new Error("Open engine settings before connecting an account.");await flushDrafts();await command({type:"set_filter",key:"native_tunnel_ready",value:false});const port=Number(draft("account.callback_port",0));const job=await api("native-account/login",{method:"POST",body:{expected_backend_sha256:app.nativeConfig.backend_sha256,callback_port:port}});app.nativeAccount??={account:{connected:false}};app.nativeAccount.login=job;app.nativeAccountError="";scheduleNativeAccountPoll();render();}
+  async function connectNativeAccount(){if(!app.nativeConfig)await loadNative();if(!app.nativeConfig)throw new Error("Open engine settings before connecting an account.");await flushDrafts();await command({type:"set_filter",key:"native_tunnel_ready",value:false});const port=Number(draft("account.callback_port",0));const job=await api("native-account/login",{method:"POST",body:{expected_backend_sha256:app.nativeConfig.backend_sha256,callback_port:port}});app.nativeAccount??={account:{connected:false}};app.nativeAccount.login=job;app.nativeModels=null;app.nativeAccountError="";scheduleNativeAccountPoll();render();}
   function nativeAuthorizationUrl(){const raw=app.nativeAccount?.login?.authorization_url;try{const u=new URL(raw);if(u.protocol==="https:"&&u.hostname==="auth.openai.com"&&u.pathname==="/api/accounts/authorize"&&!u.username&&!u.password)return u.href;}catch{}throw new Error("There is no active sign-in address. Check the account and start again.");}
-  async function loadNativeModels(){const value=await api("native-account/models",{method:"POST",body:{}}),catalog=nativeCatalog("openai");app.nativeModels=(value.models||[]).filter(m=>!catalog||catalog.some(x=>x.model===m.slug));render();if(!app.nativeModels.length)throw new Error("No models offered by this account are supported by this runtime. Update the runtime or check account access before saving.");}
-  async function useNativeAccount(){if(!app.nativeConfig)await loadNative();await loadNativeAccount(false);if(!app.nativeAccount?.account?.connected)throw new Error("Connect the account first.");await loadNativeModels();const choices=app.nativeModels,current=String(draft("native.model",app.nativeConfig.config.provider.model)),preferred=app.nativeSchema?.["x-agent-runtime"]?.provider_presets?.find(p=>p.kind==="openai")?.model,model=choices.some(m=>m.slug===current)?current:choices.some(m=>m.slug===preferred)?preferred:choices[0].slug;await patchView(next=>{next.draft.native={...(next.draft.native||{}),kind:"openai",endpoint:"https://api.openai.com/v1/responses",auth:"chatgpt",account_file:app.nativeAccount.account.credentials_file,model};});setNotice("The connected account and model are selected. Save engine settings to apply them.");}
+  function invalidateNativeModels(message){
+    const route=nativeModelRoute();
+    app.nativeModelSelection=null;
+    app.nativeModels=message&&route?{route,status:"error",message}:null;
+  }
+  async function loadNativeModels(){
+    const route=nativeModelRoute();
+    if(!route)return;
+    const restoreFocus=document.activeElement?.dataset.control==="native.models.retry";
+    const listing={route,status:"loading",models:[],message:""};
+    app.nativeModels=listing;
+    render();
+    try{
+      const value=await api("native-account/models",{method:"POST",body:{}});
+      if(!Array.isArray(value.selectable_models)||!/^[a-f0-9]{64}$/.test(value.account_binding)){
+        listing.message="This Instance needs an update to load live models.";
+      }else{
+        listing.binding=value.account_binding;
+        const ids=new Set();
+        for(const m of value.selectable_models){
+          if(typeof m?.slug!=="string"||!m.slug||m.slug.length>256||
+             typeof m.requires_model_opt_in!=="boolean"||ids.has(m.slug))continue;
+          ids.add(m.slug);
+          const name=typeof m.display_name==="string"&&m.display_name.length<=256?m.display_name:"";
+          listing.models.push({...m,display_name:name||m.slug});
+        }
+        if(!listing.models.length)listing.message="This account returned no selectable models.";
+      }
+      if(app.nativeModels!==listing||nativeModelRoute()!==route)return;
+      const activeAccount=await api("native-account");
+      if(app.nativeModels!==listing||nativeModelRoute()!==route)return;
+      if(nativeModelRoute(activeAccount)!==route){
+        app.nativeAccount=activeAccount;
+        invalidateNativeModels("The account changed. Load its models again.");
+        render();
+        return;
+      }
+    }catch{
+      listing.message="Couldn’t load models. Check the connection and try again.";
+    }
+    if(app.nativeModels!==listing||nativeModelRoute()!==route)return;
+    listing.status=listing.message?"error":"ready";
+    if(restoreFocus&&document.activeElement===document.body)
+      app.focusRemote=listing.message?"native.models.retry":"native.model";
+    render();
+  }
+  async function useNativeAccount(){
+    if(!app.nativeConfig)await loadNative();
+    await flushDrafts();
+    await loadNativeAccount(false);
+    const account=app.nativeAccount?.account;
+    if(!account?.connected||!account.sharing)throw new Error("Connect a ChatGPT account with plan access first.");
+    const alreadySelected=!!nativeModelRoute();
+    await patchView(next=>{
+      next.draft.native={...(next.draft.native||{}),kind:"openai",endpoint:chatGPTEndpoint,
+        auth:"chatgpt",account_file:account.credentials_file,...(alreadySelected?{}:{model:""})};
+    });
+    await loadNativeModels();
+  }
 
   function configuration() {
     return heading("Make this agent yours.","Its purpose and working style can evolve as you work together.",button("Save changes","config.save",{primary:true,icon:"check"}))+(app.status?.config_revision!==undefined&&app.status.config_revision!==app.doc.revision?`<div class="notice-strip"><p>Settings changed outside this page. Your draft is preserved; load the latest settings before saving.</p>${button("Load latest settings","config.reload",{small:true,icon:"refresh"})}</div>`:"")+`<section class="card" data-control="section.identity" tabindex="-1"><div class="card-header"><div><h2>Identity & purpose</h2><p>The same individual, across clients and conversations.</p></div></div>${identityFields()}${installationDetails()}</section><section class="card"><h2>Ready to work</h2>${runtimeSummary()}</section>${nativeConfigCard()}${nativeAccountCard()}${advancedSettings()}${configFooter()}`;
@@ -482,6 +612,8 @@
   function render() {
     if (app.doc?.config.name) document.title = `${app.doc.config.name}: Agent Instance`;
     if(app.loading)return;
+    if(app.nativeModels&&app.nativeModels.route!==nativeModelRoute())app.nativeModels=null;
+    if(app.nativeModelSelection&&app.nativeModelSelection.route!==nativeModelRoute())app.nativeModelSelection=null;
     const saved=captureDom();
     if(!app.session){root.innerHTML=loginScreen();restoreSensitive(saved);return;}
     const page={setup,dashboard,updates:updatesPage,work:workPage,memory:memoryPage,organization:organizationPage,configuration,profiles,connections,activity,access}[currentRoute()]||dashboard;
@@ -591,6 +723,7 @@
   }
   function queueDraft(key,value) {
     if(key.startsWith("readonly."))return;
+    noteNativeModelDraft(key,value);
     app.draftPending.set(key,value);const origin=viewOrigin();if(origin)origin.writes=[["draft",...key.split(".")]];app.draftOrigins.set(key,origin);markDirty();
     clearTimeout(app.timers.get(`draft:${key}`));
     app.timers.set(`draft:${key}`,setTimeout(()=>flushDraft(key).catch(fail),450));
@@ -768,13 +901,24 @@
       case "native.account.tunnel.ready":return command({type:"set_filter",key:"native_tunnel_ready",value:true});
       case "native.account.open":window.open(nativeAuthorizationUrl(),"_blank","noopener,noreferrer");return;
       case "native.account.disconnect.open":return command({type:"open_modal",modal:"native-account-disconnect"});
-      case "native.account.disconnect":await api("native-account",{method:"DELETE",body:{confirm:true}});await command({type:"close_modal"});await loadNativeAccount();app.backend=await api("backend");setNotice("The native account has been disconnected. Engine settings and history were preserved.");return;
+      case "native.account.disconnect":await api("native-account",{method:"DELETE",body:{confirm:true}});app.nativeModels=null;await command({type:"close_modal"});await loadNativeAccount();app.backend=await api("backend");setNotice("The native account has been disconnected. Engine settings and history were preserved.");return;
       case "native.key.open":if(!app.nativeConfig)await loadNative();return command({type:"open_modal",modal:"native-key"});
       case "native.key.save":{const value=payload.value??root.querySelector("[data-secret-input]")?.value;if(!value)throw new Error("Enter an API key.");await api("native-config/credential",{method:"POST",body:{expected_backend_sha256:app.nativeConfig.backend_sha256,value}});const input=root.querySelector("[data-secret-input]");if(input)input.value="";await command({type:"close_modal"});await refresh(false);await loadNative();setNotice("API key connected. The next task will verify model access.");return;}
       case "native.load":return loadNative();
       case "native.observations":return loadNativeObservations();
       case "native.details":return command({type:"set_filter",key:"native_details",value:!state().filters.native_details});
-      case "native.preset":{await flushDrafts();const kind=String(draft("native.kind",app.nativeConfig.config.provider.kind));const preset=app.nativeSchema?.["x-agent-runtime"]?.provider_presets?.find(p=>p.kind===kind);if(!preset)throw new Error("This engine did not publish defaults for that provider.");let model=preset.model||null;const catalog=nativeCatalog(kind);if(model&&catalog&&!catalog.some(m=>m.model===model))throw new Error("The runtime default is outside its current model catalog. Update the runtime before applying defaults.");if(draft("native.auth",app.nativeConfig.config.provider.auth||"auto")==="chatgpt"){if(kind!=="openai")throw new Error("Choose provider credentials before applying defaults for another provider.");await loadNativeModels();if(model&&!app.nativeModels.some(m=>m.slug===model))model=app.nativeModels[0].slug;}return patchView(next=>{next.draft.native={...(next.draft.native||{}),...(model?{model}:{}),endpoint:preset.endpoint,key_env:preset.api_key_env,images:false,audio:false,pdf:false,computer:"null",tools:"[]"};});}
+      case "native.preset":{
+        await flushDrafts();
+        const provider=app.nativeConfig.config.provider,kind=String(draft("native.kind",provider.kind));
+        const preset=app.nativeSchema?.["x-agent-runtime"]?.provider_presets?.find(p=>p.kind===kind);
+        if(!preset)throw new Error("This engine did not publish defaults for that provider.");
+        const chatgpt=draft("native.auth",provider.auth||"auto")==="chatgpt";
+        if(chatgpt&&kind!=="openai")throw new Error("Choose provider credentials before applying defaults for another provider.");
+        await patchView(next=>{next.draft.native={...(next.draft.native||{}),endpoint:chatgpt?chatGPTEndpoint:preset.endpoint,key_env:preset.api_key_env,
+          ...(kind!==provider.kind?{model:""}:{}),images:false,audio:false,pdf:false,computer:"null",tools:"[]"};});
+        if(chatgpt)await loadNativeModels();
+        return;
+      }
       case "native.save":return saveNative();
       case "native.validate":return saveNative(true);
       case "native.raw.open":await flushDrafts();return patchView(next=>{next.draft.native??={};next.draft.native.raw=JSON.stringify(nativeDocument(),null,2);next.modal="native-raw";});
@@ -917,7 +1061,7 @@
   }
   function signedOut() {
     app.approvalPolicy=null;app.approvalPolicyError="";app.approvalPolicyBusy=false;app.approvalPolicyNeedsReview=false;app.approvalPolicyRequest++;
-    app.source?.close();clearInterval(app.poll);clearTimeout(app.accountTimer);clearTimeout(app.nativeAccountTimer);app.nativeAccount=null;app.nativeModels=null;app.account=null;app.backend=null;app.source=null;app.streamOnline=false;app.session=null;app.csrf="";app.tokenOnce=null;app.profilePackage=null;app.profilePackageImport=null;app.profilePackageImportError="";app.profilePackageExpected=null;app.view=null;app.draftPending.clear();app.draftOrigins.clear();app.deferredOrigins.clear();app.viewIntents.clear();app.loading=false;render();
+    app.source?.close();clearInterval(app.poll);clearTimeout(app.accountTimer);clearTimeout(app.nativeAccountTimer);app.nativeAccount=null;app.nativeModels=null;app.nativeModelSelection=null;app.account=null;app.backend=null;app.source=null;app.streamOnline=false;app.session=null;app.csrf="";app.tokenOnce=null;app.profilePackage=null;app.profilePackageImport=null;app.profilePackageImportError="";app.profilePackageExpected=null;app.view=null;app.draftPending.clear();app.draftOrigins.clear();app.deferredOrigins.clear();app.viewIntents.clear();app.loading=false;render();
   }
   async function migrateSetupDraft() {
     if(app.doc.config.setup_complete||app.backend?.kind!=="codex"||!app.backend.installed)return;
@@ -1028,7 +1172,7 @@
     actions:()=>[...root.querySelectorAll("[data-action]")].map(el=>({action:el.dataset.action,control:el.dataset.control||null,label:el.getAttribute("aria-label")||el.textContent.trim().slice(0,100),enabled:!el.disabled,...Object.fromEntries(Object.entries(el.dataset).filter(([key])=>!['action','control'].includes(key)))})).concat([{action:"identity.avatar.upload",control:"identity.avatar.file",label:"Upload agent image",enabled:!!app.session,parameters:["media_type","data","expected_revision"]}]),
     command:value=>command(value),
     perform:(action,payload)=>perform(action,payload),
-    setDraft:async(path,value)=>{if(["approvals.mode","approvals.delegated_clients"].includes(path)){if(!app.approvalPolicy||app.approvalPolicyError)throw new Error("Load current approval settings first.");if(!approvalDraftChanged())await command({type:"set_draft",path:"approvals.expected_revision",value:app.approvalPolicy.revision});}return command({type:"set_draft",path,value});}
+    setDraft:async(path,value)=>{noteNativeModelDraft(path,value);if(["approvals.mode","approvals.delegated_clients"].includes(path)){if(!app.approvalPolicy||app.approvalPolicyError)throw new Error("Load current approval settings first.");if(!approvalDraftChanged())await command({type:"set_draft",path:"approvals.expected_revision",value:app.approvalPolicy.revision});}return command({type:"set_draft",path,value});}
   });
   window.addEventListener("message",async event=>{
     if(!app.session || event.source!==window.parent || event.source===window)return;

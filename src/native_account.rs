@@ -8,6 +8,7 @@ use crate::{
 use axum::{Json, extract::State, http::HeaderMap};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     process::Stdio,
     sync::{Arc, Mutex},
@@ -247,6 +248,7 @@ pub async fn start(
     Json(body): Json<Start>,
 ) -> ApiResult<Json<Value>> {
     auth::check(&state, &headers, "admin", true)?;
+    let _gate = state.native_account_gate.lock().await;
     native_config::installation(&state)?;
     if body.expected_backend_sha256 != scheduler::backend_hash(&state) {
         return Err(ApiError::conflict(
@@ -276,7 +278,7 @@ pub async fn start(
     publish(&state, &job, value.clone())?;
     *guard = Some(job.clone());
     drop(guard);
-    tokio::spawn(run(state, job, body, receiver));
+    tokio::spawn(run(state.clone(), job, body, receiver));
     Ok(Json(value))
 }
 pub async fn login_status(
@@ -321,11 +323,34 @@ pub async fn status(
     account["credentials_file"] = json!(home.join("accounts/chatgpt/credentials.json"));
     Ok(Json(json!({"account":account,"login":current(&state)?})))
 }
+// Stable across token refresh. The managed login job distinguishes fresh grants
+// even when the engine stores both accounts at the same path.
+pub(crate) async fn binding(state: &AppState) -> ApiResult<Option<String>> {
+    let account = native_config::invoke(state, "chatgpt-status", None).await?;
+    if account["connected"] != true || account["sharing"] != true {
+        return Ok(None);
+    }
+    let identity = json!([
+        scheduler::backend_hash(state),
+        account["subject"],
+        account["email"],
+        account["client_id"],
+        current(state)?["id"]
+    ]);
+    Ok(Some(format!("{:x}", Sha256::digest(identity.to_string()))))
+}
 pub async fn models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {
     auth::check(&state, &headers, "admin", true)?;
+    let _gate = state.native_account_gate.lock().await;
+    if pending(&state) {
+        return Err(ApiError::bad(
+            "Finish account sign-in before loading models",
+        ));
+    }
+    let account_binding = binding(&state).await?;
     let value = native_config::invoke(&state, "chatgpt-models", None).await?;
     let schema = native_config::invoke(&state, "config-schema", None).await?;
     let catalog = schema["x-agent-runtime"].get("model_catalog");
@@ -338,9 +363,33 @@ pub async fn models(
     let models = value["models"]
         .as_array()
         .ok_or_else(|| ApiError::bad("The engine returned an unsupported model catalog"))?;
-    Ok(Json(
-        json!({"runtime_catalog_available":supported.is_some(),"models":models.iter().take(200).filter_map(|m|{let slug=m["slug"].as_str()?;let label=m["display_name"].as_str().unwrap_or(slug);let allowed=supported.is_none_or(|rows|rows.as_array().unwrap().iter().any(|row|row["model"]==slug));(allowed&&slug.len()<=256&&label.len()<=256).then(||json!({"slug":slug,"display_name":label}))}).collect::<Vec<_>>()}),
-    ))
+    let mut supported_models = Vec::new();
+    let mut selectable_models = Vec::new();
+    for model in models.iter().take(200) {
+        let Some(slug) = model["slug"].as_str() else {
+            continue;
+        };
+        let label = model["display_name"].as_str().unwrap_or(slug);
+        if slug.len() > 256 || label.len() > 256 {
+            continue;
+        }
+        let listed = supported
+            .is_none_or(|rows| rows.as_array().unwrap().iter().any(|r| r["model"] == slug));
+        if listed {
+            supported_models.push(json!({"slug": slug, "display_name": label}));
+        }
+        if let Some(opt_in) = model["requires_model_opt_in"].as_bool() {
+            selectable_models.push(json!({
+                "slug": slug, "display_name": label, "requires_model_opt_in": opt_in,
+            }));
+        }
+    }
+    Ok(Json(json!({
+        "account_binding": account_binding,
+        "runtime_catalog_available": supported.is_some(),
+        "models": supported_models,
+        "selectable_models": selectable_models,
+    })))
 }
 pub async fn disconnect(
     State(state): State<Arc<AppState>>,
@@ -348,6 +397,7 @@ pub async fn disconnect(
     Json(body): Json<Disconnect>,
 ) -> ApiResult<Json<Value>> {
     auth::check(&state, &headers, "admin", true)?;
+    let _gate = state.native_account_gate.lock().await;
     if !body.confirm || pending(&state) {
         return Err(ApiError::bad(
             "Finish or cancel sign-in, then explicitly confirm disconnection",

@@ -42,6 +42,7 @@ pub struct AppState {
     pub context_leases: Mutex<BTreeMap<String, crate::context::Lease>>,
     pub login_gate: std::sync::Arc<tokio::sync::Semaphore>,
     pub native_login: Mutex<Option<std::sync::Arc<crate::native_account::Login>>>,
+    pub native_account_gate: tokio::sync::Mutex<()>,
 }
 impl AppState {
     pub fn open(home: PathBuf) -> Result<Self> {
@@ -86,6 +87,7 @@ impl AppState {
             context_leases: Mutex::new(BTreeMap::new()),
             login_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
             native_login: Mutex::new(None),
+            native_account_gate: tokio::sync::Mutex::new(()),
         })
     }
     pub fn instance_config(&self) -> InstanceConfig {

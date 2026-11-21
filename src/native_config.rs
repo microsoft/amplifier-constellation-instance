@@ -22,6 +22,8 @@ use tokio::{io::AsyncReadExt, process::Command};
 pub struct Update {
     pub expected_revision: String,
     pub expected_backend_sha256: String,
+    #[serde(default)]
+    pub expected_account_binding: Option<String>,
     pub config: Value,
 }
 
@@ -267,13 +269,35 @@ fn check_revision(state: &AppState, body: &Update) -> ApiResult<()> {
     }
     Ok(())
 }
+async fn check_account_binding(state: &AppState, body: &Update) -> ApiResult<()> {
+    let Some(expected) = body.expected_account_binding.as_deref() else {
+        return Ok(());
+    };
+    let (_, home) = installation(state)?;
+    let provider = &body.config["provider"];
+    if provider["kind"] != "openai"
+        || provider["auth"] != "chatgpt"
+        || provider["endpoint"] != "https://api.openai.com/v1/responses"
+        || provider["chatgpt_credentials_file"]
+            != json!(home.join("accounts/chatgpt/credentials.json"))
+        || crate::native_account::pending(state)
+        || crate::native_account::binding(state).await?.as_deref() != Some(expected)
+    {
+        return Err(ApiError::conflict(
+            json!({"reason":"model_discovery_account_changed"}),
+        ));
+    }
+    Ok(())
+}
 pub async fn validate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<Update>,
 ) -> ApiResult<Json<Value>> {
     auth::check(&state, &headers, "admin", true)?;
+    let _gate = state.native_account_gate.lock().await;
     check_revision(&state, &body)?;
+    check_account_binding(&state, &body).await?;
     Ok(Json(invoke(&state, "config-validate", Some(&body)).await?))
 }
 pub async fn save(
@@ -282,7 +306,9 @@ pub async fn save(
     Json(body): Json<Update>,
 ) -> ApiResult<Json<Value>> {
     let actor = auth::check(&state, &headers, "admin", true)?.actor;
+    let _gate = state.native_account_gate.lock().await;
     check_revision(&state, &body)?;
+    check_account_binding(&state, &body).await?;
     if crate::native_account::pending(&state) {
         return Err(ApiError::bad(
             "Finish or cancel account sign-in before changing the engine",

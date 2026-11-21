@@ -124,7 +124,22 @@ async fn account_models_follow_installed_runtime_support_without_migrating_saved
         assert_eq!(value["models"].as_array().unwrap().len(), count, "{mode}");
         assert_eq!(value["runtime_catalog_available"], present, "{mode}");
         assert!(!value.to_string().contains("do not forward"));
+        assert_eq!(
+            value["selectable_models"].as_array().unwrap().len(),
+            usize::from(mode == "normal"),
+            "{mode}"
+        );
     }
+    std::fs::write(f.dir.path().join("engine/catalog-mode"), "account").unwrap();
+    let value = f.api("POST", "native-account/models", json!({})).await;
+    assert_eq!(value["models"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["selectable_models"],
+        json!([
+            {"slug":"newer-account-model","display_name":"Newer model","requires_model_opt_in":true},
+            {"slug":"fixture-account-model","display_name":"Fixture account model","requires_model_opt_in":false}
+        ])
+    );
     for mode in ["missing", "malformed"] {
         std::fs::write(f.dir.path().join("engine/catalog-mode"), mode).unwrap();
         let (status, _) = f
