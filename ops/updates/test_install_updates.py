@@ -33,10 +33,12 @@ class EnrollmentTests(unittest.TestCase):
    participant={'id':'game','protocol':1,'components':['instance','task-helpers'],'commands':{a:[str(helper),a] for a in ('prepare','verify','restore')}}
    old={'schema':1,'instance_id':identity,'home':str(home),'state':str(state),'components':[{'id':'instance','kind':'instance','binary':str(binary)},{'id':'task-helpers','kind':'runtime','binary':str(helper),'restart_scope':{'instance':False,'services':[],'slack_homes':[]}}],'services':[],'participants':[participant]}
    old['service_connections']={'schema':1,'services':[],'connections':[]}
+   old['when_idle_components']=['task-helpers']
    (state/'registration.json').write_text(json.dumps(old))
    with patch.object(m.platform,'system',return_value='Linux'),patch.object(m.Path,'home',return_value=root),patch.object(m,'run'),patch.object(m.subprocess,'run',return_value=subprocess.CompletedProcess([],0)):
     m.enroll(home,state,[],ROOT/'worker.py')
    new=json.loads((state/'registration.json').read_text());self.assertEqual(new['service_connections'],old['service_connections']);self.assertEqual(new['participants'],[participant]);self.assertIn('task-helpers',[p['id'] for p in new['components']])
+   self.assertEqual(new['when_idle_components'],['task-helpers'])
  def test_vanilla_engine_is_enrolled_without_modifying_backend(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=pathlib.Path(tmp).resolve();home=root/'home';state=root/'owner';(home/'bin').mkdir(parents=True);(home/'bin/agent-instance').write_text('fixture')

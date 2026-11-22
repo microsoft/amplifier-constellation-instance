@@ -56,6 +56,22 @@ transaction and health verification. Chat cannot add providers or supply argv.
 This is an extension point for other software, not an automatic updater for every
 program on the computer.
 
+An owner can also enroll individual components for idle installs while keeping
+the installation-wide preference **When requested**. Set `when_idle_components`
+in the private registration to a list of enrolled component IDs, for example
+`["minecraft"]`. The existing helper uses the normal check interval, participant
+idle checks, session verification and rollback. A scheduled check in this mode
+selects only the listed components. Use an ordinary **Check** to see every
+component’s available update. A requested check that finds updates for other
+components still needs an explicit **Apply** to install them.
+
+Turning off periodic checks also pauses these component-specific installs.
+With the standard **When idle** or maintenance-window preference, the
+installation-wide schedule applies as usual. Removing the list during owner
+re-enrollment returns the installation to its ordinary policy. Existing
+registrations with no list keep their current behavior.
+
+
 ## Recovery and boundaries
 
 The helper validates download hashes from GitHub, selects an exact ordinary

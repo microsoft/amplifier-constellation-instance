@@ -18,6 +18,7 @@ REPOSITORIES = {'instance': ('amplifier-constellation-instance','agent-instance'
                 'teams': ('amplifier-acp-teams','acp-teams-adapter','check.yml')}
 CRITICAL = {'stopping','swapping','verifying','rolling_back'}
 PARTICIPANT_ACTIONS = ('prepare','verify','restore')
+WHEN_IDLE_COMPONENTS_VERSION = 1
 LIMIT = 256*1024*1024
 MANAGEMENT_PATHS = {'status','updates','updates/report','service-connections','service-connections/report'}
 HELPER_FILES = {'worker.py','engine_provider.py','container_provider.py','incus_provider.py',
@@ -206,6 +207,12 @@ def load_registration(path):
                 a=p['commands'][action]
                 if not a or not Path(a[0]).is_absolute() or not all(isinstance(x,str) for x in a):raise ValueError('fixed_absolute_provider_commands_required')
         else: raise ValueError('unsupported_provider')
+    if 'when_idle_components' in c:
+        selected = c['when_idle_components']
+        if (not isinstance(selected, list) or not selected
+                or not all(isinstance(name, str) and name in ids for name in selected)
+                or len(set(selected)) != len(selected)):
+            raise ValueError('invalid_when_idle_components')
     service_names=set()
     for s in c.get('services',[]):
         if s['kind'] not in ['systemd-user','launchd','scheduled-task']:raise ValueError('unsupported_service')
@@ -523,11 +530,14 @@ class Worker:
         # flight. Keep this helper's lifetime ownership until it settles; the
         # installer remains bounded and may refuse instead of restarting it.
         return enrollment_idle(self.state,self.root) and not any(t.is_alive() for t in getattr(self,'_reporting_threads',[]))
-    def plan(self,policy):
+    def plan(self,policy,*,when_idle_components=None):
         if self.state.get('github_retry_at_ms',0)>int(time.time()*1000):
             raise GitHubRateLimited(self.state['github_retry_at_ms'])
         if self.state.get('github_retry_at_ms'):self.save(github_retry_at_ms=0)
-        with self.reporting(),github_metadata_session():return self.build_plan(policy)
+        with self.reporting(),github_metadata_session():
+            if when_idle_components is None:
+                return self.build_plan(policy)
+            return self.build_plan(policy, when_idle_components=when_idle_components)
     def defer_github_check(self,error,now):
         if self.state.get('github_retry_at_ms',0)>now:
             self.save(state='check_failed',error=str(GitHubRateLimited(self.state['github_retry_at_ms'])))
@@ -536,21 +546,43 @@ class Worker:
         retry=max(error.retry_at_ms,now+min(60*2**(count-1),3600)*1000)
         self.save(state='check_failed',last_check=now,github_retry_at_ms=retry,
                   github_rate_limit_count=count,error=str(GitHubRateLimited(retry)))
-    def build_plan(self,policy):
+    def when_idle_components(self, policy):
+        if policy['install'] == 'on_request' and policy['check_minutes']:
+            return self.c.get('when_idle_components')
+        return None
+
+    def build_plan(self,policy,*,when_idle_components=None):
+        if when_idle_components is not None and when_idle_components != self.when_idle_components(policy):
+            raise ValueError('when_idle_components_changed')
         identifier=str(uuid.uuid4());folder=self.root/'plans'/identifier;folder.mkdir(parents=True,mode=0o700)
         self.save(state='checking',error=None);self.report();components=[]
         for p in self.c['components']:
-            if p.get('provider','github')=='github':components.append(candidate(p,policy['channel'],folder))
+            deferred = when_idle_components is not None and p['id'] not in when_idle_components
+            if p.get('provider','github')=='github':
+                if deferred:
+                    part = {'id':p['id'], 'available':False, 'reason':'manual_check_required',
+                            'version':run([p['binary'],'--version']).decode().strip(),
+                            'installed_sha256':digest(p['binary'])}
+                else:
+                    part = candidate(p,policy['channel'],folder)
+                components.append(part)
             else:
                 current=json.loads(run(p['commands']['status']).decode())
-                result=json.loads(self.provider_call(p,'plan',folder).decode())
+                if deferred:
+                    result = {'available':False, 'version':current.get('version',''), 'reason':'manual_check_required'}
+                else:
+                    result = json.loads(self.provider_call(p,'plan',folder).decode())
                 part={'id':p['id'],'available':bool(result['available']),'version':str(current.get('version','')),'target_version':str(result.get('version','')),'provider':'command'}
+                if deferred:
+                    part['reason'] = 'manual_check_required'
                 if p.get('protocol')==2:
                     file=folder/(p['id']+'.provider.json')
                     write(file,{'id':identifier,'component':p['id'],'plan':result})
                     part['provider_plan_sha256']=digest(file)
                 components.append(part)
         plan={'id':identifier,'components':components,'policy_revision':policy['revision'],'channel':policy['channel'],'created_at':int(time.time()*1000)}
+        if when_idle_components is not None:
+            plan['when_idle_components'] = list(when_idle_components)
         plan['restart_scope']=self.restart_scope(plan)
         plan['participants']=self.selected_participants(plan)
         plan['registration_sha256']=self.registration_digest()
@@ -745,6 +777,13 @@ class Worker:
     def apply(self,plan,policy,agent=False,rollback=False,scheduled=False):
         with self.reporting():return self.transaction_apply(plan,policy,agent,rollback,scheduled)
     def transaction_apply(self,plan,policy,agent=False,rollback=False,scheduled=False):
+        if scheduled and ('when_idle_components' in plan or policy['install'] == 'on_request'):
+            selected = self.when_idle_components(policy)
+            if (not selected or plan.get('when_idle_components') != selected
+                    or plan.get('policy_revision') != policy['revision']
+                    or plan.get('registration_sha256') != self.registration_digest()
+                    or any(p['available'] and p['id'] not in selected for p in plan['components'])):
+                raise ValueError('invalid_scheduled_component_plan')
         if not rollback and not any(p['available'] for p in plan['components']):self.save(state='up_to_date');return
         if plan.get('created_at',0)<self.state.get('enrolled_at',0):raise ValueError('plan_predates_enrollment')
         if plan.get('registration_sha256',self.registration_digest())!=self.registration_digest():raise ValueError('update_enrollment_changed')
@@ -929,16 +968,44 @@ class Worker:
         now=int(time.time()*1000)
         retry=self.state.get('github_retry_at_ms',0)
         if retry>now:return
+        selected = self.when_idle_components(policy)
         if policy['check_minutes'] and (now-self.state.get('last_check',0)>=policy['check_minutes']*60000 or retry):
-            try:self.plan(policy)
+            try:
+                if selected is None:
+                    self.plan(policy)
+                else:
+                    self.plan(policy, when_idle_components=selected)
             except GitHubRateLimited as e:self.defer_github_check(e,now);self.report();return
             except Exception as e:self.save(state='check_failed',last_check=now,error=type(e).__name__+': '+str(e)[:160]);self.report();return
-        if self.state['state']=='available' and policy['install']!='on_request':
-            if policy['install']=='when_idle' or self.in_window(policy):
-                try:self.apply(read(self.root/'plans'/self.state['plan_id']/'plan.json'),policy,scheduled=True)
-                except Exception as e:
-                    if self.state['state'] not in ['recovery_required','rolled_back']:self.save(state='failed')
-                    self.save(error=type(e).__name__+': '+str(e)[:160]);self.report()
+        if self.state['state'] != 'available':
+            return
+        if selected is None and (policy['install'] == 'on_request'
+                                 or (policy['install'] != 'when_idle' and not self.in_window(policy))):
+            return
+        try:
+            plan = read(self.root/'plans'/self.state['plan_id']/'plan.json')
+            # An ordinary Check can leave a full offer for the owner. Only the
+            # next scheduled check may create a plan for idle subset admission.
+            if selected is not None and plan.get('when_idle_components') != selected:
+                return
+            self.apply(plan,policy,scheduled=True)
+        except Exception as e:
+            if self.state['state'] not in ['recovery_required','rolled_back']:self.save(state='failed')
+            self.save(error=type(e).__name__+': '+str(e)[:160]);self.report()
+    def helper_supports_registration(self, source):
+        """An older exported Worker must not drop the installed idle selection."""
+        if 'when_idle_components' not in self.c:
+            return True
+        import ast
+        for node in ast.parse(source).body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and target.id == 'WHEN_IDLE_COMPONENTS_VERSION':
+                    return (isinstance(node.value, ast.Constant)
+                            and type(node.value.value) is int
+                            and node.value.value == WHEN_IDLE_COMPONENTS_VERSION)
+        return False
+
     def refresh_helper(self):
         if self.c.get('management'):
             exported=management_call(self.c,'export',known_sha256=self.state.get('helper_instance_sha256'))
@@ -948,7 +1015,9 @@ class Worker:
             if not exported['supported']:
                 self.save(helper_instance_sha256=current);return
             files=exported.get('files')
-            validate_helper_files(self.root,files)
+            decoded = validate_helper_files(self.root,files)
+            if not self.helper_supports_registration(decoded['worker.py']):
+                self.save(helper_instance_sha256=current);return
             if all((self.root/name).is_file() and base64.b64encode((self.root/name).read_bytes()).decode()==content for name,content in files.items()):
                 self.save(helper_instance_sha256=current);return
             self.save(helper_refresh={'binary_sha256':current,'files':files})
@@ -963,6 +1032,9 @@ class Worker:
             self.save(helper_instance_sha256=current);return
         exported=self.root/'worker-next.py'
         run([component['binary'],'export-update-helper','--path',exported])
+        if not self.helper_supports_registration(exported.read_bytes()):
+            exported.unlink()
+            self.save(helper_instance_sha256=current);return
         same=digest(exported)==digest(Path(__file__))
         run([component['binary'],'export-update-support','--directory',self.root])
         self.save(helper_instance_sha256=current)
@@ -972,6 +1044,12 @@ class Worker:
     def finish_helper_refresh(self):
         pending=self.state['helper_refresh']
         if not self.c.get('management') or not re.fullmatch('[0-9a-f]{64}',pending.get('binary_sha256','')):raise ValueError('invalid_pending_helper_refresh')
+        if 'when_idle_components' in self.c:
+            worker = base64.b64decode(pending['files']['worker.py'],validate=True)
+            if not self.helper_supports_registration(worker):
+                # The journal can already cover partially published files. Keep
+                # it for recovery and never admit work from mixed generations.
+                raise ValueError('pending_helper_missing_scoped_idle_support')
         publish_helper_files(self.root,pending['files'])
         self.state.pop('helper_refresh')
         self.save(helper_instance_sha256=pending['binary_sha256'])
