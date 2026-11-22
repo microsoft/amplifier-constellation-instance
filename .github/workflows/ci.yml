@@ -23,6 +23,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpam0g-dev libclang-dev pkg-config build-essential cmake
       - name: Install Rust without changing the runner default
         run: rustup toolchain install 1.93.0 --profile minimal --component clippy --component rustfmt
+      - name: Check optional Codex adapter and standalone package
+        run: |
+          python3 -m unittest discover -s prototypes/codex-app-server -v
+          python3 scripts/package-codex-adapter.py --output "$RUNNER_TEMP/codex-adapter"
       - name: Check optional container administration contracts
         run: python3 ops/container/test_container.py
       - name: Check installation updater recovery
