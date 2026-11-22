@@ -276,6 +276,15 @@ class Adapter:
             raise ValueError("Image disabled")
         if item.get("status") != "completed":
             return
+        saved = self.db.execute(
+            "select i.sha, s.path from images i left join image_sources s "
+            "on i.sid=s.sid and i.op=s.op and i.sha=s.sha and s.path=? "
+            "where i.sid=? and i.op=? and i.item=?",
+            (item["savedPath"], sid, op, item["id"]),
+        ).fetchone()
+        if saved and saved[1] is not None:
+            self.guard()
+            return saved[0]
         data = read_generated_png(self.profile, sid, item["savedPath"])
         sha = digest(data)
         with self.db:

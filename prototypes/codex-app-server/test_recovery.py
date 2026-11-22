@@ -68,6 +68,8 @@ class RecoveryTests(unittest.TestCase):
                 self.adapter.prompt(self.sid, self.op, "revise", self.fail)
             self.assertEqual(self.adapter.artifacts(self.sid, self.op), [digest(data)])
         source.unlink()
+        with self.assertRaisesRegex(ValueError, "outcome uncertain"):
+            self.adapter.prompt(self.sid, self.op, "revise", self.fail)
         self.assertEqual(
             self.adapter.original_for_path(self.sid, self.op, str(source)), data
         )
