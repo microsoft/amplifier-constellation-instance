@@ -7,17 +7,50 @@ import json
 import os
 import queue
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 from collections import deque
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from uuid import UUID
 
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def read_generated_png(profile, sid, source):
+    """Read a bounded regular file under the exact official thread output directory."""
+    root = profile / "generated_images" / str(UUID(sid))
+    path = Path(source)
+    limit = 32 * 1024 * 1024
+    if path.parent != root or path.suffix != ".png":
+        raise ValueError("Unexpected image source")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    with ExitStack() as stack:
+        directory = os.open(profile, directory_flags)
+        stack.callback(os.close, directory)
+        for name in ("generated_images", root.name):
+            directory = os.open(name, directory_flags, dir_fd=directory)
+            stack.callback(os.close, directory)
+        fd = os.open(
+            path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory
+        )
+        image = stack.enter_context(os.fdopen(fd, "rb"))
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= limit:
+            raise ValueError("Invalid image file")
+        data = image.read(before.st_size + 1)
+        after = os.fstat(fd)
+        if (
+            len(data) != before.st_size
+            or before.st_ctime_ns != after.st_ctime_ns
+            or not data.startswith(b"\x89PNG\r\n\x1a\n")
+        ):
+            raise ValueError("Invalid or changing PNG")
+    return data
 
 
 class WorkspaceChanged(ValueError):
@@ -43,6 +76,7 @@ class Adapter:
           CREATE TABLE IF NOT EXISTS stops(sid TEXT, op TEXT, reason TEXT, PRIMARY KEY(sid,op));
           CREATE TABLE IF NOT EXISTS callbacks(sid TEXT, turn TEXT, call TEXT, state TEXT, PRIMARY KEY(sid,turn,call));
           CREATE TABLE IF NOT EXISTS accepted_effects(sid TEXT, op TEXT, sha TEXT, PRIMARY KEY(sid,op));
+          CREATE TABLE IF NOT EXISTS image_sources(sid TEXT, op TEXT, path TEXT, sha TEXT, PRIMARY KEY(sid,op,path));
           CREATE TABLE IF NOT EXISTS images(sid TEXT, op TEXT, item TEXT, sha TEXT, bytes BLOB, PRIMARY KEY(sid,item));
         """)
         env = {
@@ -242,17 +276,22 @@ class Adapter:
             raise ValueError("Image disabled")
         if item.get("status") != "completed":
             return
-        root = (self.profile / "generated_images" / str(UUID(sid))).resolve()
-        p = Path(item["savedPath"]).resolve(strict=True)
-        if p.parent != root or p.stat().st_size > 32 * 1024 * 1024:
-            raise ValueError("Unexpected image source")
-        data = p.read_bytes()
+        data = read_generated_png(self.profile, sid, item["savedPath"])
         sha = digest(data)
         with self.db:
             self.db.execute(
                 "insert or ignore into images values(?,?,?,?,?)",
                 (sid, op, item["id"], sha, data),
             )
+            self.db.execute(
+                "insert or ignore into image_sources values(?,?,?,?)",
+                (sid, op, item["savedPath"], sha),
+            )
+            if self.db.execute(
+                "select sha from image_sources where sid=? and op=? and path=?",
+                (sid, op, item["savedPath"]),
+            ).fetchone() != (sha,):
+                raise ValueError("Conflicting generated path")
             self.guard()
             if self.db.execute(
                 "select sha from images where sid=? and item=?", (sid, item["id"])
@@ -470,6 +509,17 @@ class Adapter:
                     "insert or ignore into accepted_effects values(?,?,?)",
                     (sid, op, sha),
                 )
+
+    def original_for_path(self, sid, op, path):
+        """Resolve a host tool's import to the original bytes receipted in this operation."""
+        self.check(sid)
+        row = self.db.execute(
+            "select sha from image_sources where sid=? and op=? and path=?",
+            (sid, op, str(path)),
+        ).fetchone()
+        if not row:
+            raise ValueError("Use the path of a completed image from this turn")
+        return self.original(sid, row[0])
 
     def original(self, sid, sha):
         self.check(sid)
