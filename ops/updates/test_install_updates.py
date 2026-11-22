@@ -58,12 +58,18 @@ class EnrollmentTests(unittest.TestCase):
         registration = state/'registration.json'
         registration.write_text(json.dumps(previous))
         original = registration.read_bytes()
-        for attempt in range(2):
-            with self.subTest(attempt=attempt), self.assertRaisesRegex(ValueError, 'idle component selection'):
-                m.enroll(home, state, [], ROOT/'worker.py')
-            self.assertEqual(registration.read_bytes(), original)
-            self.assertFalse((state/'state.json').exists())
-            self.assertFalse((state/'worker.py').exists())
+        # Exercise registration for each manager without starting a real service.
+        (home/'install.json').write_text(json.dumps({'service': {'name': 'fixture'}}))
+        for system in ('Linux', 'Darwin', 'Windows'):
+            with self.subTest(system=system), patch.object(m.platform, 'system', return_value=system), \
+                    patch.object(m, 'worker_python', return_value=m.sys.executable):
+                for attempt in range(2):
+                    with self.subTest(attempt=attempt), self.assertRaisesRegex(ValueError, 'idle component selection'):
+                        m.enroll(home, state, [], ROOT/'worker.py')
+                    self.assertEqual(registration.read_bytes(), original)
+                    self.assertFalse((state/'state.json').exists())
+                    self.assertFalse((state/'worker.py').exists())
+
  def test_vanilla_engine_is_enrolled_without_modifying_backend(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=pathlib.Path(tmp).resolve();home=root/'home';state=root/'owner';(home/'bin').mkdir(parents=True);(home/'bin/agent-instance').write_text('fixture')
