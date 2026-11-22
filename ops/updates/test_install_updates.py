@@ -39,6 +39,31 @@ class EnrollmentTests(unittest.TestCase):
     m.enroll(home,state,[],ROOT/'worker.py')
    new=json.loads((state/'registration.json').read_text());self.assertEqual(new['service_connections'],old['service_connections']);self.assertEqual(new['participants'],[participant]);self.assertIn('task-helpers',[p['id'] for p in new['components']])
    self.assertEqual(new['when_idle_components'],['task-helpers'])
+ def test_removing_selected_backend_refuses_before_updater_publication(self):
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory).resolve()
+        home, state = root/'agent', root/'owner'
+        (home/'bin').mkdir(parents=True)
+        state.mkdir()
+        instance = home/'bin/agent-instance'
+        runtime = home/'bin/agent-runtime'
+        instance.write_bytes(b'instance')
+        runtime.write_bytes(b'prior runtime')
+        identity = str(uuid.uuid4())
+        (home/'config.json').write_text(json.dumps({'config': {'instance_id': identity, 'backend': None}}))
+        previous = {'schema': 1, 'instance_id': identity, 'home': str(home), 'state': str(state),
+                    'components': [{'id': 'instance', 'kind': 'instance', 'binary': str(instance)},
+                                   {'id': 'runtime', 'kind': 'runtime', 'binary': str(runtime)}],
+                    'services': [], 'when_idle_components': ['runtime']}
+        registration = state/'registration.json'
+        registration.write_text(json.dumps(previous))
+        original = registration.read_bytes()
+        for attempt in range(2):
+            with self.subTest(attempt=attempt), self.assertRaisesRegex(ValueError, 'idle component selection'):
+                m.enroll(home, state, [], ROOT/'worker.py')
+            self.assertEqual(registration.read_bytes(), original)
+            self.assertFalse((state/'state.json').exists())
+            self.assertFalse((state/'worker.py').exists())
  def test_vanilla_engine_is_enrolled_without_modifying_backend(self):
   with tempfile.TemporaryDirectory() as tmp:
    root=pathlib.Path(tmp).resolve();home=root/'home';state=root/'owner';(home/'bin').mkdir(parents=True);(home/'bin/agent-instance').write_text('fixture')

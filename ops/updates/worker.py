@@ -410,6 +410,8 @@ class Worker:
     def save(self,**values):self.state.update(values,updated_at=int(time.time()*1000));write(self.file,self.state)
     def report(self,drain=False,finished=None):
         public=dict(self.state)
+        if 'when_idle_components' in self.c:
+            public['when_idle_components'] = self.c['when_idle_components']
         if public.get('helper_refresh'):
             public['helper_refresh']={'pending':True,'binary_sha256':public['helper_refresh']['binary_sha256']}
         tx=public.get('transaction')
@@ -535,9 +537,13 @@ class Worker:
             raise GitHubRateLimited(self.state['github_retry_at_ms'])
         if self.state.get('github_retry_at_ms'):self.save(github_retry_at_ms=0)
         with self.reporting(),github_metadata_session():
-            if when_idle_components is None:
-                return self.build_plan(policy)
-            return self.build_plan(policy, when_idle_components=when_idle_components)
+            if when_idle_components is not None and when_idle_components != self.when_idle_components(policy):
+                raise ValueError('when_idle_components_changed')
+            discovery = self.build_plan(policy)
+            if when_idle_components is None or not any(part['available'] and part['id'] in when_idle_components
+                                                       for part in discovery['components']):
+                return discovery
+            return self.build_plan(policy, discovery=discovery)
     def defer_github_check(self,error,now):
         if self.state.get('github_retry_at_ms',0)>now:
             self.save(state='check_failed',error=str(GitHubRateLimited(self.state['github_retry_at_ms'])))
@@ -551,46 +557,55 @@ class Worker:
             return self.c.get('when_idle_components')
         return None
 
-    def build_plan(self,policy,*,when_idle_components=None):
-        if when_idle_components is not None and when_idle_components != self.when_idle_components(policy):
-            raise ValueError('when_idle_components_changed')
+    def build_plan(self,policy,*,discovery=None):
         identifier=str(uuid.uuid4());folder=self.root/'plans'/identifier;folder.mkdir(parents=True,mode=0o700)
         self.save(state='checking',error=None);self.report();components=[]
+        offers = {part['id']:part for part in discovery['components']} if discovery else {}
+        when_idle_components = self.when_idle_components(policy) if discovery else None
         for p in self.c['components']:
-            deferred = when_idle_components is not None and p['id'] not in when_idle_components
-            if p.get('provider','github')=='github':
-                if deferred:
-                    part = {'id':p['id'], 'available':False, 'reason':'manual_check_required',
-                            'version':run([p['binary'],'--version']).decode().strip(),
-                            'installed_sha256':digest(p['binary'])}
-                else:
-                    part = candidate(p,policy['channel'],folder)
-                components.append(part)
+            if discovery and p['id'] not in when_idle_components:
+                offer = offers[p['id']]
+                part = dict(offer, available=False, available_at_check=offer['available'],
+                            reason='outside_idle_selection')
+                result = {'available':False, 'version':offer['version'], 'reason':'outside_idle_selection'}
+            elif p.get('provider','github')=='github':
+                part = candidate(p,policy['channel'],folder)
             else:
                 current=json.loads(run(p['commands']['status']).decode())
-                if deferred:
-                    result = {'available':False, 'version':current.get('version',''), 'reason':'manual_check_required'}
-                else:
-                    result = json.loads(self.provider_call(p,'plan',folder).decode())
+                result = json.loads(self.provider_call(p,'plan',folder).decode())
                 part={'id':p['id'],'available':bool(result['available']),'version':str(current.get('version','')),'target_version':str(result.get('version','')),'provider':'command'}
-                if deferred:
-                    part['reason'] = 'manual_check_required'
-                if p.get('protocol')==2:
-                    file=folder/(p['id']+'.provider.json')
-                    write(file,{'id':identifier,'component':p['id'],'plan':result})
-                    part['provider_plan_sha256']=digest(file)
-                components.append(part)
+            if discovery and p['id'] in when_idle_components:
+                # Command providers own their opaque staging paths and receipts for each
+                # plan ID. Compare the public offer before sealing the new execution.
+                expected = dict(offers[p['id']])
+                expected.pop('provider_plan_sha256', None)
+                if part != expected or (part['available'] and not part.get('target_version')):
+                    raise ValueError('scheduled_component_offer_changed')
+            if p.get('provider')=='command' and p.get('protocol')==2:
+                file=folder/(p['id']+'.provider.json')
+                write(file,{'id':identifier,'component':p['id'],'plan':result})
+                part['provider_plan_sha256']=digest(file)
+            components.append(part)
         plan={'id':identifier,'components':components,'policy_revision':policy['revision'],'channel':policy['channel'],'created_at':int(time.time()*1000)}
-        if when_idle_components is not None:
+        if discovery:
             plan['when_idle_components'] = list(when_idle_components)
+            plan['discovery_plan_id'] = discovery['id']
+            plan['discovery_plan_sha256'] = digest(self.root/'plans'/discovery['id']/'plan.json')
         plan['restart_scope']=self.restart_scope(plan)
         plan['participants']=self.selected_participants(plan)
         plan['registration_sha256']=self.registration_digest()
         write(folder/'plan.json',plan)
-        self.save(state='available' if any(p['available'] for p in components) else 'up_to_date',plan_id=identifier,components=components,last_check=int(time.time()*1000),github_retry_at_ms=0,github_rate_limit_count=0)
+        provenance = {}
+        if 'when_idle_components' in self.c:
+            provenance['discovery_plan_id'] = discovery['id'] if discovery else identifier
+        self.save(state='available' if any(p['available'] for p in components) else 'up_to_date',plan_id=identifier,components=components,last_check=int(time.time()*1000),github_retry_at_ms=0,github_rate_limit_count=0,**provenance)
         self.prune_plans();self.report();return plan
     def prune_plans(self):
-        keep={self.state.get('plan_id'),self.state.get('rollback_plan_id')}
+        keep={self.state.get('plan_id'),self.state.get('rollback_plan_id'),self.state.get('discovery_plan_id')}
+        if self.state.get('rollback_plan_id') and 'when_idle_components' in self.c:
+            applied = self.root/'plans'/self.state['rollback_plan_id']/'plan.json'
+            if applied.is_file():
+                keep.add(read(applied).get('discovery_plan_id'))
         folders=[]
         for folder in (self.root/'plans').iterdir():
             try:uuid.UUID(folder.name)
@@ -777,13 +792,23 @@ class Worker:
     def apply(self,plan,policy,agent=False,rollback=False,scheduled=False):
         with self.reporting():return self.transaction_apply(plan,policy,agent,rollback,scheduled)
     def transaction_apply(self,plan,policy,agent=False,rollback=False,scheduled=False):
+        if rollback and 'when_idle_components' in self.c and 'previous' not in plan:
+            raise ValueError('plan_has_no_installed_version_to_rollback')
+        if not scheduled and not rollback and 'when_idle_components' in self.c:
+            if plan['id'] != self.state.get('plan_id') or 'when_idle_components' in plan:
+                raise ValueError('fresh_full_check_required_before_apply')
         if scheduled and ('when_idle_components' in plan or policy['install'] == 'on_request'):
             selected = self.when_idle_components(policy)
             if (not selected or plan.get('when_idle_components') != selected
+                    or plan['id'] != self.state.get('plan_id')
+                    or not plan.get('discovery_plan_id') or plan['discovery_plan_id'] != self.state.get('discovery_plan_id')
                     or plan.get('policy_revision') != policy['revision']
                     or plan.get('registration_sha256') != self.registration_digest()
                     or any(p['available'] and p['id'] not in selected for p in plan['components'])):
                 raise ValueError('invalid_scheduled_component_plan')
+            discovery_path = self.root/'plans'/plan['discovery_plan_id']/'plan.json'
+            if digest(discovery_path) != plan.get('discovery_plan_sha256'):
+                raise ValueError('scheduled_discovery_changed')
         if not rollback and not any(p['available'] for p in plan['components']):self.save(state='up_to_date');return
         if plan.get('created_at',0)<self.state.get('enrolled_at',0):raise ValueError('plan_predates_enrollment')
         if plan.get('registration_sha256',self.registration_digest())!=self.registration_digest():raise ValueError('update_enrollment_changed')

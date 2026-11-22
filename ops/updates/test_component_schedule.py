@@ -61,6 +61,9 @@ class ComponentScheduleTests(unittest.TestCase):
         return json.dumps({'version': self.game.read_text()}).encode()
 
     def provider(self, component, action, folder):
+        if component['id'] == 'other':
+            self.assertEqual(action, 'plan')
+            return b'{"available": true, "version": "manual-only-upgrade"}'
         self.assertEqual(component['id'], 'game')
         self.calls.append(action)
         if action == 'plan':
@@ -95,9 +98,20 @@ class ComponentScheduleTests(unittest.TestCase):
         self.assertEqual(self.worker.state['state'], 'succeeded')
         plan = w.read(self.state/'plans'/self.worker.state['plan_id']/'plan.json')
         self.assertEqual(plan['when_idle_components'], ['game'])
-        self.assertEqual(plan['components'][0]['reason'], 'manual_check_required')
+        self.assertEqual(plan['components'][0]['reason'], 'outside_idle_selection')
+        self.assertTrue(plan['components'][0]['available_at_check'])
         self.assertEqual(plan['restart_scope'], self.scope)
-        self.assertEqual(self.calls[:3], ['plan', 'prepare', 'prepare'])
+        self.assertEqual(self.calls[:4], ['plan', 'plan', 'prepare', 'prepare'])
+        discovery = w.read(self.state/'plans'/plan['discovery_plan_id']/'plan.json')
+        self.assertNotEqual(discovery['id'], plan['id'])
+        self.assertEqual([part['id'] for part in discovery['components'] if part['available']],
+                         ['instance', 'game'])
+        calls = list(self.calls)
+        with self.assertRaises(ValueError):
+            self.worker.apply(discovery, self.worker.policy)
+        with self.assertRaisesRegex(ValueError, 'no_installed_version'):
+            self.worker.apply(discovery, self.worker.policy, rollback=True)
+        self.assertEqual(self.calls, calls)
         self.assertEqual(self.game.read_text(), 'next')
         self.worker.apply(plan, self.worker.policy, rollback=True)
         self.assertEqual(self.worker.state['state'], 'rolled_back')
@@ -105,7 +119,7 @@ class ComponentScheduleTests(unittest.TestCase):
         self.assertEqual(self.binary.read_bytes(), b'old-binary')
         self.assertEqual(self.binary.stat().st_mtime_ns, self.instance_stat.st_mtime_ns)
         self.assertEqual(self.session.read_bytes(), b'original session and paused work')
-        self.candidate_lookup.assert_not_called()
+        self.assertEqual(self.candidate_lookup.call_count, 1)
 
     def test_manual_check_stays_full_and_cannot_be_auto_applied(self):
         self.request = {'pending': True, 'id': str(uuid.uuid4()), 'actor': 'owner',
@@ -132,7 +146,7 @@ class ComponentScheduleTests(unittest.TestCase):
         self.assertEqual(self.game.read_text(), 'next')
         self.assertEqual(self.binary.read_bytes(), b'new-binary')
 
-    def test_deferred_command_provider_only_reports_status(self):
+    def test_deferred_command_provider_is_discovered_but_never_installed(self):
         other = copy.deepcopy(self.registration['components'][1])
         other['id'] = 'other'
         self.worker.c['components'].append(other)
@@ -142,13 +156,30 @@ class ComponentScheduleTests(unittest.TestCase):
         plan = w.read(folder/'plan.json')
         deferred = next(p for p in plan['components'] if p['id'] == 'other')
         self.assertFalse(deferred['available'])
-        self.assertEqual(deferred['reason'], 'manual_check_required')
+        self.assertEqual(deferred['reason'], 'outside_idle_selection')
+        self.assertTrue(deferred['available_at_check'])
         self.assertEqual(w.digest(folder/'other.provider.json'), deferred['provider_plan_sha256'])
         self.assertEqual(plan['provider_attempts'], ['game'])
 
+    def test_hourly_check_keeps_unrelated_offer_available_for_explicit_apply(self):
+        self.game.write_text('next')
+        self.worker.tick()
+        self.assertEqual(self.worker.state['state'], 'available')
+        plan = w.read(self.state/'plans'/self.worker.state['plan_id']/'plan.json')
+        self.assertTrue(plan['components'][0]['available'])
+        self.assertFalse(plan['components'][1]['available'])
+        self.assertEqual(self.calls, ['plan'])
+        self.worker.tick()
+        self.assertEqual(self.binary.read_bytes(), b'old-binary')
+        self.assertEqual(self.worker.state['plan_id'], plan['id'])
+        self.assertEqual(self.calls, ['plan'])
+        self.worker.apply(plan, self.worker.policy)
+        self.assertEqual(self.binary.read_bytes(), b'new-binary')
+        self.assertEqual(self.game.read_text(), 'next')
+
     def test_changed_policy_or_expanded_plan_refuses_before_draining(self):
         plan = self.worker.plan(self.worker.policy, when_idle_components=['game'])
-        for edit in ('full', 'revision', 'unselected_available', 'wrong_registration'):
+        for edit in ('full', 'revision', 'unselected_available', 'discovery_digest', 'wrong_registration'):
             with self.subTest(edit=edit):
                 altered = copy.deepcopy(plan)
                 if edit == 'full':
@@ -157,18 +188,20 @@ class ComponentScheduleTests(unittest.TestCase):
                     altered['policy_revision'] -= 1
                 elif edit == 'unselected_available':
                     altered['components'][0]['available'] = True
+                elif edit == 'discovery_digest':
+                    altered['discovery_plan_sha256'] = 'a' * 64
                 else:
                     altered['registration_sha256'] = 'a' * 64
                 with self.assertRaises(ValueError):
                     self.worker.apply(altered, self.worker.policy, scheduled=True)
-        self.assertEqual(self.calls, ['plan'])
+        self.assertEqual(self.calls, ['plan', 'plan'])
 
     def test_disabling_periodic_checks_defers_a_prepared_scoped_install(self):
         self.worker.plan(self.worker.policy, when_idle_components=['game'])
         self.worker.policy['check_minutes'] = 0
         self.worker.tick()
         self.assertEqual(self.game.read_text(), 'first')
-        self.assertEqual(self.calls, ['plan'])
+        self.assertEqual(self.calls, ['plan', 'plan'])
 
     def test_only_distinct_registered_component_ids_can_be_enrolled(self):
         for ids in ([], True, 'game', ['game', 'game'], ['missing'], [None]):
