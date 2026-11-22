@@ -2,6 +2,8 @@
 
 This optional external ACP engine connects a local, single-owner Instance to an installed official Codex app server. Codex owns its managed ChatGPT subscription login and inference. The adapter stores chat bindings, operation receipts, and original image bytes. Instance continues to select and launch the configured engine. The prototype has no installer or default route.
 
+The optional release asset is `codex-app-server-adapter.pyz`. Verify its companion SHA-256 and invoke `python3 /path/to/codex-app-server-adapter.pyz` with the same arguments as the source command below.
+
 Use Python 3.10 or later on a Unix host with the full Codex package. The qualification used Codex 0.171.0 and its experimental account-session protocol. Give the adapter a dedicated Codex profile with file-backed sign-in, an owner-only state directory, and absolute paths in the Instance external backend configuration.
 
 ```sh
