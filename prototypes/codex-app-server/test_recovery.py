@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock
 from uuid import uuid4
 
-from adapter import Adapter, TurnCancelled, digest
+from adapter import Adapter, TurnCancelled, WorkspaceChanged, digest
 
 
 class RecoveryTests(unittest.TestCase):
@@ -184,3 +184,59 @@ class RecoveryTests(unittest.TestCase):
                 a.prompt(self.sid, self.op, "revise", self.fail)
             with self.assertRaisesRegex(ValueError, "outstanding"):
                 a.prompt(self.sid, str(uuid4()), "continue", self.fail)
+
+    def test_workspace_change_before_write_is_definitely_unsent(self):
+        a = self.adapter
+        a.db.execute("delete from operations")
+        a.seq = 0
+        a.cancel = threading.Event()
+        a.dispatch_lock = threading.Lock()
+        a.rpc = Adapter.rpc.__get__(a)
+        a.server = Mock()
+        a.guard = Mock(side_effect=WorkspaceChanged("Managed login changed"))
+        with self.assertRaisesRegex(WorkspaceChanged, "Managed login changed"):
+            a.prompt(self.sid, self.op, "revise", self.fail)
+        a.server.stdin.write.assert_not_called()
+        a.guard = lambda: None
+        with self.assertRaisesRegex(ValueError, "before this turn was sent"):
+            a.prompt(self.sid, self.op, "revise", self.fail)
+        self.assert_next_instruction_succeeds()
+
+    def test_workspace_change_after_write_remains_uncertain(self):
+        a = self.adapter
+        a.db.execute("delete from operations")
+        a.seq = 0
+        a.cancel = threading.Event()
+        a.dispatch_lock = threading.Lock()
+        a.rpc = Adapter.rpc.__get__(a)
+        a.send = Mock()
+        a.wire = Mock(side_effect=WorkspaceChanged("Managed login changed"))
+        with self.assertRaises(WorkspaceChanged):
+            a.prompt(self.sid, self.op, "revise", self.fail)
+        a.send.assert_called_once()
+        with self.assertRaisesRegex(ValueError, "outstanding"):
+            a.prompt(self.sid, str(uuid4()), "continue", self.fail)
+
+    def test_recover_confirmed_text_only_cancellation(self):
+        a = self.adapter
+        a.rpc = Mock(
+            return_value={
+                "thread": {
+                    "turns": [
+                        {
+                            "id": self.turn,
+                            "status": "interrupted",
+                            "itemsView": "full",
+                            "items": [{"type": "userMessage"}],
+                        }
+                    ]
+                }
+            }
+        )
+        for _ in range(2):
+            with self.assertRaises(TurnCancelled):
+                a.prompt(self.sid, self.op, "revise", self.fail)
+        a.rpc.assert_called_once_with(
+            "thread/read", {"threadId": self.sid, "includeTurns": True}
+        )
+        self.assert_next_instruction_succeeds()

@@ -64,6 +64,10 @@ class TurnCancelled(ValueError):
     pass
 
 
+class WorkspaceChangedBeforeDispatch(WorkspaceChanged):
+    pass
+
+
 class CancelledBeforeDispatch(TurnCancelled):
     pass
 
@@ -167,7 +171,12 @@ class Adapter:
             self.cancel.set()
 
     def send(self, event):
-        self.guard()
+        try:
+            self.guard()
+        except WorkspaceChanged as exc:
+            if event.get("method") == "turn/start":
+                raise WorkspaceChangedBeforeDispatch(str(exc)) from exc
+            raise
         self.server.stdin.write(json.dumps(event) + "\n")
         self.server.stdin.flush()
 
@@ -359,10 +368,13 @@ class Adapter:
                 "insert or ignore into stops values(?,?,?)", (sid, op, reason)
             )
 
-    def check_failed_turn(self, sid, op, turn):
+    def check_text_stop(self, sid, op, turn):
         # A full authoritative item list is needed to distinguish text-only
         # failure from a potentially executed hosted or local tool.
-        if turn.get("status") != "failed" or turn.get("itemsView") != "full":
+        if (
+            turn.get("status") not in ("failed", "interrupted")
+            or turn.get("itemsView") != "full"
+        ):
             return
         if not isinstance(turn.get("items"), list) or any(
             item.get("type") not in TEXT_ITEMS for item in turn["items"]
@@ -376,6 +388,9 @@ class Adapter:
             "select 1 from callbacks where sid=? and turn=? limit 1", (sid, turn["id"])
         ).fetchone() or self.artifacts(sid, op):
             return
+        if turn["status"] == "interrupted":
+            self.record_stop(sid, op, "cancelled")
+            raise TurnCancelled("Codex confirmed cancellation")
         reason = "Codex confirmed the text turn failed without a tool action"
         self.record_stop(sid, op, reason)
         raise ValueError(reason)
@@ -420,7 +435,7 @@ class Adapter:
                 # Query the saved Codex turn. A known effect is never a reason to resend.
                 turn = self.saved_turn(sid, previous[1])
                 if turn:
-                    self.check_failed_turn(sid, op, turn)
+                    self.check_text_stop(sid, op, turn)
                     for item in turn.get("items", []):
                         if item["type"] == "imageGeneration":
                             self.save_image(sid, op, item)
@@ -452,6 +467,11 @@ class Adapter:
                     )["turn"]["id"]
                 except CancelledBeforeDispatch:
                     self.record_stop(sid, op, "cancelled")
+                    raise
+                except WorkspaceChangedBeforeDispatch:
+                    self.record_stop(
+                        sid, op, "The login changed before this turn was sent"
+                    )
                     raise
                 except RejectedRequest as exc:
                     reason = "Codex rejected the turn before starting it: " + str(exc)
@@ -567,7 +587,7 @@ class Adapter:
                                 if p["turn"]["status"] == "failed":
                                     failed = self.saved_turn(sid, t)
                                     if failed:
-                                        self.check_failed_turn(sid, op, failed)
+                                        self.check_text_stop(sid, op, failed)
                                 if p["turn"]["status"] != "completed":
                                     raise ValueError(
                                         "Turn outcome uncertain; reconcile before retrying."
