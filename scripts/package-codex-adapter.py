@@ -18,7 +18,7 @@ def package(destination):
             path = (root if name == "LICENSE" else source) / name
             bundle.writestr(zipfile.ZipInfo(name), path.read_bytes())
         bundle.writestr(zipfile.ZipInfo("__main__.py"),
-                        'import runpy\nrunpy.run_module("adapter", run_name="__main__")\n')
+                        'import runpy, sys\nmodule = "artifact" if sys.argv[1:2] == ["artifact"] else "adapter"\nif module == "artifact": del sys.argv[1]\nrunpy.run_module(module, run_name="__main__")\n')
     subprocess.run([sys.executable, "-I", str(archive), "--help"], check=True, stdout=subprocess.DEVNULL)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_suffix(".pyz.sha256").write_text(f"{digest}  {archive.name}\n")

@@ -13,6 +13,7 @@ def main():
     p = argparse.ArgumentParser()
     for arg in ("binary", "profile", "directory"):
         p.add_argument("--" + arg, type=Path, required=True)
+    p.add_argument("--workspace-write", action="store_true")
     p.add_argument("--model", default="gpt-6.2-sol")
     p.add_argument("--session", required=True)
     p.add_argument("--sha256", required=True)
@@ -21,7 +22,14 @@ def main():
     cmd.add_argument("--preview-to", type=Path)
     cmd.add_argument("--accept-interrupted-operation", metavar="OPERATION_ID")
     args = p.parse_args()
-    a = Adapter(args.binary, args.profile, args.directory, True, args.model)
+    a = Adapter(
+        args.binary,
+        args.profile,
+        args.directory,
+        True,
+        args.model,
+        workspace_write=args.workspace_write,
+    )
     try:
         if args.export_to:
             data = a.original(args.session, args.sha256)

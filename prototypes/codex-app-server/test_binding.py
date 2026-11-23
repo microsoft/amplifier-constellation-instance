@@ -58,3 +58,20 @@ class BindingTest(unittest.TestCase):
         self.workspace = None
         with self.assertRaisesRegex(ValueError, "Cannot identify"):
             self.adapter.check("chat")
+
+    def test_resume_refuses_substituted_model_before_loading_history(self):
+        from contextlib import nullcontext
+
+        self.adapter.lease = lambda sid: nullcontext()
+        self.adapter.loaded = "chat"
+
+        def provider(method, params):
+            if method == "thread/resume":
+                self.assertEqual(params["model"], "test")
+                return {"model": "other", "thread": {"id": "chat", "turns": []}}
+            return self.provider(method, params)
+
+        self.adapter.rpc = provider
+        with self.assertRaisesRegex(ValueError, "saved model"):
+            self.adapter.resume("chat", "/work")
+        self.assertIsNone(self.adapter.loaded)

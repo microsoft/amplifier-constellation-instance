@@ -53,12 +53,23 @@ def read_generated_png(profile, sid, source):
     return data
 
 
+TEXT_ITEMS = {"userMessage", "agentMessage", "reasoning", "plan"}
+
+
 class WorkspaceChanged(ValueError):
     pass
 
 
 class TurnCancelled(ValueError):
     pass
+
+
+class CancelledBeforeDispatch(TurnCancelled):
+    pass
+
+
+class RejectedRequest(ValueError):
+    """The server rejected the JSON-RPC request before starting it."""
 
 
 class Adapter:
@@ -74,6 +85,7 @@ class Adapter:
           CREATE TABLE IF NOT EXISTS sessions(sid TEXT PRIMARY KEY, binding TEXT, cwd TEXT);
           CREATE TABLE IF NOT EXISTS operations(sid TEXT, op TEXT, prompt_hash TEXT, turn TEXT, done TEXT, PRIMARY KEY(sid,op));
           CREATE TABLE IF NOT EXISTS stops(sid TEXT, op TEXT, reason TEXT, PRIMARY KEY(sid,op));
+          CREATE TABLE IF NOT EXISTS turn_effects(sid TEXT, turn TEXT, PRIMARY KEY(sid,turn));
           CREATE TABLE IF NOT EXISTS callbacks(sid TEXT, turn TEXT, call TEXT, state TEXT, PRIMARY KEY(sid,turn,call));
           CREATE TABLE IF NOT EXISTS accepted_effects(sid TEXT, op TEXT, sha TEXT, PRIMARY KEY(sid,op));
           CREATE TABLE IF NOT EXISTS image_sources(sid TEXT, op TEXT, path TEXT, sha TEXT, PRIMARY KEY(sid,op,path));
@@ -90,6 +102,7 @@ class Adapter:
         self.incoming = queue.Queue(maxsize=128)
         self.deferred = deque()
         self.cancel = threading.Event()
+        self.dispatch_lock = threading.Lock()
         self.host = None
         args = [str(binary), "app-server", "-c", 'cli_auth_credentials_store="file"']
         for feature in ("image_generation", "view_image"):
@@ -124,6 +137,8 @@ class Adapter:
         except subprocess.TimeoutExpired:
             self.server.kill()
             self.server.wait()
+        self.server.stdin.close()
+        self.server.stdout.close()
         self.db.close()
 
     def auth_generation(self):
@@ -146,6 +161,10 @@ class Adapter:
             raise WorkspaceChanged(
                 "Managed login changed. Reconnect and recheck the saved workspace."
             )
+
+    def request_cancel(self):
+        with self.dispatch_lock:
+            self.cancel.set()
 
     def send(self, event):
         self.guard()
@@ -177,12 +196,22 @@ class Adapter:
 
     def rpc(self, method, params):
         self.seq += 1
-        self.send({"id": self.seq, "method": method, "params": params})
+        packet = {"id": self.seq, "method": method, "params": params}
+        if method == "turn/start":
+            with self.dispatch_lock:
+                if self.cancel.is_set():
+                    raise CancelledBeforeDispatch("Cancelled before starting the turn")
+                self.send(packet)
+        else:
+            self.send(packet)
         while True:
             msg = self.wire()
             if "method" not in msg and msg.get("id") == self.seq:
                 if "error" in msg:
-                    raise ValueError(msg["error"]["message"])
+                    error = msg["error"]
+                    if error.get("code") in (-32600, -32601, -32602):
+                        raise RejectedRequest(error["message"])
+                    raise ValueError(error["message"])
                 return msg["result"]
             if "method" in msg:
                 self.deferred.append(msg)
@@ -245,7 +274,10 @@ class Adapter:
         }
         if self.host:
             args["dynamicTools"] = self.host.definitions()
-        sid = self.rpc("thread/start", args)["thread"]["id"]
+        result = self.rpc("thread/start", args)
+        if result.get("model") != self.model:
+            raise ValueError("Codex did not select the requested model")
+        sid = result["thread"]["id"]
         with self.db:
             self.db.execute("insert into sessions values(?,?,?)", (sid, binding, cwd))
         self.loaded = sid
@@ -255,17 +287,22 @@ class Adapter:
         if self.check(sid) != cwd:
             raise ValueError("Workspace changed.")
         with self.lease(sid):
-            t = self.rpc(
+            self.loaded = None
+            result = self.rpc(
                 "thread/resume",
                 {
                     "threadId": sid,
+                    "model": self.model,
                     "cwd": cwd,
                     "approvalPolicy": "never",
                     "sandbox": "workspace-write"
                     if self.workspace_write
                     else "read-only",
                 },
-            )["thread"]
+            )
+            if result.get("model") != self.model:
+                raise ValueError("Codex did not resume the saved model")
+            t = result["thread"]
             if t["id"] != sid:
                 raise ValueError("Thread identity mismatch")
             self.loaded = sid
@@ -316,6 +353,39 @@ class Adapter:
             )
         ]
 
+    def record_stop(self, sid, op, reason):
+        with self.db:
+            self.db.execute(
+                "insert or ignore into stops values(?,?,?)", (sid, op, reason)
+            )
+
+    def check_failed_turn(self, sid, op, turn):
+        # A full authoritative item list is needed to distinguish text-only
+        # failure from a potentially executed hosted or local tool.
+        if turn.get("status") != "failed" or turn.get("itemsView") != "full":
+            return
+        if not isinstance(turn.get("items"), list) or any(
+            item.get("type") not in TEXT_ITEMS for item in turn["items"]
+        ):
+            return
+        if self.db.execute(
+            "select 1 from turn_effects where sid=? and turn=?", (sid, turn["id"])
+        ).fetchone():
+            return
+        if self.db.execute(
+            "select 1 from callbacks where sid=? and turn=? limit 1", (sid, turn["id"])
+        ).fetchone() or self.artifacts(sid, op):
+            return
+        reason = "Codex confirmed the text turn failed without a tool action"
+        self.record_stop(sid, op, reason)
+        raise ValueError(reason)
+
+    def saved_turn(self, sid, turn_id):
+        thread = self.rpc("thread/read", {"threadId": sid, "includeTurns": True})[
+            "thread"
+        ]
+        return next((turn for turn in thread["turns"] if turn["id"] == turn_id), None)
+
     def prompt(self, sid, op, text, emit):
         op = str(UUID(op))
         with self.lease(sid):
@@ -330,10 +400,13 @@ class Adapter:
             if previous:
                 if previous[0] != h:
                     raise ValueError("Operation ID reused with a different prompt")
-                if self.db.execute(
-                    "select 1 from stops where sid=? and op=?", (sid, op)
-                ).fetchone():
-                    raise TurnCancelled("Codex confirmed cancellation")
+                stopped = self.db.execute(
+                    "select reason from stops where sid=? and op=?", (sid, op)
+                ).fetchone()
+                if stopped:
+                    if stopped[0] == "cancelled":
+                        raise TurnCancelled("Cancelled")
+                    raise ValueError(stopped[0])
                 if previous[2] is not None:
                     return previous[2], self.artifacts(sid, op)
                 accepted = self.db.execute(
@@ -345,13 +418,9 @@ class Adapter:
                         + accepted[0]
                     )
                 # Query the saved Codex turn. A known effect is never a reason to resend.
-                thread = self.rpc(
-                    "thread/read", {"threadId": sid, "includeTurns": True}
-                )["thread"]
-                turn = next(
-                    (t for t in thread["turns"] if t["id"] == previous[1]), None
-                )
+                turn = self.saved_turn(sid, previous[1])
                 if turn:
+                    self.check_failed_turn(sid, op, turn)
                     for item in turn.get("items", []):
                         if item["type"] == "imageGeneration":
                             self.save_image(sid, op, item)
@@ -376,10 +445,18 @@ class Adapter:
                     self.db.execute(
                         "insert into operations values(?,?,?,null,null)", (sid, op, h)
                     )
-                t = self.rpc(
-                    "turn/start",
-                    {"threadId": sid, "input": [{"type": "text", "text": text}]},
-                )["turn"]["id"]
+                try:
+                    t = self.rpc(
+                        "turn/start",
+                        {"threadId": sid, "input": [{"type": "text", "text": text}]},
+                    )["turn"]["id"]
+                except CancelledBeforeDispatch:
+                    self.record_stop(sid, op, "cancelled")
+                    raise
+                except RejectedRequest as exc:
+                    reason = "Codex rejected the turn before starting it: " + str(exc)
+                    self.record_stop(sid, op, reason)
+                    raise ValueError(reason) from exc
                 with self.db:
                     self.db.execute(
                         "update operations set turn=? where sid=? and op=?",
@@ -455,6 +532,16 @@ class Adapter:
                             if p.get("threadId") != sid:
                                 continue
                             if (
+                                m.get("method") in ("item/started", "item/completed")
+                                and p.get("turnId") == t
+                                and p["item"].get("type") not in TEXT_ITEMS
+                            ):
+                                with self.db:
+                                    self.db.execute(
+                                        "insert or ignore into turn_effects values(?,?)",
+                                        (sid, t),
+                                    )
+                            if (
                                 m.get("method") == "item/completed"
                                 and p.get("turnId") == t
                             ):
@@ -469,6 +556,7 @@ class Adapter:
                                 m.get("method") == "turn/completed"
                                 and p["turn"]["id"] == t
                             ):
+                                self.interruptible = False
                                 if p["turn"]["status"] == "interrupted":
                                     with self.db:
                                         self.db.execute(
@@ -476,6 +564,10 @@ class Adapter:
                                             (sid, op),
                                         )
                                     raise TurnCancelled("Codex confirmed cancellation")
+                                if p["turn"]["status"] == "failed":
+                                    failed = self.saved_turn(sid, t)
+                                    if failed:
+                                        self.check_failed_turn(sid, op, failed)
                                 if p["turn"]["status"] != "completed":
                                     raise ValueError(
                                         "Turn outcome uncertain; reconcile before retrying."
@@ -572,7 +664,7 @@ def serve(a):
                             active[0] is not None
                             and message.get("params", {}).get("sessionId") == active[0]
                         ):
-                            a.cancel.set()
+                            a.request_cancel()
                 else:
                     with state_lock:
                         if active[0] is not None:
@@ -592,7 +684,7 @@ def serve(a):
                             active[0] = message.get("params", {}).get("sessionId")
                     inbox.put(message)
         finally:
-            a.cancel.set()
+            a.request_cancel()
             inbox.put(None)
 
     threading.Thread(target=reader, daemon=True).start()
