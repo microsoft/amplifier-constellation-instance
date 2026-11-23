@@ -150,6 +150,13 @@ def enroll_owned(home,state,connector_homes,worker,w,release_singleton,container
             by_id[participant['id']]=participant
         registration['participants']=list(by_id.values())
     if (previous or {}).get('service_connections') is not None:registration['service_connections']=previous['service_connections']
+    if previous and 'when_idle_components' in previous:
+        if getattr(w,'WHEN_IDLE_COMPONENTS_VERSION',0) < 1:
+            raise ValueError('Update helper cannot preserve component-specific idle installs')
+        selected = previous['when_idle_components']
+        if not set(selected).issubset(p['id'] for p in components):
+            raise ValueError('Update the idle component selection before removing an enrolled component')
+        registration['when_idle_components'] = selected
     target=state/'worker.py'
     helpers={Path('worker.py'):worker.read_bytes()}
     for name in ('engine_provider.py','container_provider.py','incus_provider.py','provision-backend.py'):

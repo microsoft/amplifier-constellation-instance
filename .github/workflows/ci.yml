@@ -28,6 +28,8 @@ jobs:
       - name: Check installation updater recovery
         run: |
           python3 ops/updates/test_worker.py
+          python3 ops/updates/test_component_schedule.py
+          python3 ops/updates/test_scoped_helper_refresh.py
           python3 ops/updates/test_launchd_stop.py
           python3 ops/updates/test_github_metadata.py
           python3 ops/updates/test_container_provider.py
@@ -153,6 +155,8 @@ jobs:
       - name: Check native installer and runtime boundaries
         run: |
           python ops/updates/test_worker.py
+          python ops/updates/test_component_schedule.py
+          python ops/updates/test_scoped_helper_refresh.py
           python ops/updates/test_launchd_stop.py
           python ops/updates/test_launchd_stop_live.py
           python ops/updates/test_github_metadata.py

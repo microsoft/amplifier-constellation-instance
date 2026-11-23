@@ -26,7 +26,7 @@ try{
  browser=await chromium.launch({headless:true,args:['--no-sandbox']});context=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:1400,height:1000}});
  await context.addCookies([{name:'ai_'+doc.config.instance_id.replaceAll('-',''),value:'native-oauth-fixture',url:origin,secure:true,httpOnly:true,sameSite:'Strict'}]);
  page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.goto(origin);
- await call('POST','updates/report',{status:{state:'available',plan_id:'11111111-1111-4111-8111-111111111111',components:[{id:'runtime',version:'0.8.0',target_version:'0.9.0',available:true}]}});
+ await call('POST','updates/report',{status:{state:'available',when_idle_components:['minecraft'],plan_id:'11111111-1111-4111-8111-111111111111',components:[{id:'runtime',version:'0.8.0',target_version:'0.9.0',available:true},{id:'instance',version:'0.2.0',target_version:'0.3.0',available:false,available_at_check:true,reason:'outside_idle_selection'}]}});
  await page.locator('[data-control="nav.updates"]').click();
  await page.evaluate(()=>window.agentInstanceControl.perform('refresh'));
  await page.getByRole('heading',{name:'Keep this agent up to date.'}).waitFor();
@@ -36,6 +36,9 @@ try{
  await page.evaluate(()=>window.agentInstanceControl.perform('updates.save'));
  let value=await call('GET','updates');assert.equal(value.policy.agent_initiated,true);assert.equal(value.policy.check_minutes,15);
  pass('Dashboard and programmatic actions save one global authorization switch and schedule');
+ await page.getByText('Minecraft will install automatically when idle.').waitFor();
+ await page.getByRole('cell',{name:'0.3.0 (on request)'}).waitFor();
+ pass('Shows the enrolled idle component and the available manual update');
  await page.evaluate(()=>window.agentInstanceControl.perform('updates.check'));
  value=await call('GET','updates');assert.equal(value.request.action,'check');assert.equal(value.request.pending,true);
  await call('POST','updates/report',{status:{state:'up_to_date'},finished_request:value.request.id});
